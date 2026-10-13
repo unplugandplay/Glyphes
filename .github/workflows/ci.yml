@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.x'
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.4'
+          bundler-cache: false
+
+      - name: Install the ffi gem
+        run: gem install ffi --no-document
+
+      # The shared library is a build artifact (gitignored); CI builds it.
+      - name: Build the engine
+        run: nimble build
+
+      - name: Nim unit tests
+        run: nimble test
+
+      - name: Ruby suite
+        run: nimble gemtest
+
+      - name: TCK subset
+        run: nimble tck
+
+      # The heavy gates (crash, 10^6-flip sweep, 10^6-row import) run
+      # locally via `nimble gate`; they are minutes-to-hours long and
+      # timing-sensitive, which is the wrong shape for a shared runner.

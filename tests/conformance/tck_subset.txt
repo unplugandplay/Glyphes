@@ -1,0 +1,199 @@
+# openCypher TCK subset — the committed denominator for gate C1 (docs/TESTING.md §5).
+#
+# Format, tab-separated:
+#   id <TAB> in|out <TAB> query <TAB> expectation
+#
+# A `query` column may end with ` -- {json}` to supply parameters for that
+# row; everything before the separator is the query. An optional fifth
+# column says where the row runs: `fixture` (the default, the read-only
+# committed graph) or `write:<verify-sql>` — run the write in its own
+# transaction against a disposable in-memory graph seeded with two
+# `:Seed {v: 1}` and `:Seed {v: 2}` nodes, commit, then run the verifying
+# query and compare *that* against the expectation. Write rows cannot use
+# the fixture (the denominator would depend on how many times the suite has
+# run), and they verify in a later statement because pin C4 says a query's
+# reads never see its own writes.
+#
+# `in`  — in the 0.1 contract. `expectation` is the result as a JSON array of
+#          rows, each row a JSON array of column values. Run against
+#          tests/fixtures/social.glyph (six Person nodes, one Company, KNOWS
+#          and WORKS_AT edges; Frank has no age).
+# `out` — out of contract. `expectation` is the substring the refusal message
+#          must contain. Out-of-contract rows are NEVER counted as passes
+#          (TESTING.md rule 2); they are the implementation queue (rule 3).
+#
+# This subset may only shrink by explicit decision with a recorded reason
+# (TESTING.md rule 4). C1 requires >= 95% of the `in` rows to pass.
+
+# ---- literals, arithmetic, precedence (C8: i64, map/list round-trip) ----
+lit-int	in	RETURN 1 AS x	[[1]]
+lit-float	in	RETURN 1.5 AS x	[[1.5]]
+lit-string	in	RETURN 'a' AS x	[["a"]]
+lit-bool	in	RETURN true AS x	[[true]]
+lit-null	in	RETURN null AS x	[[null]]
+fn-range	in	RETURN range(1, 5) AS r	[[[1,2,3,4,5]]]
+fn-range-step	in	RETURN range(1, 10, 3) AS r	[[[1,4,7,10]]]
+fn-range-negative	in	RETURN range(3, 1) AS r	[[[3,2,1]]]
+fn-range-desc-step	in	RETURN range(5, 1, -2) AS r	[[[5,3,1]]]
+lit-int-add	in	RETURN 2 + 3 AS x	[[5]]
+lit-int-sub	in	RETURN 7 - 2 AS x	[[5]]
+lit-int-mul	in	RETURN 3 * 4 AS x	[[12]]
+lit-int-div	in	RETURN 7 / 2 AS x	[[3]]
+lit-int-mod	in	RETURN 7 % 3 AS x	[[1]]
+lit-neg-mod	in	RETURN -7 % 3 AS x	[[-1]]
+lit-pow	in	RETURN 2 ^ 3 AS x	[[8.0]]
+lit-div-zero	in	RETURN 1 / 0 AS x	[[null]]
+lit-precedence	in	RETURN 2 + 3 * 4 AS x	[[14]]
+lit-str-concat	in	RETURN 'a' + 'b' AS x	[["ab"]]
+lit-str-num	in	RETURN 'n' + 7 AS x	[["n7"]]
+lit-list	in	RETURN [1, 2, 3] AS x	[[[1,2,3]]]
+lit-map	in	RETURN {k: 1} AS x	[[{"k":1}]]
+lit-list-eq	in	RETURN [1, 2] = [1, 2] AS x	[[true]]
+lit-int-eq	in	RETURN 3 = 3 AS x	[[true]]
+lit-int-float-neq	in	RETURN 3.0 = 3 AS x	[[false]]
+lit-int-float-neq2	in	RETURN 3 = 3.0 AS x	[[false]]
+
+# ---- three-valued logic (C3) ----
+tvl-eq-null	in	RETURN null = null AS x	[[null]]
+tvl-and-null	in	RETURN true AND null AS x	[[null]]
+tvl-and-false-null	in	RETURN false AND null AS x	[[false]]
+tvl-or-null	in	RETURN true OR null AS x	[[true]]
+tvl-or-false-null	in	RETURN false OR null AS x	[[null]]
+tvl-xor-null	in	RETURN true XOR null AS x	[[null]]
+tvl-not-null	in	RETURN NOT null AS x	[[null]]
+tvl-where-null	in	MATCH (n:Person) WHERE null RETURN n	[]
+
+# ---- functions (CYPHER.md §2.7) ----
+fn-abs	in	RETURN abs(-3) AS x	[[3]]
+fn-size	in	RETURN size([1, 2, 3]) AS x	[[3]]
+fn-length	in	RETURN length('abc') AS x	[[3]]
+fn-tostring	in	RETURN toString(1) AS x	[["1"]]
+fn-tointeger	in	RETURN toInteger('42') AS x	[[42]]
+fn-tofloat	in	RETURN toFloat('1.5') AS x	[[1.5]]
+fn-toupper	in	RETURN toUpper('ab') AS x	[["AB"]]
+fn-tolower	in	RETURN toLower('AB') AS x	[["ab"]]
+fn-coalesce	in	RETURN coalesce(null, 2) AS x	[[2]]
+fn-startswith	in	RETURN 'abc' STARTS WITH 'a' AS x	[[true]]
+fn-endswith	in	RETURN 'abc' ENDS WITH 'c' AS x	[[true]]
+fn-contains	in	RETURN 'abc' CONTAINS 'b' AS x	[[true]]
+fn-in-list	in	RETURN 1 IN [1, 2] AS x	[[true]]
+fn-index	in	RETURN [1, 2, 3][1] AS x	[[2]]
+fn-map-index	in	RETURN {a: 1}['a'] AS x	[[1]]
+
+# ---- matching, labels, properties ----
+match-label	in	MATCH (n:Person) RETURN n.name AS name ORDER BY name	[["Alice"],["Bob"],["Carol"],["Dave"],["Eve"],["Frank"]]
+match-unknown-label	in	MATCH (n:NoSuch) RETURN n	[]
+match-where-gt	in	MATCH (n:Person) WHERE n.age > 26 RETURN n.name AS name ORDER BY name	[["Alice"],["Carol"],["Eve"]]
+match-where-isnull	in	MATCH (n:Person) WHERE n.age IS NULL RETURN n.name	[["Frank"]]
+match-where-in	in	MATCH (n:Person) WHERE n.name IN ['Bob'] RETURN n.name	[["Bob"]]
+match-where-not	in	MATCH (n:Person) WHERE NOT n.name = 'Bob' RETURN n.name AS name ORDER BY name	[["Alice"],["Carol"],["Dave"],["Eve"],["Frank"]]
+
+# ---- traversal ----
+trav-1hop	in	MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.name = 'Alice' RETURN b.name AS b ORDER BY b	[["Bob"],["Carol"]]
+trav-2hop	in	MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE a.name = 'Alice' RETURN c.name AS c	[["Dave"],["Dave"]]
+trav-edge-prop	in	MATCH (a)-[e:KNOWS]->(b) WHERE e.since > 2018 RETURN a.name, b.name	[["Alice","Bob"],["Bob","Dave"],["Carol","Dave"]]
+trav-startswither	in	MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n.name	[["Alice"]]
+
+# ---- projection, ordering, paging, distinct ----
+proj-alias	in	RETURN 1 AS name	[[1]]
+proj-order-alias	in	MATCH (n:Person) RETURN n.name AS name ORDER BY name	[["Alice"],["Bob"],["Carol"],["Dave"],["Eve"],["Frank"]]
+proj-order-desc	in	MATCH (n:Person) RETURN n.age AS age ORDER BY age DESC	[[null],[35],[30],[28],[25],[25]]
+proj-order-source	in	MATCH (n:Person) RETURN n.name AS name ORDER BY n.name	[["Alice"],["Bob"],["Carol"],["Dave"],["Eve"],["Frank"]]
+proj-order-expr	in	MATCH (n:Person) RETURN n.age AS age ORDER BY n.age LIMIT 1	[[25]]
+proj-skip-limit	in	MATCH (n:Person) RETURN n.age AS age ORDER BY age SKIP 2 LIMIT 2	[[28],[30]]
+proj-distinct	in	MATCH (n:Person) RETURN DISTINCT n.home AS h ORDER BY h	[["Braga"],["Faro"],["Lisbon"],["Porto"],[null]]
+proj-node-cell	in	MATCH (a:Person)-[e:KNOWS]->(b) WHERE a.name = 'Alice' AND b.name = 'Bob' RETURN a	[[1]]
+
+# ---- unwind and with ----
+unwind-literal	in	UNWIND [3, 1, 2] AS x RETURN x AS x ORDER BY x	[[1],[2],[3]]
+unwind-null	in	UNWIND null AS x RETURN x	[]
+unwind-empty	in	UNWIND [] AS x RETURN x	[]
+unwind-with-null	in	UNWIND [1, null, 2] AS x RETURN x	[[1],[null],[2]]
+with-where	in	MATCH (n:Person) WITH n.age AS age WHERE age > 26 RETURN age ORDER BY age	[[28],[30],[35]]
+
+# ---- parameters ----
+param-string	in	MATCH (n:Person) WHERE n.name = $name RETURN n.name -- {"name":"Alice"}	[["Alice"]]
+param-int	in	RETURN $age AS x -- {"age":30}	[[30]]
+param-list	in	RETURN $list AS x -- {"list":[1,2,3]}	[[[1,2,3]]]
+
+# ---- writes (M5.1: CREATE; each row in its own transaction) ----
+write-create-node	in	CREATE (m:Made {v: 1})	[[1]]	write:MATCH (m:Made) RETURN m.v AS v
+write-create-expr	in	CREATE (e:E {v: 2 * 3})	[[6]]	write:MATCH (e:E) RETURN e.v AS v
+write-create-param	in	CREATE (p:P {t: $t}) -- {"t":"x"}	[["x"]]	write:MATCH (p:P) RETURN p.t AS t
+write-create-comma	in	CREATE (:A {k: 1}), (:B {k: 2})	[[1],[2]]	write:MATCH (n) WHERE n.k IS NOT NULL RETURN n.k AS k ORDER BY k
+write-create-from-match	in	MATCH (a:Seed) CREATE (a)-[:LINK]->(b:Made2 {v: 3})	[[3],[3]]	write:MATCH (a:Seed)-[r:LINK]->(b) RETURN b.v AS v
+write-create-per-row	in	MATCH (n:Seed) CREATE (:Copy {v: n.v})	[[1],[2]]	write:MATCH (c:Copy) RETURN c.v AS v ORDER BY v
+write-create-return-own	in	CREATE (m:Ret {v: 5}) RETURN m.v AS v	[[5]]	write
+
+# ---- writes, second slice: SET / REMOVE / DELETE ------------------------
+write-set-property	in	CREATE (n:Made {v: 1}) SET n.v = 9	[[9]]	write:MATCH (n:Made) RETURN n.v AS v
+write-set-expression	in	CREATE (n:Made {v: 9}) SET n.v = n.v * 10	[[90]]	write:MATCH (n:Made) RETURN n.v AS v
+write-set-merge	in	CREATE (n:Made {v: 1}) SET n += {extra: 5}	[[5]]	write:MATCH (n:Made) RETURN n.extra AS e
+write-set-replace	in	CREATE (n:Made {v: 1, gone: 2}) SET n = {only: 3}	[[3]]	write:MATCH (n:Made) RETURN n.only AS o
+write-set-null-drops	in	CREATE (n:Made {v: 1}) SET n.v = null	[[null]]	write:MATCH (n:Made) RETURN n.v AS v
+write-set-two-in-one	in	CREATE (n:Made) SET n.a = 1, n.b = 2	[[1]]	write:MATCH (n:Made) RETURN n.a AS a
+write-set-edge	in	CREATE (a:End)-[r:R {w: 1}]->(b:End) SET r.w = 3	[[3]]	write:MATCH ()-[r:R]->() RETURN r.w AS w
+write-remove-property	in	CREATE (n:Made {v: 1}) REMOVE n.v	[[null]]	write:MATCH (n:Made) RETURN n.v AS v
+write-remove-missing	in	CREATE (n:Made {v: 1}) REMOVE n.neverSet	[[1]]	write:MATCH (n:Made) RETURN n.v AS v
+write-delete-node	in	CREATE (n:Gone) DELETE n	[]	write:MATCH (n:Gone) RETURN n
+write-detach-delete	in	CREATE (a:Dead)-[:R]->(b:Dead) DETACH DELETE a	[]	write:MATCH (a:Dead)-[r:R]->(b) RETURN b
+write-set-after-create	in	CREATE (n:Made {v: 1}) SET n.fresh = 7 RETURN n.fresh AS f	[[7]]	write
+
+# ---- writes, third slice: MERGE ------------------------------------------
+write-merge-create	in	MERGE (n:Made {v: 1})	[[1]]	write:MATCH (n:Made) RETURN n.v AS v
+write-merge-idempotent	in	CREATE (n:Made {v: 1}) MERGE (n:Made {v: 1})	[[1]]	write:MATCH (n:Made) RETURN n.v AS v
+write-merge-relationship	in	MERGE (a:E {k: 1})-[r:R]->(b:E {k: 2})	[[1]]	write:MATCH (a:E)-[r:R]->(b:E) RETURN r
+write-merge-on-create	in	MERGE (n:Made {v: 1}) ON CREATE SET n.tag = "new"	[["new"]]	write:MATCH (n:Made) RETURN n.tag AS t
+write-merge-on-match	in	CREATE (n:Made {v: 1}) MERGE (n:Made {v: 1}) ON MATCH SET n.tag = "again"	[["again"]]	write:MATCH (n:Made) RETURN n.tag AS t
+write-merge-label-differs	in	MERGE (n:Other {v: 1})	[[1]]	write:MATCH (n:Other) RETURN n.v AS v
+
+# ---- out of contract (refusals; never counted as passes) ----
+out-merge	out	MERGE (n:X)	MERGE
+out-set	out	MATCH (a) SET a.x = 1	SET
+out-delete	out	MATCH (a) DELETE a	DELETE
+out-union	out	MATCH (a) RETURN a UNION MATCH (b) RETURN b	UNION
+out-second-match	out	MATCH (a) MATCH (b) RETURN 1	second MATCH
+in-varlen-one-hop	in	MATCH (a:Person)-[*1]->(b) RETURN count(*) AS c	[[7]]
+in-varlen-two-hops	in	MATCH (a:Person)-[r*2..2]->(b) RETURN count(*) AS c	[[4]]
+in-varlen-binds-list	in	MATCH (a:Person)-[r*2..2]->(b) RETURN size(r) AS len, min(size(r)) AS lo	[[2,2]]
+in-varlen-unique-per-path	in	MATCH (a:Person {name: 'Alice'})-[*]->(b) RETURN count(*) AS c	[[8]]
+in-varlen-beyond-graph	in	MATCH (a:Person {name: 'Eve'})-[*2..3]->(b) RETURN count(*) AS c	[[0]]
+in-varlen-anonymous-increases-rows	in	MATCH (a:Person)-[*1..1]->(b) RETURN count(*) AS c	[[7]]
+in-optional-match	in	MATCH (p:Person) OPTIONAL MATCH (p)-[:WORKS_AT]->(c) RETURN count(*) AS c	[[6]]
+in-optional-null-side	in	MATCH (p:Person {name: 'Alice'}) OPTIONAL MATCH (p)-[:WORKS_AT]->(c) RETURN c.name AS c	[[null]]
+in-optional-keeps-left	in	MATCH (p:Person {name: 'Alice'}) OPTIONAL MATCH (p)-[:WORKS_AT]->(c) RETURN p.name AS p, c.name AS c	[["Alice",null]]
+in-optional-with-filters-orphans	in	MATCH (p:Person) OPTIONAL MATCH (p)-[:WORKS_AT]->(c) WITH p, c WHERE c IS NULL RETURN count(*) AS p	[[4]]
+in-optional-fanout	in	MATCH (p:Person) OPTIONAL MATCH (p)-[:WORKS_AT]->(c) RETURN count(c) AS employed	[[2]]
+out-optional	out	OPTIONAL MATCH (a) RETURN a	nothing to its left
+out-optional-second	out	MATCH (a) OPTIONAL MATCH (a)-->(b) OPTIONAL MATCH (b)-->(c) RETURN a	second
+out-path-bind	out	MATCH p = (a)-[]->(b) RETURN p	path binding
+out-path-bind	out	MATCH p = (a)-[]->(b) RETURN p	path binding
+out-alt-types	out	MATCH (a)-[:KNOWS|WORKS_AT]->(b) RETURN b	alternation
+out-multilabel	out	MATCH (a:A:B) RETURN a	more than one label
+out-cartesian	out	MATCH (a), (b) RETURN a, b	cartesian
+in-aggregate-empty	in	RETURN count(*) AS c	[[0]]
+in-aggregate-count-star	in	MATCH (n:Person) RETURN count(*) AS c	[[6]]
+in-aggregate-count-values	in	MATCH (n:Person) RETURN count(n.age) AS c	[[5]]
+in-aggregate-count-null-skipped	in	MATCH (n) RETURN count(n.founded) AS c	[[1]]
+in-aggregate-sum	in	MATCH (n:Person) RETURN sum(n.age) AS s	[[143]]
+in-aggregate-avg	in	MATCH (n:Person) RETURN avg(n.age) AS a	[[28.6]]
+in-aggregate-avg-null	in	MATCH (n:Person) RETURN avg(n.founded) AS a	[[null]]
+in-aggregate-min-max	in	MATCH (n:Person) RETURN min(n.age) AS lo, max(n.age) AS hi	[[25,35]]
+in-aggregate-min-string	in	MATCH (n:Person) RETURN max(n.home) AS hi	[["Porto"]]
+in-aggregate-min-empty	in	MATCH (n:Company) RETURN min(n.age) AS lo	[[null]]
+in-aggregate-collect	in	MATCH (n:Person) RETURN collect(n.home) AS homes	[[["Lisbon","Porto","Lisbon","Braga","Faro"]]]
+in-aggregate-collect-distinct	in	MATCH (n:Person) RETURN collect(DISTINCT n.home) AS homes	[[["Lisbon","Porto","Braga","Faro"]]]
+in-aggregate-stdev	in	MATCH (n:Person) WHERE n.age = 25 RETURN stdev(n.age) AS sd	[[0.0]]
+in-aggregate-stdev-one	in	MATCH (n:Company) RETURN stdev(n.founded) AS sd	[[0.0]]
+in-aggregate-distinct-count	in	MATCH (n:Person) RETURN count(DISTINCT n.home) AS c	[[4]]
+in-aggregate-in-expression	in	MATCH (n:Person) RETURN count(*) + count(n.age) AS c	[[11]]
+in-aggregate-grouped	in	MATCH (n:Person) WHERE n.home IS NOT NULL RETURN n.home AS home, count(*) AS c ORDER BY home	[["Braga",1],["Faro",1],["Lisbon",2],["Porto",1]]
+in-aggregate-grouped-sum	in	MATCH (n:Person) RETURN n.home AS home, count(*) AS c ORDER BY home SKIP 1 LIMIT 2	[["Faro",1],["Lisbon",2]]
+in-aggregate-with-boundary	in	MATCH (n:Person) WITH n.home AS home, count(*) AS c WHERE c > 1 RETURN home, c	[["Lisbon",2]]
+in-aggregate-over-aggregate	in	MATCH (n:Person) WITH n.home AS home, count(*) AS c RETURN sum(c) AS total	[[6]]
+in-aggregate-empty-grouped	in	MATCH (n:Nothing) RETURN n.x AS x, count(*) AS c	[]
+out-aggregate-in-where	out	MATCH (n) WHERE count(n) > 1 RETURN n	RETURN or WITH
+out-case	out	RETURN CASE WHEN 1 = 1 THEN 1 END	CASE
+out-exists	out	MATCH (n) WHERE exists((n)-[:KNOWS]->()) RETURN n	EXISTS
+out-comprehension	out	RETURN [x IN [1, 2] | x]	comprehension
+out-unknown-fn	out	RETURN noSuchFn(1)	noSuchFn

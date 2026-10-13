@@ -1,0 +1,22 @@
+.DS_Store
+tmp/
+
+# Build output: the shared library and the ASan variant.
+lib/*.so
+lib/*.dylib
+lib/*.dll
+
+# Test binaries.
+tests/run_all
+tests/run_all_release
+
+nimcache/
+
+# Databases this machine created.
+*.glyph
+*.glyph-wal
+*.glyph-lock
+
+# NOTE: do not ignore lib/glyphes/ — that is the Ruby source directory,
+# not a build artifact. An early .gitignore did, and `rm -rf lib/glyphes`
+# to clean a stale build then deleted the gem.
