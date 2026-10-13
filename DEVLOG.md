@@ -2440,4 +2440,110 @@ review culture existed.
 
 ```
 370 Nim tests   210 Ruby runs / 693 assertions   C1 132/132 + 17/17 refusals
+
+## M11 — the literal gate
+
+M11 was to be benchmarks: glyphes against SQLite edge tables, `make bench`,
+`ARCHITECTURE.md`, a `limitations.md`, and the 20-node soak. Before writing
+a headline number, the benchmark needed a scale it could actually load, and
+the load calibration is where the milestone turned over.
+
+### Four hundred milliseconds hiding behind a benchmark
+
+Building a 2·10^4-node graph and asking for one indexed node came to about
+4.6 ms per query. Not slow because of the index — slow because of it *not
+being used*. The first bisect:
+
+| query, 2·10^4 nodes            | rate     |
+|---------------------------------|----------|
+| `RETURN 1`                      | 61 000/s |
+| `WHERE p.id = $i`, no index     |   215/s |
+| `WHERE p.id = $i`, index built |   205/s |
+
+A full scan, an index, and no index all within one noise band: the index
+was doing nothing at all. Then the spelling:
+
+| `WHERE p.id = …`, index built   | rate      |
+|---------------------------------|-----------|
+| `= $i` (parameter)              |    235/s  |
+| `= 19999` (literal)             | 51 164/s  |
+
+**217x, on the same predicate, differing only in a `$`.**
+
+### The bug
+
+`src/cypher/plan.nim`, `seekCandidates`, took a conjunct only when the
+right-hand side was `ekLit`:
+
+```nim
+if right.kind != ekLit:
+  return
+```
+
+`evalLiteral` — three lines above — resolves `ekParam` against the bound
+parameter table, and its comment reads "*a parameter resolves here, so
+`WHERE n.age = $age` is seekable*". The intent was there; the gate one
+level below made it unreachable for exactly the case it named. A parameter
+predicate planned as a full scan, silently, with no error and no slower
+result — every answer correct, every query 200x slower.
+
+It reached the model layer, the importer, and every benchmark in the repo,
+because those are written with parameters. `P.where(age: k)` on 2·10^4
+indexed rows: **197/s**.
+
+### Why no gate caught it
+
+I5 measures the index *directly* — seek an integer, seek a range, assert
+under budget. It cannot fail, because the index was always correct. The
+gate that existed for "does the planner use the index" was
+`n.age > 30`: a literal, on the one spelling nobody writes by hand. The
+test asked whether the index works. The product asks whether the *planner
+reaches* it.
+
+### The fix
+
+`seekCandidates` accepts `ekLit` or `ekParam` wherever a value side is
+allowed, resolving through the `evalLiteral` that already understood both.
+One condition, on the three value-side branches.
+
+| | before | after |
+|---|---|---|
+| query, indexed, parameter   | 235/s   | 46 009/s |
+| model layer `P.where(age:)` | 197/s   | 30 558/s |
+| reopened ORC db, 5·10^4     | full scan | 35 125/s |
+
+### The direction that matters
+
+A seek may only ever *add* speed. So the new tests pin the plan, not the
+clock:
+
+- `$p` and the literal reach the same plan, for `=`, `<=`, `>` (equal
+  probe counts, equal answers)
+- an **unbound** parameter resolves to null, null is not keyable, so the
+  scan answers — seeking would return nothing and silently drop rows, the
+  one direction an accelerator may not move
+- answers are compared against an unindexed run across 12 predicate shapes
+  (equality, ordering both ways, `IN`, flipped `lit = prop`, string keys,
+  two conjuncts, non-indexed property, unbound parameter): identical
+
+373 Nim · 211 Ruby / 697 assertions · C1 132/132 + 17/17 refusals · I5, I-vec,
+M1 GREEN
+
+### What M11 owes the benchmarks
+
+Two defects M11's own plan would have buried:
+
+1. `bench_sqlite.rb` as first written mixed *property* ids (SQLite side,
+   `$src`/`$dst`) with *internal* ids (glyphes side, `id(a) = …`). The two
+   engines were answering different questions. Every benchmark now asserts
+   answer equality before it prints a time, because a fast wrong number is
+   worse than no number.
+2. Edge load measured 881 edges/s against 110 000 nodes/s — the grammar
+   refuses a comma-`MATCH`, so an edge needs `MATCH … MERGE … CREATE`, and
+   each edge pays a re-filter. This is the real cost of the dialect's
+   expressiveness, and it belongs in `limitations.md` with the number,
+   not in a footnote.
+
+```
+373 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
 ```

@@ -303,6 +303,16 @@ proc seekCandidates(ctx: QueryCtx, part: QueryPart,
   if part.matchCond == nil or ctx.indices == nil:
     return @[]
   var found = newSeq[SeekKey]()
+  ## A value side the index can be keyed by: a literal *or* a parameter.
+  ## `WHERE n.age = $age` is the spelling almost every query uses — the
+  ## model layer, the importer, and every benchmark in this project write
+  ## parameters — and it planned as a full scan while the identical literal
+  ## predicate planned as a seek. I5 never caught it because I5 measures the
+  ## index directly, never through a query: the same predicate ran at
+  ## 235/s as a parameter against 51 164/s as a literal (DEVLOG, "the
+  ## literal gate").
+  proc isValue(e: Expr): bool = e.kind == ekLit or e.kind == ekParam
+
   proc walk(e: Expr) =
     if e == nil:
       return
@@ -318,7 +328,7 @@ proc seekCandidates(ctx: QueryCtx, part: QueryPart,
       return
     var left = e.items[0]
     var right = e.items[1]
-    if left.kind == ekLit and right.kind == ekProp:
+    if isValue(left) and right.kind == ekProp:
       let tmp = left
       left = right
       right = tmp
@@ -337,7 +347,7 @@ proc seekCandidates(ctx: QueryCtx, part: QueryPart,
       found.add SeekKey(varName: left.target.name, prop: left.name,
                         op: "IN", values: vs)
       return
-    if right.kind != ekLit:
+    if not isValue(right):
       return
     for op in ["=", "<", "<=", ">", ">="]:
       if e.op == op:

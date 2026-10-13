@@ -309,6 +309,76 @@ suite "M6.1 the planner":
     discard runQ(s, "MATCH (n:Person) WHERE n.name = 'p7' RETURN n", reg)
     check ix.probes == 0
 
+  test "a seek fires for a PARAMETER predicate, not only for a literal":
+    ## The existing seek gate used `n.age > 30`: a literal, the one
+    ## spelling nobody writes by hand. It passed while `n.age > $lo`
+    ## planned as a full scan — and the parameter spelling is what the
+    ## model layer, the importer, and every benchmark in this project
+    ## actually write. On a 2·10^4-node range index that was 235/s before
+    ## and 46 009/s after. I5 never saw it
+    ## because I5 measures the index directly, not through a query.
+    ## DEVLOG, "the literal gate".
+    let s = people(200)
+    let reg = withIndex(s, "Person", "age")
+    let ix = reg.find("Person", "age")
+    var params = initTable[string, Value]()
+    params["lo"] = Value(kind: vkInt, i: 30)
+    ix.probes = 0
+    let st = prepare(s, "MATCH (n:Person) WHERE n.age > $lo RETURN n",
+                     params, nil, 0, "", reg)
+    defer: st.close()
+    let rows = st.collectRows()
+    check ix.probes == 1
+    ## And the answer is the same as the literal spelling — the seek is an
+    ## accelerator, never a second implementation of WHERE.
+    let litRows = runQ(s, "MATCH (n:Person) WHERE n.age > 30 RETURN n", reg)
+    check idsOf(rows) == idsOf(litRows)
+
+  test "a bound parameter and a literal plan identically (no literal-only path)":
+    ## Direct statement of the invariant the last test pins in one place:
+    ## for every comparison the index can answer, `$p` and the literal must
+    ## reach the same plan. If a future change narrows `isValue`, one of
+    ## these two seeks and the other does not, and this fails.
+    let s = people(200)
+    let reg = withIndex(s, "Person", "age")
+    let ix = reg.find("Person", "age")
+    for (paramSql, litSql, v) in [
+        ("MATCH (n:Person) WHERE n.age = $v RETURN n",
+         "MATCH (n:Person) WHERE n.age = 42 RETURN n", Value(kind: vkInt, i: 42)),
+        ("MATCH (n:Person) WHERE n.age > $v RETURN n",
+         "MATCH (n:Person) WHERE n.age > 30 RETURN n", Value(kind: vkInt, i: 30)),
+        ("MATCH (n:Person) WHERE n.age <= $v RETURN n",
+         "MATCH (n:Person) WHERE n.age <= 90 RETURN n", Value(kind: vkInt, i: 90))]:
+      var params = initTable[string, Value]()
+      params["v"] = v
+      ix.probes = 0
+      let a = prepare(s, paramSql, params, nil, 0, "", reg)
+      let aRows = a.collectRows()
+      a.close()
+      let paramProbes = ix.probes
+      ix.probes = 0
+      let b = prepare(s, litSql, initTable[string, Value](), nil, 0, "", reg)
+      let bRows = b.collectRows()
+      b.close()
+      check paramProbes == ix.probes
+      check idsOf(aRows) == idsOf(bRows)
+
+  test "an unbound parameter does not seek (it would lose rows)":
+    ## `$missing` is not in the table, so it resolves to null; null is not
+    ## keyable, so the scan answers. Seeking on it would return nothing and
+    ## silently drop the rows the scan finds — the one direction an
+    ## accelerator may not move.
+    let s = people(200)
+    let reg = withIndex(s, "Person", "age")
+    let ix = reg.find("Person", "age")
+    var params = initTable[string, Value]()
+    ix.probes = 0
+    let st = prepare(s, "MATCH (n:Person) WHERE n.age = $missing RETURN n",
+                     params, nil, 0, "", reg)
+    defer: st.close()
+    discard st.collectRows()
+    check ix.probes == 0
+
   test "a seek is skipped when the pattern's own property map already answers":
     ## `MATCH (n:Person {age: 30})` constrains the same property; both paths
     ## give the same rows, and the inline filter is what makes the seek safe
