@@ -158,11 +158,11 @@ glyphes; below 1.0 means SQLite was faster):
 
 | workload | glyphes | sqlite | ratio |
 |---|---|---|---|
-| load (nodes) | 0.077 s | 0.014 s | 0.2x |
-| load (edges) | 89.2 s | 0.029 s | 0.0x |
-| point | 0.005 s | 0.003 s | 0.6x |
-| one-hop | 0.036 s | 0.014 s | 0.4x |
-| two-hop | 0.008 s | 0.004 s | 0.4x |
+| load (nodes) | 0.081 s | 0.013 s | 0.2x |
+| load (edges) | 5.3 s | 0.025 s | 0.0x |
+| point | 0.005 s | 0.001 s | 0.3x |
+| one-hop | 0.034 s | 0.007 s | 0.2x |
+| two-hop | 0.009 s | 0.002 s | 0.2x |
 | filter | 0.002 s | 0.000 s | 0.1x |
 
 **SQLite won every row.** That is the honest result and it is the reason
@@ -173,13 +173,12 @@ the *shape* of the queries and the model layer, not that it wins a
 micro-benchmark against a B-tree — and a reader who only read the ratio
 column would conclude the opposite.
 
-The edge-load row (89.2 s for 20 000 edges) is the `MERGE` cost of
-`limitations.md` §2: 224 edges/second. That is slower than the isolated
-measurement of 643–892/s because the benchmark loads all 20 000 edges in a
-*single* transaction, and a MERGE re-scans its transaction's unpublished
-delta on every statement. Splitting the load across transactions is
-measurably faster — which is why `limitations.md` says to use the importer
-rather than the query language for bulk loads.
+The edge-load row (5.3 s for 20 000 edges) is `MERGE` plus a statement
+interpreter: 3 800 edges/second, against 12 000/s for the bare `CREATE` of a
+node. `limitations.md` §2 has the three defects that were in this number when
+it was 108.9 s, and the one behaviour it keeps — a range predicate inside a
+write transaction still walks the delta, because a seek that misses a row
+cannot be repaired by the filter above it.
 
 **Three things the numbers will not tell you**, all in `limitations.md`:
 benchmark scale is small and small favours SQLite's page cache; bulk load
@@ -196,6 +195,8 @@ the index path first, all of which had been shipping with *correct answers*:
 | `WHERE n.age = $age` (parameter) | 235/s | 46 009/s |
 | `MATCH (n {age: $age})` (inline) | 84/s | 9 998/s |
 | a seek over a pattern with a relationship | **dropped every edge** | correct |
+| writes never received the index registry | every MERGE full-scanned | 556/s → 8 156/s |
+| uncommitted rows invisible to a seek | O(delta) per lookup | 89.2 s → 5.3 s on the benchmark |
 
 The third is the one to remember: the planner assigned the seek to the seed
 and stopped, so every `Expand` in the pattern was lost whenever it seeked.

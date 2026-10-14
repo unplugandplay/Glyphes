@@ -63,27 +63,48 @@ Two separate defects made that `MERGE` scan, and both are fixed:
    statements did not, which is why reads were fast and writes quadratic. The
    write paths now pass `db.indices`, exactly as the read path does.
 
-A profile of the load showed the whole cost inside
-`label scan → filter → readNodeProp`: every node visited, its `id` read
-through a hash lookup, for every edge. With both fixes the `MERGE` seeks:
+A profile showed the cost inside `label scan → filter → readNodeProp`: every
+node visited, its `id` read through a hash lookup, per edge. With both fixed
+the `MERGE` seeks, and the load is no longer quadratic.
 
-| 20 000 edges | before | after |
-|---|---|---|
-| nodes committed first (seek hits the index) | ~900/s | **6 129/s** |
-| nodes uncommitted (same transaction) | ~420/s | 427/s — see below |
+**Three defects, all found by measurement rather than reading:**
 
-**The remaining quadratic is a design consequence, not a bug.** An index
-learns about writes at **commit**, so a node created in the *same*
-transaction as the edges is invisible to the seek, and the seek falls back to
-walking the transaction's delta node list — O(delta) per seek, O(N²) for the
-load. Committed nodes are found by the index, which is why splitting the load
-changes the number by 14x.
+1. `mergeChain` built its match half with `scanFor`, because the seek lived
+   in `plan.nim`, which imports `ops.nim`. The seek moved down.
+2. The write path never passed the index registry to `prepare`, so
+   `ctx.indices` was `nil` inside every write statement and the new `seekFor`
+   fell back to scanning anyway. Reads passed it; writes did not.
+3. Even with a correct seek, an index learns about writes at **commit**, so a
+   node created in the same transaction as the edges is invisible to it. The
+   seek fell back to walking the transaction's delta — O(delta) per lookup.
+   The transaction now keeps a flat `(label, property, key-hash) → ids` map
+   of its own uncommitted rows, maintained as `setNodeProp` runs, so the
+   lookup is a hash probe.
 
-Fixing this means indexing the transaction's uncommitted nodes by property — a
-delta-side seek index maintained as `setNodeProp` runs — which is a real
-feature with rollback and concurrency constraints, not a patch. Until it
-exists, **load nodes, commit, then load edges** — or use the importer (M9),
-which writes through the store and never seeks at all.
+| benchmark edge load (20 000 edges, one transaction) | |
+|---|---|
+| at the start of this work | 108.9 s |
+| after the seek reached `MERGE` | 89.2 s |
+| after the write path passed the registry | 46.8 s |
+| after the delta seek index | **5.3 s** |
+
+An indexed lookup inside a transaction now runs at **75 000/s** and is flat
+in the size of the transaction, where it was 6 895/s and quadratic.
+
+**A note on the third fix, because the bug was in the fix.** It was written
+first as a table of tables, keyed by index name. Keying by index name needed
+the writer to consult `tx.indicesToUpdate` while the reader consulted
+`ctx.indices` — two sources of truth, so a test with its own registry
+recorded nothing and the seek silently found nothing. Re-keyed by
+`(label, property)`, both sides agree. Then the bucket map was *copied* on
+every lookup, because Nim's `Table.[]` returns its value by value: the
+"O(1)" seek was O(buckets), and the benchmark still moved only 3.8x. A flat
+map, read without binding, is the version that works.
+
+Range predicates (`>`, `IN`, …) still walk the delta rather than consulting
+the index — an equality key has a bucket, a range does not, and a seek that
+*misses* a row cannot be repaired by the filter above it. Slower, and
+correct; the M11 test suite pins it.
 
 ## 3. Benchmark scale is small, and that is a consequence of §2
 

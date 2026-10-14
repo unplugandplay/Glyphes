@@ -528,6 +528,116 @@ suite "M6.1 freshness":
     check found == 1
     check tx.commit()
 
+suite "M11 the delta seek index":
+  ## A statement that is stepped but never closed leaves a read snapshot
+  ## open, and the next `beginWrite` waits for the reader count to reach
+  ## zero — which is a hang, not a failure. Everything here closes.
+  proc run1(s: GraphStore, sql: string, params: Table[string, Value];
+            tx: txn.WriteTransaction; reg: Indexes): int =
+    let st = prepare(s, sql, params, tx, 0, "", reg)
+    defer: st.close()
+    var n = 0
+    while st.step(): inc n
+    n
+
+  test "an equality seek finds an uncommitted node, and nothing else":
+    ## The committed index learns about writes at commit, so between the
+    ## CREATE and the COMMIT a seek has to find the row somewhere else. It
+    ## used to walk every node in the transaction's delta and read each one's
+    ## property — O(delta) per lookup, which made a bulk load O(N^2). The
+    ## delta seek index is a flat map from (label, property, key hash) to
+    ## the ids carrying that key.
+    ##
+    ## Pinned as answers, never as a clock, for the same reason as every
+    ## other index test here: an accelerator may change how fast, never what.
+    let s = newStore()
+    let reg = withIndex(s, "Person", "age")
+    let tx = txn.begin(s, nil, 1)
+    for age in [10'i64, 20, 30, 40]:
+      var p = initTable[string, Value]()
+      p["age"] = Value(kind: vkInt, i: age)
+      discard run1(s, "CREATE (:Person {age: $age})", p, tx, reg)
+    for (age, want) in [(10'i64, 1), (20'i64, 1), (30'i64, 1), (40'i64, 1), (50'i64, 0)]:
+      var p = initTable[string, Value]()
+      p["age"] = Value(kind: vkInt, i: age)
+      check run1(s, "MATCH (n:Person) WHERE n.age = $age RETURN n", p, tx, reg) == want
+    check tx.commit()
+
+  test "the delta seek answers exactly what a scan answers":
+    ## The invariant that makes an accelerator safe, pinned where it is
+    ## easiest to get wrong: the same question, asked with the index and
+    ## without it, must produce the same rows.
+    ##
+    ## Not compared against the *committed* index here, because a test that
+    ## opens its transaction with `txn.begin` never sets `indicesToUpdate`,
+    ## so the committed index does not learn about those writes at all and
+    ## answers nothing. A scan is the honest oracle.
+    ##
+    ## The float/int spellings are here because `keyHash` hashes the
+    ## *normalised* key: a value written as 30.0 must be reachable by the
+    ## query the engine considers equal to it, and unreachable by the one it
+    ## does not. Note the engine itself does not treat `30 = 30.0` as equal,
+    ## and neither path here pretends otherwise.
+    let s = newStore()
+    let reg = withIndex(s, "Person", "age")
+    let tx = txn.begin(s, nil, 1)
+    for age in [Value(kind: vkFloat, f: 30.0), Value(kind: vkInt, i: 7)]:
+      var p = initTable[string, Value]()
+      p["age"] = age
+      discard run1(s, "CREATE (:Person {age: $age})", p, tx, reg)
+    for probe in [Value(kind: vkFloat, f: 30.0), Value(kind: vkInt, i: 30),
+                  Value(kind: vkInt, i: 7), Value(kind: vkFloat, f: 7.0)]:
+      var p = initTable[string, Value]()
+      p["age"] = probe
+      let seeked = run1(s, "MATCH (n:Person) WHERE n.age = $age RETURN n",
+                        p, tx, reg)
+      let scanned = run1(s, "MATCH (n:Person) WHERE n.age = $age RETURN n",
+                         p, tx, nil)
+      check seeked == scanned
+    check tx.commit()
+
+  test "a rolled-back write is not findable, and a removed property is not either":
+    ## Two ways a delta entry could outlive the value it describes. Both
+    ## would surface as a row the committed index would not return.
+    block:
+      let s = newStore()
+      let reg = withIndex(s, "Person", "age")
+      let tx = txn.begin(s, nil, 1)
+      var p = initTable[string, Value]()
+      p["age"] = Value(kind: vkInt, i: 77)
+      discard run1(s, "CREATE (:Person {age: $age})", p, tx, reg)
+      check tx.rollback()
+      check run1(s, "MATCH (n:Person) WHERE n.age = $age RETURN n", p, nil, reg) == 0
+    block:
+      let s = newStore()
+      let reg = withIndex(s, "Person", "age")
+      let tx = txn.begin(s, nil, 1)
+      var p = initTable[string, Value]()
+      p["age"] = Value(kind: vkInt, i: 88)
+      discard run1(s, "CREATE (:Person {age: $age})", p, tx, reg)
+      discard run1(s, "MATCH (n:Person) REMOVE n.age",
+                   initTable[string, Value](), tx, reg)
+      check run1(s, "MATCH (n:Person) WHERE n.age = $age RETURN n", p, tx, reg) == 0
+      check tx.commit()
+
+  test "a range seek over uncommitted nodes still answers (pin: never lose a row)":
+    ## The delta seek index answers `=` only. A range key has no bucket, and
+    ## — this is the part that must not be optimised away — a seek that
+    ## *misses* a row cannot be repaired by the filter above it, so every
+    ## other operator falls back to walking the delta rather than answering
+    ## nothing. Slower, and correct.
+    let s = newStore()
+    let reg = withIndex(s, "Person", "age")
+    let tx = txn.begin(s, nil, 1)
+    for age in [10'i64, 20, 30, 40]:
+      var p = initTable[string, Value]()
+      p["age"] = Value(kind: vkInt, i: age)
+      discard run1(s, "CREATE (:Person {age: $age})", p, tx, reg)
+    var p = initTable[string, Value]()
+    p["lo"] = Value(kind: vkInt, i: 20)
+    check run1(s, "MATCH (n:Person) WHERE n.age > $lo RETURN n", p, tx, reg) == 2
+    check tx.commit()
+
 proc withText(s: GraphStore, target, property, analyzer = "standard"): Indexes =
   result = newIndexes()
   discard result.createText(target, property, analyzer)

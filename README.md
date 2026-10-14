@@ -104,7 +104,7 @@ instead of serving it.
 
 Verified **after** the M10 changes, on the full gate (`nimble gate`):
 
-- **376 Nim tests, 0 failures** — store, WAL, recovery, transactions,
+- **382 Nim tests, 0 failures** — store, WAL, recovery, transactions,
   Cypher, all three index families, the model layer's statement compiler.
 - **211 Ruby tests / 697 assertions, 0 failures** — the seam, the model
   layer, import/export, status mapping.
@@ -148,11 +148,9 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
   `make soak`, and green over a 100-second 20-node run; the five-day gate
   itself is still to be run, and `docs/TESTING.md` says so rather than
   implying otherwise.
-- **Bulk loading through the query language is still slow** (~650–900
-  edges/second). `MERGE` used to scan where the planner seeks, which made it
-  4x worse; that is fixed, but a MERGE inside one long transaction still
-  re-scans its delta per statement. Use the importer.
-  [`limitations.md`](limitations.md) §2 has the measurements.
+- **Bulk loading through the query language costs ~3 800 edges/second.**
+  Three defects made it 20x worse than that; all are fixed and the numbers
+  are in [`limitations.md`](limitations.md) §2.
 - **R12** (8-process worker simulation) and **W7** (fsynced/NORMAL
   commit throughput) are named in the gate tables with no harness yet.
 - Fusing a traversal into a retrieval statement (the `MATCH` after a
@@ -164,8 +162,8 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 
 ```
 nimble build        the shared library (release, ORC, threaded)
-nimble test         376 Nim tests (fast)
-nimble testGate     376 Nim tests at full churn
+nimble test         382 Nim tests (fast)
+nimble testGate     382 Nim tests at full churn
 nimble fixture      rebuild tests/fixtures/social.glyph
 nimble gemtest      211 Ruby runs / 697 assertions
 nimble crash        W1 crash gate

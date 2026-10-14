@@ -370,8 +370,42 @@ proc scanFor*(ctx: QueryCtx, np: NodePattern): Operator =
       code = -1'i32
   newScanAll(ctx, np.varName, code)
 
+proc deltaSeekIds(ctx: QueryCtx, labelCode: int32, prop: string,
+                   key: SeekKey): seq[int64] =
+  ## The transaction's own rows for this seek key, from the delta seek
+  ## index. O(1) in the delta's size for an equality key, which is what
+  ## makes a bulk load linear.
+  ##
+  ## Only `=` is answered from the index. A range key (`<`, `IN`, …) has no
+  ## bucket to look in, and — the reason this is not "just equality for
+  ## now" — a seek that *misses* a row cannot be repaired by the filter
+  ## above it, so an unanswered key must fall back to the full delta walk
+  ## rather than answer nothing. Range predicates over uncommitted rows keep
+  ## the O(delta) behaviour they have always had; they are not made wrong.
+  if ctx.writer == nil or key.op != "=":
+    return @[]
+  ## One flat lookup keyed by (label, property, key-hash). The first shape
+  ## was a table of tables, and `Table`'s `[]` returns its value *by
+  ## value* — binding the inner bucket map to a local copied all of it, so
+  ## the "O(1) delta seek" was O(buckets). That is the whole lesson of this
+  ## change: an accelerator that copies its own index on every lookup is the
+  ## quadratic it was written to remove.
+  let h = keyHash(key.value)
+  if not ctx.writer.deltaSeekIdx.hasKey((labelCode, prop, h)):
+    return @[]
+  let want = keyOf(key.value)
+  var seen = initHashSet[int64]()
+  for (k, id) in ctx.writer.deltaSeekIdx[(labelCode, prop, h)]:
+    if not keySame(k, want):
+      continue                 # a hash collision costs a compare, not a row
+    if id in seen:
+      continue                 # the same node set twice answers once
+    seen.incl id
+    result.add id
+
 proc newIndexSeek*(ctx: QueryCtx, bindVar: string, ids: seq[int64],
-                   labelCode: int32, indexName: string): Operator =
+                   labelCode: int32, indexName: string,
+                   key: SeekKey = SeekKey()): Operator =
   ## EXEC.md §4.1 rule 3. `ids` is the index's answer, computed once at plan
   ## time; the operator's job is to hand them out with the liveness and the
   ## transaction's own writes taken into account.
@@ -386,7 +420,15 @@ proc newIndexSeek*(ctx: QueryCtx, bindVar: string, ids: seq[int64],
                     seekDeltaAt: 0,
                     seekLabel: labelCode, indexName: indexName)
   if ctx.writer != nil:
-    result.seekDeltaIds = scanDeltaNodes(ctx)
+    ## Equality consults the delta seek index and trusts its answer — the
+    ## index is keyed by exactly this predicate, so an empty bucket means
+    ## "this transaction wrote no row with that key", which is an answer.
+    ## Anything else falls back to walking the whole delta, because a seek
+    ## that misses a row cannot be repaired by the filter above it.
+    if key.op == "=":
+      result.seekDeltaIds = deltaSeekIds(ctx, labelCode, key.prop, key)
+    else:
+      result.seekDeltaIds = scanDeltaNodes(ctx)
 
 proc newExpand*(ctx: QueryCtx; boundVar, relVar, endVar: string;
                 dir: Direction; typeCode: int32): Operator =
@@ -839,7 +881,8 @@ proc seekFor(ctx: QueryCtx, np: NodePattern): Operator =
       continue
     let code = (if np.label.len > 0: ctx.store.labels.lookup(np.label)
                 else: 0'i32)
-    return newIndexSeek(ctx, np.varName, seekIds(ctx, ix, key), code, ix.name)
+    return newIndexSeek(ctx, np.varName, seekIds(ctx, ix, key), code, ix.name,
+                        key)
   scanFor(ctx, np)
 
 proc mergeChain*(ctx: QueryCtx, pat: Pattern,

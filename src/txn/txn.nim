@@ -47,6 +47,7 @@ import ../store/prop
 import ../wal/wal
 import ../store/store
 import ../index/index
+import ../index/range
 
 type
   ## Which ABI status a failure becomes. The numbers match `GlyStatus` in
@@ -117,8 +118,28 @@ type
     ## `okExpand` checks the *other node's* liveness but never the edge's —
     ## so `deleteEdge` unlists explicitly.
     deltaNodesIdx*: seq[int64]
+    ## The same ids as `deltaNodesIdx`, as a set. The seq is for ordered
+    ## iteration; membership is asked on every seek, and a walk of the seq
+    ## made one indexed lookup inside a transaction cost O(delta).
+    deltaNodeSet*: HashSet[int64]
     deltaOutIdx*: Table[int64, seq[int64]]
     deltaInIdx*: Table[int64, seq[int64]]
+    ## Delta-side seek index: index name -> hash of the normalised key ->
+    ## the uncommitted nodes carrying that key. Maintained as `setNodeProp`
+    ## runs, so a seek over nodes this transaction has written but not
+    ## committed is a hash lookup instead of a walk of the whole delta.
+    ##
+    ## The commit-time index update (`applyDelta`) is too late for this:
+    ## between the `CREATE` and the `COMMIT` a read in the same transaction
+    ## has to see the row, and the committed index cannot know about it. The
+    ## read path used to fall back to scanning every delta node per seek,
+    ## which is O(delta) per statement and O(N^2) for a bulk load.
+    ##
+    ## Each bucket stores the normalised key alongside the id, because a
+    ## hash collision must cost a comparison (`keySame`) and never a wrong
+    ## answer. Rollback clears the whole structure, so a rolled-back write
+    ## cannot be found by a later read — that is the one hard requirement.
+    deltaSeekIdx*: Table[(int32, string, uint64), seq[(Value, int64)]]
     nodeProps*: Table[int64, PropView]
     edgeProps*: Table[int64, PropView]
     nextNodeId*: int64
@@ -211,8 +232,10 @@ proc begin*(store: GraphStore, w: Wal; id: uint32; doSync = true;
   result.nodeDelta = initTable[int64, NodeRec]()
   result.edgeDelta = initTable[int64, EdgeRec]()
   result.deltaNodesIdx = @[]
+  result.deltaNodeSet = initHashSet[int64]()
   result.deltaOutIdx = initTable[int64, seq[int64]]()
   result.deltaInIdx = initTable[int64, seq[int64]]()
+  result.deltaSeekIdx = initTable[(int32, string, uint64), seq[(Value, int64)]]()
   result.nodeProps = initTable[int64, PropView]()
   result.edgeProps = initTable[int64, PropView]()
   result.frames = @[]
@@ -332,6 +355,7 @@ proc createNode*(tx: WriteTransaction, labelName: string): int64 =
   let code = tx.labelCode(labelName)
   tx.nodeDelta[id] = newNode(id, code)
   tx.deltaNodesIdx.add id
+  tx.deltaNodeSet.incl id
   var payload = ""
   putI64(payload, id)
   putI32(payload, code)
@@ -389,6 +413,23 @@ proc degreeTx(tx: WriteTransaction, id: int64): int =
     if rec.live and (rec.src == id or rec.dst == id):
       inc result
 
+proc forgetSeekKey(tx: WriteTransaction, nodeId: int64) =
+  ## Retire a node from every delta seek bucket. A tombstoned node must not
+  ## be found by a seek: the read side does re-check `rec.live`, so this is
+  ## belt-and-braces like the edge unlist — but a bucket that accumulated
+  ## every deleted node would grow without bound inside a long transaction.
+  var drop: seq[(int32, string, uint64)] = @[]
+  for key in tx.deltaSeekIdx.keys:
+    var keep: seq[(Value, int64)] = @[]
+    for e in tx.deltaSeekIdx[key]:
+      if e[1] != nodeId:
+        keep.add e
+    if keep.len != tx.deltaSeekIdx[key].len:
+      drop.add key
+    tx.deltaSeekIdx[key] = keep
+  for key in drop:
+    tx.deltaSeekIdx.del key
+
 proc deleteNode*(tx: WriteTransaction, id: int64; cascade: bool): bool {.gcsafe.} =
   tx.assertOpen
   var n = tx.peekNode(id)
@@ -420,6 +461,7 @@ proc deleteNode*(tx: WriteTransaction, id: int64; cascade: bool): bool {.gcsafe.
     n.inCount = 0
   n.setFlag nfTombstone
   tx.nodeDelta[id] = n
+  tx.forgetSeekKey(id)
   var payload = ""
   putI64(payload, id)
   tx.emit(opDeleteNode, payload)
@@ -490,6 +532,33 @@ proc deleteEdge*(tx: WriteTransaction, id: int64): bool {.gcsafe.} =
 
 # -------------------------------------------------------------- properties
 
+proc noteSeekKey(tx: WriteTransaction, nodeId: int64, prop: string, v: Value) =
+  ## Record `nodeId` under its (label, property), so a seek for that pair in
+  ## this same transaction can find it without walking the delta.
+  ##
+  ## Keyed by *label code and property name*, not by index name, and that is
+  ## the whole design. An index name would need the writer to consult the
+  ## registry that the reader may not be using — two sources of truth for
+  ## "which index", which is how this first version silently recorded
+  ## nothing: `tx.indicesToUpdate` is the database's registry and `ctx.indices`
+  ## is whatever `prepare` was handed, and a test that builds its own
+  ## registry recorded zero entries and then believed the seek. The label
+  ## and the property are what both sides agree on, and they are also what
+  ## the filter above the seek will confirm.
+  ##
+  ## A value the index cannot hold normalises to `vkNull` and is skipped —
+  ## the committed index would have stood down on it too.
+  if prop.len == 0:
+    return
+  let rec = tx.peekNode(nodeId)
+  if not rec.live:
+    return
+  let k = keyOf(v)
+  if k.kind == vkNull:
+    return
+  let h = keyHash(v)
+  tx.deltaSeekIdx.mgetOrPut((rec.label, prop, h), @[]).add((k, nodeId))
+
 proc setPropCommon(tx: WriteTransaction; target: char; id: int64;
                    key: string; v: Value; isNode: bool): bool  {.gcsafe.} =
   tx.assertOpen
@@ -523,6 +592,7 @@ proc setPropCommon(tx: WriteTransaction; target: char; id: int64;
     var rec = tx.peekNode(id)
     rec.setPropView pv
     tx.nodeDelta[id] = rec
+    tx.noteSeekKey(id, key, v)
   else:
     tx.edgeProps[id] = pv
     var rec = tx.peekEdge(id)
@@ -572,6 +642,12 @@ proc removePropCommon(tx: WriteTransaction, target: char, id: int64, key: string
     var rec = tx.peekNode(id)
     rec.setPropView pv
     tx.nodeDelta[id] = rec
+    ## The property is gone, so the key this node answered to before must
+    ## stop answering for it. `vkNull` is skipped by the read side, which is
+    ## how the entry is retired — and the seek filter above still confirms
+    ## against the real property, so an entry that outlives its removal
+    ## costs a candidate, never a row.
+    tx.noteSeekKey(id, key, Value(kind: vkNull))
   else:
     tx.edgeProps[id] = pv
     var rec = tx.peekEdge(id)
@@ -782,8 +858,10 @@ proc rollback*(tx: WriteTransaction): bool =
     return false
   tx.closed = true
   tx.deltaNodesIdx = @[]
+  tx.deltaNodeSet.clear()
   tx.deltaOutIdx.clear()
   tx.deltaInIdx.clear()
+  tx.deltaSeekIdx.clear()
   ## The rollback marker is what tells recovery the transaction ended
   ## rather than died; a memory database has no log to write it to.
   if tx.wal != nil:

@@ -445,7 +445,8 @@ proc plan*(ctx: QueryCtx, q: Query): Plan =
         ## wrong answer was also *faster*, so nothing measured it.
         ## Building the pattern from the seek keeps the Expands.
         seed = buildPatternFrom(ctx, part.patterns[0],
-                                newIndexSeek(ctx, head.varName, ids, code, ix.name),
+                                newIndexSeek(ctx, head.varName, ids, code, ix.name,
+                                             key),
                                 head.varName)
         seeked = true
       if not seeked:

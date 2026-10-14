@@ -131,7 +131,7 @@ proc keyLess(a: Value, b: Value): bool =
     return a.s < b.s
   return a.f < b.f
 
-proc keyOf(v: Value): Value =
+proc keyOf*(v: Value): Value =
   ## Numbers are keyed as float64 whatever their width, so an int64 column
   ## and a float64 column of the same magnitude share one order. Exactness
   ## above 2^53 is the documented cost; i64 keys would need a tagged
@@ -141,6 +141,40 @@ proc keyOf(v: Value): Value =
   of vkFloat: v
   of vkString: v
   else: Value(kind: vkNull)
+
+# --------------------------------------------- hashing normalised keys
+
+proc keyHash*(v: Value): uint64 =
+  ## A hash of the *normalised* key, so two values this index treats as the
+  ## same key hash to the same bucket. The transaction's delta-side seek
+  ## index uses it to find uncommitted rows without walking them.
+  ##
+  ## Normalisation first, always: an int64 `5` and a float64 `5.0` are the
+  ## same key to this index (`keyOf`), so they must be the same bucket, or
+  ## the lookup would miss a row the scan would have found.
+  let k = keyOf(v)
+  case k.kind
+  of vkFloat:
+    var bits = cast[uint64](k.f)
+    bits
+  of vkString:
+    ## FNV-1a over the bytes, so the result depends only on the string's
+    ## content and not on where it was allocated. `hash` from `hashes` is
+    ## process-seeded and would make an index's bucket assignment differ
+    ## between runs, which is harmless for a delta but would be a bad habit
+    ## to copy into the committed index later.
+    var h = 0xcbf29ce484222325'u64
+    for ch in k.s:
+      h = (h xor cast[uint64](ord(ch))) * 0x100000001b3'u64
+    h
+  else:
+    0'u64
+
+proc keySame*(a, b: Value): bool =
+  ## Exact key equality — the tie-break a hash bucket needs. A collision
+  ## must cost a comparison, never a wrong answer, so every candidate from
+  ## a bucket is confirmed here before it is used.
+  not keyLess(a, b) and not keyLess(b, a)
 
 # ------------------------------------------------------------- block level
 

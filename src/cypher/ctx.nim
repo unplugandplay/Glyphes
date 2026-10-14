@@ -14,7 +14,7 @@
 ## also the price TXN.md §4 records — readers serialise — and the reason
 ## nothing here is allowed to call `endRead` early.
 
-import std/[tables, atomics]
+import std/[tables, sets, atomics]
 import ../index/index
 import ../store/store
 import ../txn/txn
@@ -168,13 +168,17 @@ proc nodeRecOf*(ctx: QueryCtx, id: int64): (bool, NodeRec) =
 proc liveDelta*(ctx: QueryCtx, id: int64): bool =
   ## True when the node exists *only* in the transaction's delta — the case
   ## the snapshot's arrays cannot answer, because the id is past their end.
-  buildDelta(ctx)
-  result = false
+  ##
+  ## A set membership test, not a walk of `deltaNodes`. This is on the seek
+  ## path: `okIndexSeek` asks `nodeAlive` about every uncommitted node it
+  ## hands out, and every uncommitted node misses the snapshot and lands
+  ## here. Walking the delta made a single indexed lookup inside a
+  ## transaction O(delta), which made a bulk load O(N^2) even after the seek
+  ## itself had been made O(1) — the same statement, three times slower than
+  ## it should be, for a membership test.
   if ctx.writer == nil:
-    return
-  for did in ctx.deltaNodes:
-    if did == id:
-      return true
+    return false
+  id in ctx.writer.deltaNodeSet
 
 # ------------------------------------------------- reads through a snapshot
 

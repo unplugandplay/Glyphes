@@ -2768,4 +2768,62 @@ with the change stashed: 2.15 ms against 2.06 ms. Not a regression.
 
 ```
 378 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
+
+### The delta seek index
+
+The last quadratic: an index learns about writes at *commit*, so a node
+created in the same transaction as the edges is invisible to a seek, and the
+seek falls back to walking the transaction's delta — O(delta) per statement,
+O(N²) for the load. Now the transaction keeps its own map of uncommitted
+rows, maintained as `setNodeProp` runs:
+
+    deltaSeekIdx: (label code, property, hash of normalised key) -> ids
+
+and an equality seek is a hash probe instead of a walk. Rollback clears it,
+`deleteNode` retires the node from every bucket, and `removeProp` records a
+null so a removed property stops answering for its old key.
+
+**Range predicates deliberately do not use it.** `<`, `IN` and the rest have
+no bucket, and — this is the part that must not be "optimised" later — a
+seek that *misses* a row cannot be repaired by the filter above it, because
+the filter can only remove rows. Every other operator still walks the delta.
+Slower, and correct; a test pins it.
+
+#### The two bugs that were in the fix before it worked
+
+Both were mine, and both are the kind that a benchmark alone would have
+called "a smaller constant".
+
+**Keyed by index name.** The first version recorded into the buckets the
+indexes `tx.indicesToUpdate` named. But the *reader* looks up through
+`ctx.indices`, which is whatever `prepare` was handed. In production those
+are the same registry; in a test that builds its own, they are not — so the
+writer recorded nothing, the reader found nothing, and three tests failed
+with `MERGE` quietly creating duplicates. Re-keyed by `(label, property)`,
+which both sides already agree on, and the dependence on a registry
+disappears.
+
+**Copied the bucket map on every lookup.** Nim's `Table.[]` returns its
+value *by value*, so binding the inner bucket table to a local copied the
+whole map. The "O(1) delta seek" was O(buckets) — the quadratic it was
+written to remove, wearing a disguise. A profile put 7 047 samples in
+`deltaSeekIds` above two `eqcopy___txnZtxn` frames and said so plainly.
+Flattened to a single map, read through the owner without binding:
+
+| | before | after |
+|---|---|---|
+| indexed lookup inside a transaction | 6 895/s | **75 261/s** |
+| …at twice the transaction | 3 560/s | 65 952/s |
+| benchmark edge load (20 000) | 46.8 s | **5.3 s** |
+
+Flat in the size of the transaction, where it was quadratic. Also fixed on
+the way: `liveDelta` walked `deltaNodes` linearly and `nodeAlive` calls it,
+so membership is now a `HashSet` probe — an O(delta) test that was being run
+on the seek path of every statement.
+
+382 Nim tests, 211 Ruby runs / 697 assertions — all green.
+C1 132/132 + 17/17 refusals, W1-W3, T1, E, I5, I-vec, R8, M1 green.
+
+```
+382 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
 ```
