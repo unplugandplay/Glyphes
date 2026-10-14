@@ -2606,4 +2606,53 @@ testing only the shape that hides the bug.
 
 ```
 376 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
+
+### MERGE, and the import cycle that hid the index
+
+The benchmark's load row was 108.9 s against SQLite's 0.051 s, and almost all
+of it was one clause. `mergeChain` builds MERGE's match half with the same
+constructors the planner uses — and chose `scanFor`, a full label scan,
+because the seek lived in `plan.nim`, which imports `ops.nim`:
+
+```
+## Built with the same constructors the planner uses (`scanFor` is its
+## rule-1/rule-5 decision) rather than by calling `plan`, because
+## `plan.nim` imports this module and the call the other way is a cycle.
+```
+
+The comment was accurate and the decision was wrong. Binding a node for
+`MERGE (b:Person {id: $id})` is the same question as `MATCH (b:Person
+{id: $id})`, and the two were being answered differently — one by seeking,
+one by scanning — with no test able to see it, because MERGE's *answers* were
+always right.
+
+`SeekKey`, `seekKeyable`, `evalLiteral` and `seekIds` moved down into
+`ops.nim`, which `plan.nim` already imports. A new `seekFor` picks the head's
+first keyable indexed inline property, exactly as the planner's
+`seekCandidates` does, and falls back to `scanFor` otherwise. Both paths now
+answer through the same two functions, so they cannot drift apart again.
+
+| | before | after |
+|---|---|---|
+| `MATCH (x {id: $i}) MERGE (y {id: $i})` | 275/s | 1 037/s |
+| edge load, one transaction | ~150–230/s | 643/s |
+| edge load, 20 transactions | ~150–230/s | 892/s |
+
+Two tests. One pins that a MERGE through an index finds its node and writes
+nothing — the answer, not the clock, because an accelerator may change how
+fast and never what. The other pins the direction that matters: a MERGE must
+see a node created *in the same transaction*, which the index cannot know
+about. That is the delta scan inside `newIndexSeek`, and without it a seek
+would silently miss the row it was looking for — the one way an accelerator is
+allowed to be wrong is also the one way it must never be.
+
+**What is still slow, and why.** 1 037/s is not 11 843/s. The delta scan is
+proportional to the transaction's size, so one long bulk-load transaction is
+quadratic: 12 000 edges in a single transaction run at 643/s and the same
+edges across 20 transactions run at 892/s. Caching the delta per transaction
+rather than re-scanning it per statement is the next change, and until it
+lands, `limitations.md` §2 says to use the importer instead.
+
+```
+378 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
 ```

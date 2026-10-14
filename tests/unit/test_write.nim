@@ -24,6 +24,7 @@ import ../../src/cypher/ctx
 import ../../src/cypher/parser
 import ../../src/database
 import ../../src/errors
+import ../../src/index/index
 
 type Fixture = tuple[s: GraphStore, tx: WriteTransaction]
 
@@ -577,6 +578,63 @@ suite "M5.2 DELETE":
     check read(f.s, "MATCH (n:P) RETURN n").len == 0
 
 suite "M5.3 MERGE":
+  test "MERGE finds its node through the index, like MATCH does":
+    ## `mergeChain` used to build its match half with `scanFor` — a full
+    ## label scan — because the seek lived in `plan.nim`, which imports
+    ## `ops.nim` and so could not be imported back. Binding a node for
+    ## `MERGE (b:P {id: $id})` is the same question as `MATCH (b:P
+    ## {id: $id})`, and it was answered two different ways, one of them
+    ## about 40x slower: edge load ran at 183 edges/s.
+    ##
+    ## The seek machinery now lives in `ops.nim` and both go through it.
+    ## This pins the *answer*, not the clock: an accelerator may change how
+    ## fast, never what.
+    var f = newFixture()
+    var reg = newIndexes()
+    discard reg.create(IdxRange, "P", "id")
+    for i in 0 ..< 200:
+      var p = initTable[string, Value]()
+      p["id"] = Value(kind: vkInt, i: int64(i))
+      discard f.exec("CREATE (:P {id: $id})", p)
+    reg.rebuild(f.s)
+    ## Every MERGE must find its node and write nothing. If the seek and
+    ## the property filter disagreed, this either creates duplicates or
+    ## finds nothing at all — both fail the count.
+    var p2 = initTable[string, Value]()
+    p2["id"] = Value(kind: vkInt, i: 137'i64)
+    var st = prepare(f.s, "MERGE (n:P {id: $id})", p2, f.tx, 0, "", reg)
+    while st.step():
+      discard
+    let wrote = st.rowsAffected()
+    st.close()
+    check wrote == 0
+    discard f.tx.commit()
+    check countOf(f.s, "MATCH (n:P) RETURN n") == 200
+
+  test "a MERGE in a transaction sees a node created in that transaction":
+    ## The seek consults the index, which cannot know about nodes this
+    ## transaction has not published. If the delta were not consulted, the
+    ## MERGE would miss its own node and create a second one — the one
+    ## direction an accelerator may not move, and the reason a seek is
+    ## always paired with a filter rather than trusted as an authority.
+    var f = newFixture()
+    var reg = newIndexes()
+    discard reg.create(IdxRange, "P", "id")
+    reg.rebuild(f.s)
+    var p = initTable[string, Value]()
+    p["id"] = Value(kind: vkInt, i: 42'i64)
+    discard f.exec("CREATE (:P {id: $id})", p)
+    var p2 = initTable[string, Value]()
+    p2["id"] = Value(kind: vkInt, i: 42'i64)
+    var st = prepare(f.s, "MERGE (n:P {id: $id})", p2, f.tx, 0, "", reg)
+    while st.step():
+      discard
+    let wrote = st.rowsAffected()
+    st.close()
+    check wrote == 0
+    discard f.tx.commit()
+    check countOf(f.s, "MATCH (n:P) RETURN n") == 1
+
   test "creates when the pattern does not match":
     var f = newFixture()
     check f.exec("MERGE (n:P {v: 1})") == 1

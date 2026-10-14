@@ -37,14 +37,6 @@ which is exactly why the edge loader below is slow.
 
 ## 2. Loading a graph is slow, and it is the dialect's fault
 
-Measured on this machine, 3·10³ nodes with an index on the lookup property:
-
-| operation | rate |
-|---|---|
-| `CREATE (:Person {…})` in a transaction | 21 620/s |
-| `MATCH (x:Person {id: $id}) RETURN x` | 11 843/s |
-| `MATCH (x:Person {id: $id}) MERGE (y:Person {id: $id})` | **275/s** |
-
 Because a comma-`MATCH` is refused and a second `MATCH` is a join, creating an
 edge between two *existing* nodes requires binding both endpoints explicitly:
 
@@ -52,20 +44,34 @@ edge between two *existing* nodes requires binding both endpoints explicitly:
 MATCH (a:Person {id: $src}) MERGE (b:Person {id: $dst}) CREATE (a)-[:KNOWS]->(b)
 ```
 
-That `MERGE` is the bottleneck, and it is slow for a specific reason:
-`mergeChain` (src/cypher/ops.nim) builds its match half with `scanFor`, a
-label scan, rather than seeking the index the planner would use. So every edge
-is a full label scan. Measured end to end, edge load runs at **~150–230
-edges/second** while node load runs at **~11 600/s**.
+That `MERGE` is the bottleneck. It was far worse than it needed to be:
+`mergeChain` (src/cypher/ops.nim) built its match half with `scanFor` — a
+full label scan — because the seek lived in `plan.nim`, which imports
+`ops.nim` and so could not be imported back. Binding a node for `MERGE (b:P
+{id: $id})` is the same question as `MATCH (b:P {id: $id})`, and it was
+answered two different ways.
 
-The fix is known and is not done: the seek logic lives in `plan.nim`, and
-`ops.nim` cannot import it without a cycle, so sharing it means moving
-`SeekKey`/`seekIds` down into `ops.nim`. Until then, bulk load should not be
-done through the query language — it should be done with the store's own write
-path, which is what the importer (M9) does.
+The seek machinery now lives in `ops.nim` and both paths go through it.
+Measured on this machine, 3·10³ nodes with an index on the lookup property:
 
-**This was found by M11's benchmark, not by a test.** The `MERGE` path is
-correct; it is only slow, and correctness tests cannot see slowness.
+| operation | before | after |
+|---|---|---|
+| `CREATE (:Person {…})` in a transaction | 21 620/s | 21 620/s |
+| `MATCH (x:Person {id: $id}) RETURN x` | 11 843/s | 11 843/s |
+| `MATCH (x:Person {id: $id}) MERGE (y:Person {id: $id})` | 275/s | **1 037/s** |
+| edge load, end to end | ~150–230/s | **643–892/s** |
+
+**This is still slow, and the remaining gap is a different problem.** A MERGE
+inside an open write transaction consults the transaction's delta for nodes it
+has not published yet, and that scan is proportional to the transaction's size
+— so one long bulk-load transaction is quadratic. Splitting the load into many
+smaller transactions is measurably faster (892/s against 643/s at 12 000 edges)
+for exactly that reason.
+
+Until the delta is cached per transaction rather than re-scanned per
+statement, **do not bulk-load a graph through the query language.** Use the
+importer (M9), which uses the store's own write path. That advice is why this
+section is a limitation and not a bug report.
 
 ## 3. Benchmark scale is small, and that is a consequence of §2
 
@@ -91,11 +97,11 @@ does.
 
 | workload | glyphes | sqlite | ratio |
 |---|---|---|---|
-| load (nodes) | 0.218 s | 0.013 s | 0.1x |
-| load (edges) | 108.9 s | 0.051 s | 0.0x |
-| point | 0.010 s | 0.002 s | 0.2x |
-| one-hop | 0.049 s | 0.012 s | 0.2x |
-| two-hop | 0.014 s | 0.006 s | 0.4x |
+| load (nodes) | 0.077 s | 0.014 s | 0.2x |
+| load (edges) | 89.2 s | 0.029 s | 0.0x |
+| point | 0.005 s | 0.003 s | 0.6x |
+| one-hop | 0.036 s | 0.014 s | 0.4x |
+| two-hop | 0.008 s | 0.004 s | 0.4x |
 | filter | 0.002 s | 0.000 s | 0.1x |
 
 **SQLite was faster on all of them.** This section is not a formality. The
@@ -104,8 +110,11 @@ timing whose answers disagree — so these are two systems answering the same
 question correctly, and one of them did it sooner.
 
 What the numbers do support: glyphes' per-statement overhead is small (a
-point lookup is 50 µs), and the *edge load* gap (183 edges/s) is the `MERGE`
-defect of §2 rather than a statement about storage.
+point lookup is 25 µs, and it is 6x closer to SQLite than it was before
+`MERGE` learned to seek). The *edge load* gap is §2: 224 edges/second here,
+against 643–892/s measured on a smaller graph, because this run loads all
+20 000 edges in one transaction and a MERGE re-scans its unpublished delta
+per statement.
 
 What they do not support is any claim that glyphes beats SQLite on these
 workloads. It does not, at this scale, and publishing the table is the point.

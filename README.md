@@ -148,8 +148,10 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
   `make soak`, and green over a 100-second 20-node run; the five-day gate
   itself is still to be run, and `docs/TESTING.md` says so rather than
   implying otherwise.
-- **MERGE scans instead of seeking**, so bulk-loading a graph through the
-  query language runs at a few hundred edges/second. Use the importer.
+- **Bulk loading through the query language is still slow** (~650–900
+  edges/second). `MERGE` used to scan where the planner seeks, which made it
+  4x worse; that is fixed, but a MERGE inside one long transaction still
+  re-scans its delta per statement. Use the importer.
   [`limitations.md`](limitations.md) §2 has the measurements.
 - **R12** (8-process worker simulation) and **W7** (fsynced/NORMAL
   commit throughput) are named in the gate tables with no harness yet.

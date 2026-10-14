@@ -158,11 +158,11 @@ glyphes; below 1.0 means SQLite was faster):
 
 | workload | glyphes | sqlite | ratio |
 |---|---|---|---|
-| load (nodes) | 0.218 s | 0.013 s | 0.1x |
-| load (edges) | 108.9 s | 0.051 s | 0.0x |
-| point | 0.010 s | 0.002 s | 0.2x |
-| one-hop | 0.049 s | 0.012 s | 0.2x |
-| two-hop | 0.014 s | 0.006 s | 0.4x |
+| load (nodes) | 0.077 s | 0.014 s | 0.2x |
+| load (edges) | 89.2 s | 0.029 s | 0.0x |
+| point | 0.005 s | 0.003 s | 0.6x |
+| one-hop | 0.036 s | 0.014 s | 0.4x |
+| two-hop | 0.008 s | 0.004 s | 0.4x |
 | filter | 0.002 s | 0.000 s | 0.1x |
 
 **SQLite won every row.** That is the honest result and it is the reason
@@ -173,8 +173,13 @@ the *shape* of the queries and the model layer, not that it wins a
 micro-benchmark against a B-tree — and a reader who only read the ratio
 column would conclude the opposite.
 
-The edge-load row (108.9 s vs 0.051 s) is the `MERGE` cost of
-`limitations.md` §2, measured end to end: 183 edges/second.
+The edge-load row (89.2 s for 20 000 edges) is the `MERGE` cost of
+`limitations.md` §2: 224 edges/second. That is slower than the isolated
+measurement of 643–892/s because the benchmark loads all 20 000 edges in a
+*single* transaction, and a MERGE re-scans its transaction's unpublished
+delta on every statement. Splitting the load across transactions is
+measurably faster — which is why `limitations.md` says to use the importer
+rather than the query language for bulk loads.
 
 **Three things the numbers will not tell you**, all in `limitations.md`:
 benchmark scale is small and small favours SQLite's page cache; bulk load

@@ -28,6 +28,7 @@ import ../store/store
 import ../store/prop
 import ../txn/txn
 import ../index/index
+import ../index/range
 import ../index/text
 import ../index/analyzer
 import ../index/vector
@@ -258,6 +259,93 @@ proc newScanByLabel*(ctx: QueryCtx, label: string, bindVar: string): Operator =
     result.ids = ctx.snap.members[code.int - 1]
   result.idsAt = 0
   result.deltaIds = scanDeltaNodes(ctx)
+
+## --- The shared seek machinery -------------------------------------
+##
+## This lives here rather than in plan.nim because MERGE needs it too,
+## and plan.nim imports this module — the reverse import is a cycle.
+## `mergeChain` used to build its match half with `scanFor` because the
+## seek was unreachable from here, which made every MERGE a full label
+## scan: edge load ran at 183/s against 11 600/s for node load. The
+## planner's `seekCandidates` and MERGE's head now answer through the
+## same two functions, so the two cannot drift into different plans for
+## the same predicate.
+
+type SeekKey* = object
+  ## What a seek needs: the node variable, the property, the comparison, and
+  ## the value. Kept as data rather than as an operator so the planner can
+  ## *ask* whether an index exists before it commits to a plan — a plan
+  ## that cannot be executed is not a plan.
+  varName*: string
+  prop*: string
+  op*: string
+  value*: Value
+  values*: seq[Value]        ## `IN`: more than one
+
+proc flipOp*(op: string): string =
+  ## The comparator with its operands swapped, for `30 = n.age`.
+  case op
+  of "=": "="
+  of "<": ">"
+  of ">": "<"
+  of "<=": ">="
+  of ">=": "<="
+  else: ""
+
+proc seekKeyable*(key: SeekKey): bool =
+  ## Whether every value this predicate carries is one the index can hold.
+  ## Checked here rather than inside the index so that "should I use the
+  ## index" is a planner question with one answer: a bool or a list in the
+  ## predicate means the scan answers and the index was never a shortcut
+  ## for it.
+  if key.op == "IN":
+    if key.values.len == 0:
+      return false
+    for v in key.values:
+      if not keyable(v):
+        return false
+    return true
+  keyable(key.value)
+
+proc evalLiteral*(ctx: QueryCtx, e: Expr): Value =
+  ## The value side of a seek predicate. A parameter resolves here, so
+  ## `WHERE n.age = $age` is seekable — the plan is built after parameters
+  ## are bound, which is why this is not a plan-time constant.
+  if e.kind == ekParam:
+    return ctx.params.getOrDefault(e.name, Value(kind: vkNull))
+  evaluate(ctx, initRow(2), e)
+
+proc seekIds*(ctx: QueryCtx, ix: RangeIndex, key: SeekKey): seq[int64] =
+  ## The index's answer for one predicate. `IN` is a union of point seeks
+  ## rather than a range: the ids are de-duplicated because a list may
+  ## repeat a value, and a duplicated id would be a duplicated *row*.
+  ## An unbounded side is `null`, which `keyLess` orders above everything, so
+  ## it excludes nothing. The first version used ±1e308, and a *string*
+  ## index silently returned nothing: `keyLess("p5", 1e308)` is false for
+  ## every string, so every entry read as past the upper bound and the walk
+  ## stopped on the first one. An infinity of the wrong type is not an
+  ## infinity.
+  result = @[]
+  case key.op
+  of "=":
+    result = ix.seekEq(key.value)
+  of "IN":
+    var seen = initHashSet[int64]()
+    for v in key.values:
+      for id in ix.seekEq(v):
+        if id notin seen:
+          seen.incl id
+          result.add id
+  of "<":
+    result = ix.collect(Value(kind: vkNull), key.value, false)
+  of "<=":
+    result = ix.collect(Value(kind: vkNull), key.value, true)
+  of ">":
+    result = ix.collect(key.value, Value(kind: vkNull), true)
+  of ">=":
+    result = ix.collect(key.value, Value(kind: vkNull), true)
+  else:
+    result = @[]
 
 proc scanFor*(ctx: QueryCtx, np: NodePattern): Operator =
   ## EXEC.md §4.1 rules 1 and 5, the two decisions the planner makes about
@@ -720,6 +808,40 @@ proc newAggregate*(ctx: QueryCtx, child: Operator, items: seq[ReturnItem],
       result.keyItems.add items[i].expr
       result.keyNames.add "__g" & $i
 
+proc seekFor(ctx: QueryCtx, np: NodePattern): Operator =
+  ## The head of a match chain, preferring a seek over a scan.
+  ##
+  ## The rule is the planner's own: the first inline property of the head
+  ## node that (a) names a property an index exists on, and (b) carries a
+  ## value the index can hold, is the seek key. Everything else is a scan,
+  ## and the property filters still go on top either way, so a seek stays a
+  ## candidate generator and cannot change an answer.
+  ##
+  ## `MERGE`'s match half runs through here, which is the whole point: it
+  ## used to call `scanFor` directly because the seek lived in a module it
+  ## could not import. Binding a node for `MERGE (b:Person {id: $id})` is
+  ## the same question as `MATCH (b:Person {id: $id})`, and it was being
+  ## answered two different ways — one of them 40x slower.
+  if ctx.indices == nil or np.varName.len == 0:
+    return scanFor(ctx, np)
+  for (prop, expr) in np.props:
+    ## An unbound parameter resolves to null, which is not keyable, so it
+    ## falls through to the scan. That direction matters: seeking on null
+    ## would answer nothing, and nothing is fewer rows than the scan finds.
+    if expr.kind != ekLit and expr.kind != ekParam:
+      continue
+    let key = SeekKey(varName: np.varName, prop: prop, op: "=",
+                      value: evalLiteral(ctx, expr))
+    if not seekKeyable(key):
+      continue
+    let ix = ctx.indices.find(if np.label.len > 0: np.label else: "", prop)
+    if ix == nil or not ix.usable:
+      continue
+    let code = (if np.label.len > 0: ctx.store.labels.lookup(np.label)
+                else: 0'i32)
+    return newIndexSeek(ctx, np.varName, seekIds(ctx, ix, key), code, ix.name)
+  scanFor(ctx, np)
+
 proc mergeChain*(ctx: QueryCtx, pat: Pattern,
                  bound: seq[(string, Value)]): Operator =
   ## The match half of a MERGE, built fresh for one row.
@@ -739,7 +861,7 @@ proc mergeChain*(ctx: QueryCtx, pat: Pattern,
   ## A plan is a stateful cursor, so this runs once per row: MERGE costs a
   ## plan per row, which is the price of not caching plans across the
   ## statement (EXEC.md §1, init-once).
-  var chain = scanFor(ctx, pat.elems[0].node)
+  var chain = seekFor(ctx, pat.elems[0].node)
   for i in 1 ..< pat.elems.len:
     if pat.elems[i].isNode:
       continue

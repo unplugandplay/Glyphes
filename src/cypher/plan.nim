@@ -246,17 +246,6 @@ proc optionalBuilder(ctx: QueryCtx, pat: Pattern,
     result = chain
 
 
-type SeekKey = object
-  ## What a seek needs: the node variable, the property, the comparison, and
-  ## the value. Kept as data rather than as an operator so the planner can
-  ## *ask* whether an index exists before it commits to a plan — a plan
-  ## that cannot be executed is not a plan.
-  varName*: string
-  prop*: string
-  op*: string
-  value*: Value
-  values*: seq[Value]        ## `IN`: more than one
-
 proc flipOp(op: string): string =
   ## The comparator with its operands swapped, for `30 = n.age`.
   case op
@@ -266,29 +255,6 @@ proc flipOp(op: string): string =
   of "<=": ">="
   of ">=": "<="
   else: ""
-
-proc seekKeyable(key: SeekKey): bool =
-  ## Whether every value this predicate carries is one the index can hold.
-  ## Checked here rather than inside the index so that "should I use the
-  ## index" is a planner question with one answer: a bool or a list in the
-  ## predicate means the scan answers and the index was never a shortcut
-  ## for it.
-  if key.op == "IN":
-    if key.values.len == 0:
-      return false
-    for v in key.values:
-      if not keyable(v):
-        return false
-    return true
-  keyable(key.value)
-
-proc evalLiteral(ctx: QueryCtx, e: Expr): Value =
-  ## The value side of a seek predicate. A parameter resolves here, so
-  ## `WHERE n.age = $age` is seekable — the plan is built after parameters
-  ## are bound, which is why this is not a plan-time constant.
-  if e.kind == ekParam:
-    return ctx.params.getOrDefault(e.name, Value(kind: vkNull))
-  evaluate(ctx, initRow(2), e)
 
 proc seekCandidates(ctx: QueryCtx, part: QueryPart,
                     nodeVars: seq[string]): seq[SeekKey] =
@@ -378,38 +344,6 @@ proc seekCandidates(ctx: QueryCtx, part: QueryPart,
   return keep
 
 
-
-proc seekIds(ctx: QueryCtx, ix: RangeIndex, key: SeekKey): seq[int64] =
-  ## The index's answer for one predicate. `IN` is a union of point seeks
-  ## rather than a range: the ids are de-duplicated because a list may
-  ## repeat a value, and a duplicated id would be a duplicated *row*.
-  ## An unbounded side is `null`, which `keyLess` orders above everything, so
-  ## it excludes nothing. The first version used ±1e308, and a *string*
-  ## index silently returned nothing: `keyLess("p5", 1e308)` is false for
-  ## every string, so every entry read as past the upper bound and the walk
-  ## stopped on the first one. An infinity of the wrong type is not an
-  ## infinity.
-  result = @[]
-  case key.op
-  of "=":
-    result = ix.seekEq(key.value)
-  of "IN":
-    var seen = initHashSet[int64]()
-    for v in key.values:
-      for id in ix.seekEq(v):
-        if id notin seen:
-          seen.incl id
-          result.add id
-  of "<":
-    result = ix.collect(Value(kind: vkNull), key.value, false)
-  of "<=":
-    result = ix.collect(Value(kind: vkNull), key.value, true)
-  of ">":
-    result = ix.collect(key.value, Value(kind: vkNull), true)
-  of ">=":
-    result = ix.collect(key.value, Value(kind: vkNull), true)
-  else:
-    result = @[]
 
 proc plan*(ctx: QueryCtx, q: Query): Plan =
   var seed: Operator = nil
