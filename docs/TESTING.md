@@ -219,10 +219,10 @@ Every gate is reproducible from one command. `make <target>` is a thin
 wrapper for the same `nimble` task, so the two entry points cannot drift.
 
 ```
-nimble test                              375 Nim tests, churn shrunk        ~2 s
-nimble testGate                          375 Nim tests, full 10^6 churn   ~25 s
+nimble test                              382 Nim tests, churn shrunk        ~2 s
+nimble testGate                          382 Nim tests, full 10^6 churn   ~25 s
 nimble fixture                           rebuilds social.glyph from Nim     ~2 s
-nimble gemtest                           211 Ruby runs / 697 assertions     ~1 s
+nimble gemtest                           214 Ruby runs / 705 assertions     ~1 s
 nimble bench [n]                         M1 budgets, non-zero on a miss     ~3 s
 nimble benchQuery [n]                    C9 query budgets, 10^6 nodes      ~2 s
 nimble benchIndex                        I5 index budgets                  ~30 s

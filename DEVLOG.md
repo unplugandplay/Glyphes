@@ -2826,4 +2826,58 @@ C1 132/132 + 17/17 refusals, W1-W3, T1, E, I5, I-vec, R8, M1 green.
 
 ```
 382 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
+
+### The read that could not see the transaction it was called from
+
+The limitation file carried an entry saying reads through an open write
+transaction after `DETACH DELETE` were "not trustworthy". It was wrong, and
+wrong in the way a misdiagnosis is most expensive: it named a narrow,
+exotic defect when the real one was total.
+
+Every read inside `db.transaction` returned nothing. Not reads after a
+delete — *reads*. `MATCH (x:N) RETURN x.n` inside the block answered with the
+empty set, because nothing in that block had committed, and the snapshot the
+read took predated every write in it.
+
+```
+## read path:
+let st = prepare(db.store, $cypher, params, nil, 0, "", db.indices)
+
+## write path (exec, exec_returning):
+let joined = db.writerTx != 0
+if joined: tx = lookup[WriteTransaction](db.writerTx, hkTransaction)
+st = prepare(db.store, $cypher, params, tx, 0, "", db.indices)
+```
+
+Writes joined the transaction. Reads asked for `nil` and got a snapshot read.
+The engine has supported read-your-own-writes since C4 — the delta seek
+index added in this same milestone exists to serve precisely this case — and
+the binding never asked for it. The model layer inherited it, because
+`Model.where(...).to_a` goes through `db.query`, so the one place a user is
+most likely to notice was the one place it was broken.
+
+The fix is the write path's four lines, applied to the read path. A read
+with no open transaction still passes `nil`, deliberately: beginning one
+would take the writer lock, and four concurrent readers would collide.
+
+How it survived: every Ruby test that needed to see uncommitted data used
+`exec` — which joins — so no test ever read through `query` inside a
+transaction. The gap was in the seam between two paths that were each
+correct, which is exactly where a green suite says nothing.
+
+  in-transaction read, before this fix   []
+  in-transaction read, after             the transaction's own rows
+
+Three tests: the read-your-writes sequence including a cascade that must
+*not* over-reach, four threads reading concurrently to prove no query takes
+the writer lock, and the model layer's `where` inside a transaction.
+
+382 Nim tests, 214 Ruby runs / 705 assertions — all green.
+C1 132/132 + 17/17 refusals, W1-W3, T1, E, I5, I-vec, R8, M1 green. C9's
+throughput budget fails on this shared machine (load 7.6-10.2) and fails
+identically with this change stashed — 24 002/s against a 50 000 gate on
+both.
+
+```
+382 Nim tests   214 Ruby runs / 705 assertions   C1 132/132 + 17/17 refusals
 ```

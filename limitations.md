@@ -189,16 +189,6 @@ Named honestly rather than left to be discovered:
   which is testable, and it is not smart.
 - **Memory growth under long reads.** The snapshot path is exercised by the
   soak, which found no leak — but the soak is one configuration of one machine.
-- **Reading back through an open write transaction after `DETACH DELETE`
-  is not trustworthy.** In one transaction — create `a`, `b`, `c`, link
-  `a→b` and `a→c`, then `DETACH DELETE b` — a read issued *through the same
-  transaction* returns nothing where `a→c` should remain. The committed
-  answer is correct, and this reproduces identically before and after the
-  delta-index change, so it predates it and is untouched by it. Found while
-  writing a regression test for the delta indexes; the test was removed
-  rather than encoding an answer nobody had verified. It needs its own
-  investigation and its own fix.
-
 ## 8. What M11 changed about the engine itself
 
 `limitations.md` is not only about what is missing. M11's benchmark found four
@@ -211,6 +201,7 @@ gate cannot see because the answers came back *right*:
 | an inline pattern property `{id: $id}` was never a seek candidate | the common inline spelling full-scanned; 84/s against 9 998/s |
 | a seek replaced the whole pattern chain | **every relationship in the pattern was dropped** |
 | the variable-length walk popped its stack frame at the hop limit | `*1..2` silently omitted every branch past the first |
+| `query`/`prepare` never joined an open transaction | a read in the middle of `db.transaction` could not see that transaction's writes — every read returned the pre-transaction snapshot |
 
 Two of those are silent *wrong answers*, and they are the ones that matter:
 

@@ -700,4 +700,75 @@ class M5Test < Minitest::Test
       db3.close
     end
   end
+
+  # A read inside `db.transaction` sees what that transaction wrote. This is
+  # the Ruby half of pin C4: the engine always had it (the delta seek index
+  # exists to serve exactly this), but `query` and `prepare` passed `nil` for
+  # the writer while `exec` joined, so a read in the middle of a transaction
+  # answered from a snapshot that predated every write in it. Every read
+  # returned nothing, not just reads after a DELETE — which is how this was
+  # originally misdiagnosed as a DETACH DELETE defect.
+  def test_a_read_inside_a_transaction_sees_its_own_writes
+    db = Glyphes::Database.memory
+    db.transaction do
+      db.exec("CREATE (:N {n: 'a'})")
+      db.exec("CREATE (:N {n: 'b'})")
+      db.exec("CREATE (:N {n: 'c'})")
+      # Both edges leave `a`, so deleting `b` must take `a->b` and leave
+      # `a->c` — the case where a cascade that over-reaches is visible.
+      %w[b c].each do |dst|
+        db.exec("MATCH (x:N {n: 'a'}) MERGE (y:N {n: $t}) CREATE (x)-[:R]->(y)",
+                { "t" => dst })
+      end
+
+      assert_equal %w[a b c],
+                   db.query("MATCH (x:N) RETURN x.n AS n ORDER BY n").flat_map { |r| r }
+      assert_equal %w[b c],
+                   db.query("MATCH (:N {n: 'a'})-[r:R]->(y:N) RETURN y.n AS n ORDER BY n")
+                       .flat_map { |r| r }
+
+      db.exec("MATCH (b:N {n: 'b'}) DETACH DELETE b")
+
+      # The deleted node is gone and the edge that went with it, and the
+      # survivor is still there — all inside the same transaction.
+      assert_equal %w[a c],
+                   db.query("MATCH (x:N) RETURN x.n AS n ORDER BY n").flat_map { |r| r }
+      assert_equal %w[c],
+                   db.query("MATCH (:N {n: 'a'})-[r:R]->(y:N) RETURN y.n AS n")
+                       .flat_map { |r| r }
+      assert_empty db.query("MATCH (x:N {n: 'b'}) RETURN x")
+    end
+    # Committed, and the same answers.
+    assert_equal %w[a c],
+                 db.query("MATCH (x:N) RETURN x.n AS n ORDER BY n").flat_map { |r| r }
+    db.close
+  end
+
+  def test_a_read_outside_a_transaction_still_does_not_take_the_writer_lock
+    db = Glyphes::Database.memory
+    db.exec("CREATE (:N {n: 'x'})")
+    # A read with no open transaction must not *begin* one. If it did, a
+    # query would take the writer lock and two readers would collide.
+    threads = 4.times.map do
+      Thread.new { 20.times { db.query("MATCH (n:N) RETURN n.n AS v").to_a } }
+    end
+    threads.each(&:join)
+    db.close
+  end
+
+  def test_a_model_read_inside_a_transaction_sees_its_own_writes
+    db = Glyphes::Database.memory
+    klass = Class.new(Glyph::Base) do
+      def self.name = "Thing"
+    end
+    klass.store = db
+    db.transaction do
+      klass.create!(n: 1)
+      klass.create!(n: 2)
+      ## `where` goes through `db.query`, which is the path that used to be
+      ## blind. The model layer is where a user would notice first.
+      assert_equal 2, klass.where({}).to_a.size
+    end
+    db.close
+  end
 end

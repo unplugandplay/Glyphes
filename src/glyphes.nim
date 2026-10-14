@@ -877,7 +877,21 @@ proc glyphes_prepare*(hDb: GlyHandle, cypher: cstring, paramsJson: cstring,
       let text = $paramsJson
       if text.strip != "":
         params = parseParamsJson(text)
-    let st = prepare(db.store, $cypher, params, nil, 0, "", db.indices)
+    ## Join an open write transaction if there is one, the way `exec` does.
+    ## Without this a read inside `db.transaction` cannot see what that
+    ## transaction has written — not because the engine cannot show it (pin
+    ## C4, and the delta seek index exists to serve exactly this), but
+    ## because the binding asked for a snapshot read and got one. `exec`
+    ## and `exec_returning` joined; `query` and `prepare` did not, which
+    ## made the model layer's reads blind to the transaction they were
+    ## called from.
+    ##
+    ## A read with no open transaction still passes `nil`: it must not
+    ## begin one, or every query would take the writer lock.
+    var tx: WriteTransaction
+    if db.writerTx != 0:
+      tx = lookup[WriteTransaction](db.writerTx, hkTransaction)
+    let st = prepare(db.store, $cypher, params, tx, 0, "", db.indices)
     ## Same discipline as prepare's own plan guard: from a successful
     ## prepare to a registered handle, a failure must run `close` or the
     ## snapshot outlives the statement and the writer gate parks forever.

@@ -106,7 +106,7 @@ Verified **after** the M10 changes, on the full gate (`nimble gate`):
 
 - **382 Nim tests, 0 failures** — store, WAL, recovery, transactions,
   Cypher, all three index families, the model layer's statement compiler.
-- **211 Ruby tests / 697 assertions, 0 failures** — the seam, the model
+- **214 Ruby tests / 705 assertions, 0 failures** — the seam, the model
   layer, import/export, status mapping.
 - `nimble tck` — the committed TCK subset: **132/132 in-contract rows
   pass, all 17 out-of-contract rows refuse by name.**
@@ -165,7 +165,7 @@ nimble build        the shared library (release, ORC, threaded)
 nimble test         382 Nim tests (fast)
 nimble testGate     382 Nim tests at full churn
 nimble fixture      rebuild tests/fixtures/social.glyph
-nimble gemtest      211 Ruby runs / 697 assertions
+nimble gemtest      214 Ruby runs / 705 assertions
 nimble crash        W1 crash gate
 nimble bitflip      W3 bit-flip sweep + W2 truncate sweep (GLYPHES_BITFLIPS=N)
 nimble soak         T1 concurrency gate
