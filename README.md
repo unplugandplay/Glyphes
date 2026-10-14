@@ -104,9 +104,9 @@ instead of serving it.
 
 Verified **after** the M10 changes, on the full gate (`nimble gate`):
 
-- **370 Nim tests, 0 failures** — store, WAL, recovery, transactions,
+- **376 Nim tests, 0 failures** — store, WAL, recovery, transactions,
   Cypher, all three index families, the model layer's statement compiler.
-- **210 Ruby tests / 693 assertions, 0 failures** — the seam, the model
+- **211 Ruby tests / 697 assertions, 0 failures** — the seam, the model
   layer, import/export, status mapping.
 - `nimble tck` — the committed TCK subset: **132/132 in-contract rows
   pass, all 17 out-of-contract rows refuse by name.**
@@ -144,8 +144,13 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 
 ### What is not done
 
-- **M11 — benchmarks & docs** (README/`ARCHITECTURE`/`TESTING` polish,
-  `limitations.md`, the 20-node 5-day soak) is the remaining milestone.
+- **The 5-day soak has not been run.** The harness is built, wired to
+  `make soak`, and green over a 100-second 20-node run; the five-day gate
+  itself is still to be run, and `docs/TESTING.md` says so rather than
+  implying otherwise.
+- **MERGE scans instead of seeking**, so bulk-loading a graph through the
+  query language runs at a few hundred edges/second. Use the importer.
+  [`limitations.md`](limitations.md) §2 has the measurements.
 - **R12** (8-process worker simulation) and **W7** (fsynced/NORMAL
   commit throughput) are named in the gate tables with no harness yet.
 - Fusing a traversal into a retrieval statement (the `MATCH` after a
@@ -157,10 +162,10 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 
 ```
 nimble build        the shared library (release, ORC, threaded)
-nimble test         370 Nim tests (fast)
-nimble testGate     370 Nim tests at full churn
+nimble test         376 Nim tests (fast)
+nimble testGate     376 Nim tests at full churn
 nimble fixture      rebuild tests/fixtures/social.glyph
-nimble gemtest      210 Ruby runs / 693 assertions
+nimble gemtest      211 Ruby runs / 697 assertions
 nimble crash        W1 crash gate
 nimble bitflip      W3 bit-flip sweep + W2 truncate sweep (GLYPHES_BITFLIPS=N)
 nimble soak         T1 concurrency gate
@@ -203,10 +208,14 @@ it was gated in. The gate is the budget, not a reading.
 | M4–M6 | Cypher read/write, pull pipeline, range/text/vector indexes | **landed** |
 | M7–M9 | Ruby surface, model layer, import/export | **landed** |
 | M10 | Corruption & recovery: CRC verification, bit-flip/truncate sweeps | **landed** |
-| M11 | Benchmark suite, docs, `limitations.md`, long soak | specified |
+| M11 | Benchmark suite vs SQLite, docs, published `limitations.md`, soak harness | **landed** |
 
-See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the gates, and
-[`ENHANCEMENTS.md`](ENHANCEMENTS.md) for what is deliberately not next.
+**[`limitations.md`](limitations.md)** is the honest list: what glyphes is
+bad at, with measurements, published *before* the release rather than after.
+
+Design documents: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the map,
+[`docs/ROADMAP.md`](docs/ROADMAP.md) has the gates, and
+[`ENHANCEMENTS.md`](ENHANCEMENTS.md) is what is deliberately not next.
 
 ## Why
 

@@ -4,7 +4,7 @@
 > crash-safe) is green end to end, and M4 is the first milestone that
 > answers a question rather than only storing an answer.
 >
-> **M0–M6.1 landed.** `nimble gate` runs 317 Nim tests, 106 Ruby tests and
+> **M0–M11 landed.** `nimble gate` runs 376 Nim tests, 211 Ruby tests and
 > the TCK subset, all passing, both halves clean under AddressSanitizer,
 > TSan clean over the soak, and every budget green:
 >

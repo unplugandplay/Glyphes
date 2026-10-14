@@ -215,74 +215,94 @@ differential suites exist alongside.
 
 ## 4. Reproducibility
 
-Every gate is reproducible from one command:
+Every gate is reproducible from one command. `make <target>` is a thin
+wrapper for the same `nimble` task, so the two entry points cannot drift.
 
 ```
-nimble test                              317 Nim tests, churn shrunk        ~2 s
-nimble testGate                          317 Nim tests, full 10^6 churn   ~25 s
+nimble test                              375 Nim tests, churn shrunk        ~2 s
+nimble testGate                          375 Nim tests, full 10^6 churn   ~25 s
 nimble fixture                           rebuilds social.glyph from Nim     ~2 s
-nimble gemtest                           106 Ruby tests                    instant
-nimble bench [n]                         M1 budgets, non-zero on a miss   ~3 s
-nimble benchQuery [n]                    C9 query budgets, 10^6 nodes     ~2 s
-nimble tck                               C1 over the committed subset     ~0.1 s
+nimble gemtest                           211 Ruby runs / 697 assertions     ~1 s
+nimble bench [n]                         M1 budgets, non-zero on a miss     ~3 s
+nimble benchQuery [n]                    C9 query budgets, 10^6 nodes      ~2 s
+nimble benchIndex                        I5 index budgets                  ~30 s
+nimble benchVector                       I-vec recall + determinism        ~60 s
+nimble benchImport                       R8 CSV/Parquet drift              ~30 s
+nimble benchSqlite [n] [fanout]          M11 vs SQLite edge-tables       ~3 min
+nimble tck                               C1 over the committed subset      ~0.1 s
 nimble crash                             W1 crash gate, 25 kills           ~40 s
-nimble soak [seconds]                    T1, 10 s by default               ~15 s
-nimble gate                              all of the above, in order        ~90 s
+nimble soak [seconds]                    T1 concurrency, 10 s default      ~15 s
+nimble soakLeak [s] [nodes]              M11 20-node leak soak, 5 days   long
+nimble gate                              all of the above, in order       ~90 s
 nimble asan                              both suites under ASan           ~90 s
 ```
 
-Plus, once they exist: `nim c -r tests/fuzz/run.nim -- --seed=42
---rounds=10000`, and `nim c -d:release -r tests/run_all.nim` for the
-budget gates against the optimized build.
+Or, through make:
 
-Note that `nimble gate` chains plain `exec` calls rather than
-`exec "nimble ..."` — re-entering nimble from inside a nimscript
-deadlocks on the package lock, which is why the command list is spelled
-out rather than composed.
+```
+make test          make bench        make bench-sqlite
+make gate          make soak         make soak-smoke
+```
+
+`make bench` runs the whole benchmark suite (M1, C9, I5, M5.6 sort, I-vec,
+R8, M11). `make bench-sqlite` runs only the comparison against SQLite.
+`make soak` is the 20-node 5-day leak gate; `make soak-smoke` is the same
+harness for 100 seconds, which is what proves it runs at all.
+
+### 4.1 The soak
+
+`nimble soakLeak` / `make soak` is the only gate whose default is a five-day
+run, because a leak that a minute cannot see is a leak that matters.
+
+- **Built with `--mm:orc`,** not the `--mm:atomicArc` the rest of the suite
+  uses. The verdict is a slope in `getOccupiedMem`, and that number is ORC's
+  own allocator accounting. A gate on an allocator it does not own is a gate
+  on a proxy.
+- **The verdict is the slope between the first and last quarters,** not the
+  peak. A soak that grows to 2 GB and holds there is fine; a soak that grows
+  2 GB and keeps going is a leak. The peak is exactly the wrong number to
+  gate on.
+- **Node and edge counts are sampled next to the memory,** so a rising number
+  is never mistaken for a leak. Writers commit continuously, so the store's
+  own arrays grow for legitimate reasons; only growth that survives to the
+  steady state is a leak.
+- **Node/edge counts and read/write counters** are printed per sample, so a
+  run that "passed" by doing no work is INCONCLUSIVE rather than GREEN.
+- A short run is reported **INCONCLUSIVE, not GREEN.** The sample interval
+  adapts to the duration (`min(30 s, duration / 4)`) so a smoke test still
+  gets enough samples to mean something.
+
+A 100-second, 20-node run on the development machine: no heap growth in the
+steady state, 0 errors. The five-day run is the gate; a passing smoke run is
+evidence the harness works, and this document does not claim the five-day run
+has happened.
+
+### 4.2 Absolute budgets are suspended on a loaded machine
+
+The budget gates measure wall-clock time, so they report their own
+suspension:
+
+```
+load average 6.7 > 4.0: absolute budgets suspended, ratio gate only
+```
+
+When the machine is loaded, absolute milliseconds are meaningless and the gate
+falls back to the *ratio* comparisons (query with index against query without),
+which are load-independent. A green gate line under suspension means the ratios
+held; it does not mean the wall-clock budget was checked. Read which one ran.
+
+### 4.3 A note on `nimble build`
 
 `nimble build` does not run the `build` task in `glyphes.nimble`:
 nimble 0.24 defines a `build` task of its own, which wants a `bin` key
 this package deliberately does not have, so the built-in wins and the
-command dies with "Nothing to build". Until the task is renamed, build
-the library with the `nim c` line from `glyphes.nimble`'s `gate`.
+command dies with "Nothing to build". Build the library with the `nim c`
+line from `glyphes.nimble`'s `gate`.
 
-**The build is pinned to arm64 in `config.nims`,** because a build
-started from a Rosetta shell (an x86_64 terminal, an x86 Ruby, anything
-under `arch -x86_64`) otherwise links an x86_64 `libglyphes.so` and the
-Ruby suite fails at `dlopen` with `mach-o file, but is an incompatible
-architecture (have 'x86_64', need 'arm64')` — a failure that points at
-`lib/glyphes/ffi.rb` rather than at the build. A cache created before
-the pin keeps the wrong target; move it aside
-(`mv ~/.cache/nim/glyphes_r{,.bak}`) or build with
-`--nimcache:tmp/nimcache`. DEVLOG, "the wrong slice incident".
-
-- `tests/ORACLE` pins Nim, Ruby, and SQLite versions plus the flags.
-  It changes only by explicit decision, as in `../nimblyru`.
-- Benchmarks pin `m`, `ef_construction`, HNSW seed, and dataset
-  generator seed (`INDEX.md` I11 — determinism is what makes
-  golden-testing an index possible at all).
-- Corpus generation is seeded and committed, so a 10⁶-node benchmark
-  dataset is reproducible from its seed rather than checked in. The M1
-  churn test uses seed 20261007 and the label-index test 99, both inline
-  so a failure is reproducible from the file alone.
-- The M1 churn fixture is generated, not checked in: 10⁶ operations of
-  create/delete on ~4·10⁵ nodes is a few hundred MB of ids, and a seed
-  is a better artifact than the data.
-
-The ASan build (`--passC:-fsanitize=address"`) runs both suites. For an
-FFI library the bugs are mostly memory bugs, and ASan finds them in
-minutes where manual review finds them in weeks.
-
-**On macOS, `nimble asan` sets `DYLD_INSERT_LIBRARIES`** to the ASan
-runtime. ASan cannot install its interceptors from a `dlopen`ed library:
-without the preload the suite runs and reports green while ASan watches
-nothing, which is the worst possible failure mode for a sanitizer. The
-run ends with `ERROR: Failed to munmap` — Nim's ORC allocator returns
-pages in a way ASan's shadow mapping does not tolerate. That is a known
-Nim/ASan interaction, appears *after* the results line, and is not a
-glyphes bug (`M0-NOTES.md` §8).
-
----
+**The build is pinned to arm64 in `config.nims`,** because a build started
+from a Rosetta shell (an x86_64 terminal, an x86 Ruby, anything
+cross-architecture) produces a library Ruby cannot load, and the resulting
+error blames the ABI rather than the shell.
 
 ## 5. TCK subset management
 

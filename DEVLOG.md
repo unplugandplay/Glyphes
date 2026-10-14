@@ -2546,4 +2546,64 @@ Two defects M11's own plan would have buried:
 
 ```
 373 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
+
+### Two more, from the same benchmark
+
+The benchmark kept finding things, which is the argument for having written
+it. Both are silent: right answers where there should have been others.
+
+#### A seek dropped the pattern's relationships
+
+The worst defect in the project so far, and it was in the planner from the
+day seeking was written. When the planner seeked, it assigned the seek to the
+seed and stopped — it never built the pattern chain:
+
+```nim
+seed = newIndexSeek(ctx, head.varName, ids, code, ix.name)   # that was it
+if not seeked:
+  seed = buildPattern(ctx, part.patterns[0])                  # only on a scan
+```
+
+So every `Expand` was lost whenever the query seeked:
+
+```
+MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.age = 30
+  -> one row, b unbound, b.id = null
+```
+
+Not an error. Not a slow answer — a *wrong* answer, and a **fast** one,
+which is why no timing gate could see it either. It survived because
+index-seeking had only ever been tested on patterns with no relationships in
+them, and because the TCK runs without indexes so it never seeked at all.
+
+The fix is one line of intent: the seek is the chain's *head node*, not the
+whole pattern, so the chain is built from it.
+
+#### The variable-length walk forgot its branches
+
+`enumeratePaths` popped the entire stack frame when it reached `maxHops`,
+instead of backing up one edge and letting the same frame try its next
+candidate. Two consequences:
+
+```
+0 -> 1,  0 -> 2,  1 -> 2,  1 -> 3
+
+*1..1 from 0 -> [1, 2]            correct
+*1..2 from 0 -> [1, 2, 2]         3 missing
+*1..3 from 0 -> [1, 2, 2, 3]      3 appears one hop late
+```
+
+A path reported one hop deeper than it is. And the pop released `via` — the
+edge that led *into* the frame — instead of the edge just taken, so that
+edge stayed in the `used` set for the rest of the walk and no later path
+could cross it.
+
+Every existing variable-length test uses a **ring**, where each node has
+exactly one out-edge. With one candidate per frame, "pop the frame" and
+"back up one edge" are indistinguishable. The bug needs a node with two
+out-edges, and no fixture had one. A test suite can be green and still be
+testing only the shape that hides the bug.
+
+```
+376 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
 ```
