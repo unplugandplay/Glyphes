@@ -134,22 +134,21 @@ proc nextStmtId*(): uint64 =
   stmtCounter.fetchAdd(1'u64) + 1'u64
 
 proc buildDelta*(ctx: QueryCtx) =
-  ## One pass over the transaction's delta, turned into the three indexes
-  ## the read path asks for: which nodes exist beyond the snapshot, and
-  ## which edges leave and enter each one.
+  ## Hand the read path the transaction's delta indexes. Three assignments:
+  ## the transaction maintains them as it writes, because a bulk load is
+  ## many statements over one growing delta and deriving them per statement
+  ## was O(N^2) for N edges.
+  ##
+  ## Sharing the tables across statements is safe because nothing mutates
+  ## them here — `buildDelta` is the only writer, and it no longer writes.
   if ctx.deltaReady:
     return
   ctx.deltaReady = true
   if ctx.writer == nil:
     return
-  for id, rec in ctx.writer.nodeDelta:
-    if rec.live:
-      ctx.deltaNodes.add id
-  for id, rec in ctx.writer.edgeDelta:
-    if not rec.live:
-      continue
-    ctx.deltaOut.mgetOrPut(rec.src, @[]).add id
-    ctx.deltaIn.mgetOrPut(rec.dst, @[]).add id
+  ctx.deltaNodes = ctx.writer.deltaNodesIdx
+  ctx.deltaOut = ctx.writer.deltaOutIdx
+  ctx.deltaIn = ctx.writer.deltaInIdx
 
 proc nodeRecOf*(ctx: QueryCtx, id: int64): (bool, NodeRec) =
   ## The node's record as *this statement* may see it: the snapshot first,

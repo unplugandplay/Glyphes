@@ -61,17 +61,41 @@ Measured on this machine, 3·10³ nodes with an index on the lookup property:
 | `MATCH (x:Person {id: $id}) MERGE (y:Person {id: $id})` | 275/s | **1 037/s** |
 | edge load, end to end | ~150–230/s | **643–892/s** |
 
-**This is still slow, and the remaining gap is a different problem.** A MERGE
-inside an open write transaction consults the transaction's delta for nodes it
-has not published yet, and that scan is proportional to the transaction's size
-— so one long bulk-load transaction is quadratic. Splitting the load into many
-smaller transactions is measurably faster (892/s against 643/s at 12 000 edges)
-for exactly that reason.
+**This is still slow, and part of the reason is not yet found.**
 
-Until the delta is cached per transaction rather than re-scanned per
-statement, **do not bulk-load a graph through the query language.** Use the
-importer (M9), which uses the store's own write path. That advice is why this
-section is a limitation and not a bug report.
+`buildDelta` — the function that answers "what has this transaction written
+that the snapshot cannot see" — rebuilt three indexes by walking the whole
+delta on every statement. A bulk load is many statements over one delta that
+grows to the size of the load, so that was O(N²) for N edges. The
+transaction already knew exactly what it had created, so it now maintains
+those indexes as it writes and `buildDelta` is three assignments:
+
+| 12 000 edges, one transaction | before | after |
+|---|---|---|
+| persistent store | 556/s | **823/s** |
+| memory store | — | 819/s |
+
+Node `CREATE`, which mutates the delta and never reads it, ran at 76 832/s
+while a `MATCH` read inside the same growing transaction ran at 1 421/s —
+that gap *was* `buildDelta`.
+
+**But the workload is still quadratic, and the remaining term is not
+identified.** Doubling the edges still costs 4.2x the time:
+
+| one transaction | 12 000 edges | 24 000 edges |
+|---|---|---|
+| persistent | 14.6 s (823/s) | 61.8 s (391/s) |
+
+It is not the delta indexes — pre-committing and re-indexing the nodes first,
+so every endpoint seek hits the index and the delta node list is empty,
+scales identically (14.8 s / 61.3 s). It is not durability — the memory
+store, with no WAL at all, is the same (14.7 s). So the remaining quadratic
+is in the engine's edge-merge path, and this file does not claim to know
+where. Candidates not yet ruled out: `commit`'s per-node `rebuildChains`, or
+the transaction's edge-delta handling.
+
+Until that is found, **do not bulk-load a graph through the query language.**
+Use the importer (M9), which uses the store's own write path.
 
 ## 3. Benchmark scale is small, and that is a consequence of §2
 
@@ -156,6 +180,15 @@ Named honestly rather than left to be discovered:
   which is testable, and it is not smart.
 - **Memory growth under long reads.** The snapshot path is exercised by the
   soak, which found no leak — but the soak is one configuration of one machine.
+- **Reading back through an open write transaction after `DETACH DELETE`
+  is not trustworthy.** In one transaction — create `a`, `b`, `c`, link
+  `a→b` and `a→c`, then `DETACH DELETE b` — a read issued *through the same
+  transaction* returns nothing where `a→c` should remain. The committed
+  answer is correct, and this reproduces identically before and after the
+  delta-index change, so it predates it and is untouched by it. Found while
+  writing a regression test for the delta indexes; the test was removed
+  rather than encoding an answer nobody had verified. It needs its own
+  investigation and its own fix.
 
 ## 8. What M11 changed about the engine itself
 

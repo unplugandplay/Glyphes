@@ -96,6 +96,29 @@ type
     ## presence, which makes MERGE quadratic (TXN.md §3.2).
     nodeDelta*: Table[int64, NodeRec]
     edgeDelta*: Table[int64, EdgeRec]
+    ## The read path's delta indexes, maintained *as the transaction
+    ## writes* rather than rebuilt when a statement asks for them.
+    ##
+    ## The read path used to derive all three by walking `nodeDelta` and
+    ## `edgeDelta` on first use, and did that per statement. A bulk load is
+    ## many statements over one transaction whose delta grows to the size
+    ## of the load, so every statement paid O(load) for three passes:
+    ## O(N^2) for N edges. Measured on 3·10^3 nodes, node CREATE — which
+    ## mutates the delta and never reads it — ran at 76 832/s while a
+    ## MATCH read inside the same growing transaction ran at 1 421/s.
+    ##
+    ## The transaction already knows exactly what it created and deleted, so
+    ## it maintains these as it goes and `buildDelta` becomes three
+    ## assignments.
+    ##
+    ## `deltaNodesIdx` keeps deleted ids rather than dropping them: every
+    ## reader of it checks liveness afterwards. The edge indexes cannot do
+    ## that — `outEdges` trusts `deltaOutIdx` to hold live edges and
+    ## `okExpand` checks the *other node's* liveness but never the edge's —
+    ## so `deleteEdge` unlists explicitly.
+    deltaNodesIdx*: seq[int64]
+    deltaOutIdx*: Table[int64, seq[int64]]
+    deltaInIdx*: Table[int64, seq[int64]]
     nodeProps*: Table[int64, PropView]
     edgeProps*: Table[int64, PropView]
     nextNodeId*: int64
@@ -187,6 +210,9 @@ proc begin*(store: GraphStore, w: Wal; id: uint32; doSync = true;
   result.maxWalBytes = maxWalBytes
   result.nodeDelta = initTable[int64, NodeRec]()
   result.edgeDelta = initTable[int64, EdgeRec]()
+  result.deltaNodesIdx = @[]
+  result.deltaOutIdx = initTable[int64, seq[int64]]()
+  result.deltaInIdx = initTable[int64, seq[int64]]()
   result.nodeProps = initTable[int64, PropView]()
   result.edgeProps = initTable[int64, PropView]()
   result.frames = @[]
@@ -305,6 +331,7 @@ proc createNode*(tx: WriteTransaction, labelName: string): int64 =
   inc tx.nextNodeId
   let code = tx.labelCode(labelName)
   tx.nodeDelta[id] = newNode(id, code)
+  tx.deltaNodesIdx.add id
   var payload = ""
   putI64(payload, id)
   putI32(payload, code)
@@ -400,6 +427,18 @@ proc deleteNode*(tx: WriteTransaction, id: int64; cascade: bool): bool {.gcsafe.
 
 # ------------------------------------------------------------------- edges
 
+proc unlistEdge(index: var Table[int64, seq[int64]], endpoint, edgeId: int64) =
+  ## Drop one edge id from one endpoint's list, in place. A delete is rare
+  ## next to a create, so the list is rebuilt rather than spliced; the
+  ## splice would cost the same and read worse.
+  if not index.hasKey(endpoint):
+    return
+  var keep: seq[int64] = @[]
+  for id in index[endpoint]:
+    if id != edgeId:
+      keep.add id
+  index[endpoint] = keep
+
 proc createEdge*(tx: WriteTransaction, src, dst: int64,
                  typeName: string): int64 =
   tx.assertOpen
@@ -412,6 +451,8 @@ proc createEdge*(tx: WriteTransaction, src, dst: int64,
   e.nextOut = tx.store.outHeadOf(src)
   e.nextIn = tx.store.inHeadOf(dst)
   tx.edgeDelta[id] = e
+  tx.deltaOutIdx.mgetOrPut(src, @[]).add id
+  tx.deltaInIdx.mgetOrPut(dst, @[]).add id
   var payload = ""
   putI64(payload, id)
   putI32(payload, code)
@@ -436,6 +477,12 @@ proc deleteEdge*(tx: WriteTransaction, id: int64): bool {.gcsafe.} =
   ## endpoint once, against links that were never rewritten.
   e.setFlag efTombstone
   tx.edgeDelta[id] = e
+  ## Unlisted, because nothing downstream re-checks an edge's liveness:
+  ## `outEdges` hands its list straight to the Expand, which filters on
+  ## type and on the far node's liveness. A tombstoned edge left in the
+  ## index would be walked.
+  unlistEdge(tx.deltaOutIdx, e.src, id)
+  unlistEdge(tx.deltaInIdx, e.dst, id)
   var payload = ""
   putI64(payload, id)
   tx.emit(opDeleteEdge, payload)
@@ -734,6 +781,9 @@ proc rollback*(tx: WriteTransaction): bool =
   if tx.closed:
     return false
   tx.closed = true
+  tx.deltaNodesIdx = @[]
+  tx.deltaOutIdx.clear()
+  tx.deltaInIdx.clear()
   ## The rollback marker is what tells recovery the transaction ended
   ## rather than died; a memory database has no log to write it to.
   if tx.wal != nil:

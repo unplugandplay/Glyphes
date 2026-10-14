@@ -2655,4 +2655,63 @@ lands, `limitations.md` §2 says to use the importer instead.
 
 ```
 378 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
+
+### The delta was rebuilt on every statement
+
+MERGE's seek still re-derived the transaction's delta each time. `buildDelta`
+turned `nodeDelta` and `edgeDelta` into three read-path indexes — which new
+nodes exist, which edges leave and which enter each one — and it did it per
+statement, because `deltaReady` was a field on the statement's context and a
+transaction outlives its statements.
+
+A bulk load is exactly the case that punishes this: many statements over one
+delta that grows to the size of the load. O(N²) for N edges.
+
+The isolation was clean. Node `CREATE` mutates the delta and never reads it;
+a `MATCH` read inside the same growing transaction reads it every statement:
+
+```
+node CREATE only (delta mutated, never read)   76 832/s
+MATCH read inside a growing transaction          1 421/s
+```
+
+So the transaction now maintains those three indexes as it writes, and
+`buildDelta` is three assignments. `deleteEdge` unlists explicitly, because
+nothing downstream re-checks an edge's liveness: `outEdges` hands its list
+straight to the Expand, which filters on the relationship's *type* and on the
+*far node's* liveness but never the edge's own. A node delete only has to set
+a flag, since every reader checks liveness afterwards — but an edge delete
+that only set a flag would walk a tombstone.
+
+12 000 edges in one transaction: **556/s to 823/s**.
+
+#### What is still wrong, and what is not known
+
+It is still quadratic. Two x the edges is 4.2x the time:
+
+```
+one transaction   12 000 edges  14.6 s (823/s)
+                  24 000 edges  61.8 s (391/s)
+```
+
+Two hypotheses were tested and eliminated rather than assumed:
+
+- **Not the delta indexes.** Pre-committing the nodes and re-indexing them,
+  so every endpoint seek hits the index and the delta node list is empty,
+  scales identically: 14.8 s / 61.3 s.
+- **Not durability.** A memory store with no WAL at all is the same: 14.7 s.
+
+So the remaining term is in the engine's edge-merge path and this entry does
+not claim to know where. `commit`'s per-node `rebuildChains` and the
+transaction's edge-delta handling are both still standing and neither has
+been measured. `limitations.md` §2 says the same thing and tells a caller to
+use the importer rather than guess.
+
+The honest summary of this change: one quadratic term removed and measured,
+another still present and unlocated. The first was worth ~1.5x at 12 000
+edges and will be worth more as the graph grows, because a term that is
+linear at one size is quadratic at ten.
+
+```
+378 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
 ```
