@@ -2714,4 +2714,58 @@ linear at one size is quadratic at ten.
 
 ```
 378 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
+
+### Writes never saw the index registry
+
+The delta-index change removed one O(N²), but the load was still quadratic —
+2x edges, 4.2x time — and the commit before said the remaining term was "in
+the edge-merge path, not identified." That was wrong, and the way it was
+found is worth recording because it was staring at the code for too long
+while the answer was in the FFI layer.
+
+A `sample` profile of the load put the whole cost inside
+`label scan → filter → readNodeProp`: every node in the label visited, its
+`id` read through a hash lookup, for every edge. A label scan where a seek
+was expected. The tell — visible in hindsight, and it was the same tell as
+the parameter-seek defect — was that *reads* sought and *writes* scanned.
+
+`seekFor` was correct. It was also unreachable, for the second time, for the
+same class of reason:
+
+```nim
+# read path (glyphes_query):
+let st = prepare(db.store, $cypher, params, nil, 0, "", db.indices)
+
+# write paths (glyphes_exec, model):
+st = prepare(db.store, $cypher, params, tx)   # indices defaults to nil
+```
+
+The write paths never passed the registry. So inside a write statement
+`ctx.indices == nil`, `seekFor` fell back to `scanFor`, and every `MERGE`
+full-scanned the label. The Nim test for MERGE seeking passed because it
+handed `reg` to `prepare` directly — the same shape of lie as the I5 gate
+measuring the index without the planner.
+
+  12 000 edges, committed nodes, one txn    556/s -> 8 156/s
+  benchmark edge load (20 000)              89.2 s -> 46.8 s
+
+## The remaining term, now identified
+
+46.8 s is still quadratic, and it is not a bug. An index learns about writes
+at commit, so a node created in the same transaction as the edges is
+invisible to the seek and the seek walks the transaction's delta — O(delta)
+per seek. Commit the nodes first and the same load is 3.3 s (6 129/s), a 14x
+difference that is entirely this term.
+
+Fixing it means maintaining a delta-side seek index as `setNodeProp` runs —
+a real feature, with rollback and concurrency constraints — not a patch.
+`limitations.md` §2 says so, and says to load nodes, commit, then edges (or
+use the importer) until it exists.
+
+378 Nim tests, 211 Ruby runs / 697 assertions — all green. I5's absolute
+timing is red on this machine (load 3.5–4.4, 11 users) and fails identically
+with the change stashed: 2.15 ms against 2.06 ms. Not a regression.
+
+```
+378 Nim tests   211 Ruby runs / 697 assertions   C1 132/132 + 17/17 refusals
 ```

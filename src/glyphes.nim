@@ -1037,7 +1037,7 @@ proc glyphes_exec*(hDb: GlyHandle, cypher: cstring, paramsJson: cstring,
     var st: Statement
     var finished = false
     try:
-      st = prepare(db.store, $cypher, params, tx)
+      st = prepare(db.store, $cypher, params, tx, 0, "", db.indices)
       while st.step():
         discard
       outN[] = st.rowsAffected()
@@ -1098,7 +1098,7 @@ proc glyphes_exec_returning*(hDb: GlyHandle, cypher: cstring,
     var finished = false
     var gotId = false
     try:
-      st = prepare(db.store, $cypher, params, tx)
+      st = prepare(db.store, $cypher, params, tx, 0, "", db.indices)
       ## First row, first column: the model's contract is
       ## `CREATE … RETURN id(n) AS id`, one column, so column 0 is the id.
       ## A row whose first cell is not an integer (the caller returned
