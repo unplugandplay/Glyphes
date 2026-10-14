@@ -34,16 +34,18 @@ proc idsOf(rows: seq[Row], column = "n"): seq[int64] =
     result.add v.id
   result.sort()
 
-proc runQ(s: GraphStore, sql: string, reg: Indexes): seq[Row] =
-  let st = prepare(s, sql, initTable[string, Value](), nil, 0, "", reg)
+proc runQ(s: GraphStore, sql: string, reg: Indexes,
+          params: Table[string, Value] = initTable[string, Value]()): seq[Row] =
+  let st = prepare(s, sql, params, nil, 0, "", reg)
   defer: st.close()
   st.collectRows()
 
-proc sameAnswer(s: GraphStore, sql: string, reg: Indexes) =
+proc sameAnswer(s: GraphStore, sql: string, reg: Indexes,
+                params: Table[string, Value] = initTable[string, Value]()) =
   ## Run it with and without the index. The query is in the message, because
   ## a failure with two anonymous seqs in it is unreadable.
-  let withIndex = idsOf(runQ(s, sql, reg))
-  let without = idsOf(runQ(s, sql, nil))
+  let withIndex = idsOf(runQ(s, sql, reg, params))
+  let without = idsOf(runQ(s, sql, nil, params))
   ## `check` in this stdlib takes the condition alone, so the pair
   ## comparison echoes the query itself when the two answers differ: a
   ## failure with two anonymous id sequences in it is unreadable, and the
@@ -379,13 +381,81 @@ suite "M6.1 the planner":
     discard st.collectRows()
     check ix.probes == 0
 
-  test "a seek is skipped when the pattern's own property map already answers":
-    ## `MATCH (n:Person {age: 30})` constrains the same property; both paths
-    ## give the same rows, and the inline filter is what makes the seek safe
-    ## rather than authoritative.
+  test "a seek does not drop the pattern's relationships":
+    ## The severe one. The planner used to assign the seek straight to the
+    ## seed and stop, so every Expand in the pattern was lost whenever it
+    ## seeked:
+    ##
+    ##   MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.age = 30
+    ##     -> one row, `b` unbound, no error
+    ##
+    ## `b.id` came back null where the traversal's rows should be, and the
+    ## wrong answer was *faster* than the scan, so no timing gate could see
+    ## it. It needs a graph with edges to show up at all, and the TCK runs
+    ## without indexes, so neither the unit tests nor C1 could reach it.
+    let s = people(200)
+    ## The graph is built through the store, not through `CREATE`: this is
+    ## a test of the *planner*, and a parser path would only add a second
+    ## thing that could be wrong.
+    let src = s.createNode("Person")
+    let mid = s.createNode("Person")
+    let far = s.createNode("Person")
+    for n in [src, mid, far]:
+      discard s.setNodeProp(n, "age", Value(kind: vkInt, i: 30))
+    discard s.createEdge(src, mid, "KNOWS")
+    discard s.createEdge(src, far, "KNOWS")
+    let reg = withIndex(s, "Person", "age")
+    ## Every spelling of the same question, with the index and without.
+    for q in ["MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.age = 30 RETURN b",
+              "MATCH (a:Person {age: 30})-[:KNOWS]->(b:Person) RETURN b",
+              "MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) WHERE a.age = 30 RETURN b",
+              "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE a.age = 30 RETURN a, b, r"]:
+      let withIndex = idsOf(runQ(s, q, reg), "b")
+      let without = idsOf(runQ(s, q, nil), "b")
+      if withIndex != without:
+        echo "  seek changes the answer for: ", q, " -> ",
+             $withIndex.len, " with, ", $without.len, " without"
+      check withIndex == without
+      ## Two out-edges from one node: the bug answered with one row, so a
+      ## row count alone catches it even before the ids are compared.
+      check without.len == 2
+
+  test "an inline property seeks, and its filter is what makes the seek safe":
+    ## `MATCH (n:Person {age: 30})` constrains the same property twice —
+    ## once as a seek candidate, once as a filter above it. Both paths give
+    ## the same rows, and the inline filter above the seek is what makes the
+    ## seek a shortcut rather than a second implementation of the pattern.
+    ## The seek used to be skipped here, which cost 119x on the inline
+    ## spelling (84/s vs 9 998/s on 2·10^4 indexed nodes) and made every
+    ## edge statement a full scan.
     let s = people(200)
     let reg = withIndex(s, "Person", "age")
+    let ix = reg.find("Person", "age")
+    var params = initTable[string, Value]()
+    params["age"] = Value(kind: vkInt, i: 30)
+    ix.probes = 0
+    let st = prepare(s, "MATCH (n:Person {age: $age}) RETURN n",
+                     params, nil, 0, "", reg)
+    defer: st.close()
+    let rows = st.collectRows()
+    check ix.probes == 1
     sameAnswer(s, "MATCH (n:Person {age: 30}) RETURN n", reg)
+    sameAnswer(s, "MATCH (n:Person {age: $age}) RETURN n", reg, params)
+
+  test "an inline property that the index cannot hold does not seek":
+    ## An inline property on a non-indexed property, and one whose value is
+    ## unkeyable, both fall back to the scan rather than returning nothing.
+    let s = people(200)
+    let reg = withIndex(s, "Person", "age")
+    let ix = reg.find("Person", "age")
+    var params = initTable[string, Value]()
+    params["ok"] = Value(kind: vkBool, b: true)
+    ix.probes = 0
+    let st = prepare(s, "MATCH (n:Person {name: $ok}) RETURN n",
+                     params, nil, 0, "", reg)
+    defer: st.close()
+    discard st.collectRows()
+    check ix.probes == 0
 
 suite "M6.1 freshness":
   test "a committed write is in the index, and a rollback leaves it out":

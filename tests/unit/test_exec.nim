@@ -750,6 +750,44 @@ suite "M5.5 variable length":
       for e in p.items:
         check e.kind == vkEdge
 
+  test "a branching node reaches every branch at the hop limit":
+    ## The variable-length walk used to pop the whole stack frame when it
+    ## reached `maxHops`, which abandoned every remaining candidate of the
+    ## node it was standing on — and released `via` instead of the edge just
+    ## taken, so that edge stayed claimed for the rest of the walk.
+    ##
+    ##   0 -> 1,  0 -> 2,  1 -> 2,  1 -> 3
+    ##
+    ## `*1..2` from 0 answered [1, 2, 2] and left out 3; 3 only turned up at
+    ## `*1..3`, a path reported one hop deeper than it is.
+    ##
+    ## The tests above use a *ring*, where every node has exactly one
+    ## out-edge. One candidate per frame means popping the frame and backing
+    ## up one edge are indistinguishable, which is why this survived: the
+    ## bug needs a node with two out-edges, and every fixture here had one
+    ## edge per node.
+    let s = newStore()
+    var ids: array[4, int64]
+    for i in 0 .. 3:
+      ids[i] = s.createNode("N")
+      discard s.setNodeProp(ids[i], "n", Value(kind: vkString, s: "n" & $i))
+    discard s.createEdge(ids[0], ids[1], "R")
+    discard s.createEdge(ids[0], ids[2], "R")
+    discard s.createEdge(ids[1], ids[2], "R")
+    discard s.createEdge(ids[1], ids[3], "R")
+    let one = strs(run(s, "MATCH (a:N {n: 'n0'})-[r*1..1]->(b) " &
+                       "RETURN b.n AS b ORDER BY b"), "b")
+    check one == @["n1", "n2"]
+    let two = ints(run(s, "MATCH (a:N {n: 'n0'})-[r*1..2]->(b) " &
+                        "RETURN size(r) AS len ORDER BY len, b"), "len")
+    check two == @[1'i64, 1'i64, 2'i64, 2'i64]
+    let ends = strs(run(s, "MATCH (a:N {n: 'n0'})-[r*1..2]->(b) " &
+                        "RETURN b.n AS b ORDER BY b"), "b")
+    check ends == @["n1", "n2", "n2", "n3"]
+    let exact = ints(run(s, "MATCH (a:N {n: 'n0'})-[r*2..2]->(b) " &
+                         "RETURN size(r) AS len ORDER BY len"), "len")
+    check exact == @[2'i64, 2'i64]
+
   test "a relationship cannot appear twice in one path":
     ## The rule that makes `*` terminate at all, on the cycle x1 → x2 → x3
     ## → x1. Uniqueness is over *relationships*, not nodes: a walk may come

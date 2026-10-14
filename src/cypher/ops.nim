@@ -626,24 +626,21 @@ proc enumeratePaths(ctx: QueryCtx, start: int64, dir: Direction, typeCode: int32
     if maxHops == 0 or path.len < maxHops:
       frames.add Frame(node: other, cands: candidates(other), at: 0, via: eid)
     else:
-      ## At the limit. The walk is finished, so the frame that found this
-      ## edge is finished too: give the edge back and the depth with it.
-      ## Not doing this — leaving the frame to try its next candidate — is
-      ## what let `*2..2` answer with three-hop walks: the loop stayed at
-      ## depth 2 and appended a third edge to the same path.
-      if top == 0:
-        ## …except for the seed frame, which owns no edge of its own. Popping
-        ## it ended the enumeration: every start node then reported only its
-        ## first out-edge, which reads as "this node has one relationship"
-        ## and is true of almost nothing.
-        path.setLen(path.len - 1)
-        used.excl(eid)
-      else:
-        let via = frames[top].via
-        frames.setLen(top)
-        path.setLen(path.len - 1)
-        if via != 0:
-          used.excl(via)
+      ## At the limit. The walk is finished with *this* edge, not with this
+      ## whole frame: give the edge back, back up one step, and let the same
+      ## frame try its next candidate.
+      ##
+      ## It used to pop the frame instead, which abandoned every remaining
+      ## candidate of the node it was standing on — so `*1..2` from a node
+      ## with two out-edges reported the children of only the first. It also
+      ## released `frames[top].via` rather than the edge just taken, so the
+      ## edge stayed in `used` for the rest of the walk and no later path
+      ## could cross it. Four nodes, edges 0->1, 0->2, 1->2, 1->3:
+      ## `*1..2` from 0 answered [1, 2, 2] instead of [1, 2, 2, 3], and 3
+      ## only appeared at `*1..3` — a path reported one hop deeper than it
+      ## is, which is the wrong end variable on the wrong length.
+      path.setLen(path.len - 1)
+      used.excl(eid)
 
 proc newProject*(ctx: QueryCtx, child: Operator, items: seq[ReturnItem],
                  columns: seq[string]): Operator =

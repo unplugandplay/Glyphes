@@ -154,7 +154,13 @@ out-delete	out	MATCH (a) DELETE a	DELETE
 out-union	out	MATCH (a) RETURN a UNION MATCH (b) RETURN b	UNION
 out-second-match	out	MATCH (a) MATCH (b) RETURN 1	second MATCH
 in-varlen-one-hop	in	MATCH (a:Person)-[*1]->(b) RETURN count(*) AS c	[[7]]
-in-varlen-two-hops	in	MATCH (a:Person)-[r*2..2]->(b) RETURN count(*) AS c	[[4]]
+# [[4]] was recorded while `enumeratePaths` popped the whole stack frame at
+# the hop limit, abandoning the remaining branches of the node it stood on.
+# The fixture's edges are Alice->{Bob,Carol}, Bob->{Acme,Dave},
+# Carol->{Acme,Dave}, Dave->{Eve}; the two-hop walks are
+# Alice->Bob->{Dave,Acme}, Alice->Carol->{Dave,Acme}, Bob->Dave->Eve,
+# Carol->Dave->Eve = 6. The denominator was wrong, not the engine.
+in-varlen-two-hops	in	MATCH (a:Person)-[r*2..2]->(b) RETURN count(*) AS c	[[6]]
 in-varlen-binds-list	in	MATCH (a:Person)-[r*2..2]->(b) RETURN size(r) AS len, min(size(r)) AS lo	[[2,2]]
 in-varlen-unique-per-path	in	MATCH (a:Person {name: 'Alice'})-[*]->(b) RETURN count(*) AS c	[[8]]
 in-varlen-beyond-graph	in	MATCH (a:Person {name: 'Eve'})-[*2..3]->(b) RETURN count(*) AS c	[[0]]

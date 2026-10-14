@@ -293,14 +293,14 @@ proc evalLiteral(ctx: QueryCtx, e: Expr): Value =
 proc seekCandidates(ctx: QueryCtx, part: QueryPart,
                     nodeVars: seq[string]): seq[SeekKey] =
   ## Every conjunct of the match's `WHERE` that a range index could answer,
-  ## in source order.
+  ## in source order, preceded by the pattern's own inline properties.
   ##
   ## Source order and not "best" order because EXEC.md §4.1 says so: with
   ## two indexed predicates and no cardinalities, the first one wins, and a
   ## cost-based choice would have to guess. A conjunct is taken only when
   ## its variable is the node this pattern binds, because an index on
   ## `:Person(age)` cannot answer `WHERE other.age = 30`.
-  if part.matchCond == nil or ctx.indices == nil:
+  if ctx.indices == nil or part.patterns.len == 0:
     return @[]
   var found = newSeq[SeekKey]()
   ## A value side the index can be keyed by: a literal *or* a parameter.
@@ -312,6 +312,21 @@ proc seekCandidates(ctx: QueryCtx, part: QueryPart,
   ## 235/s as a parameter against 51 164/s as a literal (DEVLOG, "the
   ## literal gate").
   proc isValue(e: Expr): bool = e.kind == ekLit or e.kind == ekParam
+
+  ## The head node's inline properties, and first: `MATCH (n:Person
+  ## {age: 30})` is the more specific predicate of the two, and its filter
+  ## still runs above the seek either way, so making it a candidate cannot
+  ## change an answer — only which nodes are examined. This was the second
+  ## half of the same defect: the inline spelling ran at 84/s against
+  ## 17 606/s for the `WHERE` spelling on 2·10^4 indexed nodes, which made
+  ## every edge statement a full scan. The M11 edge-load benchmark is what
+  ## finally made that visible (881 edges/s, DEVLOG "the literal gate").
+  let headEl = part.patterns[0].elems[0]
+  if headEl.isNode and headEl.node.varName.len > 0:
+    for entry in headEl.node.props:
+      if isValue(entry.expr):
+        found.add SeekKey(varName: headEl.node.varName, prop: entry.key,
+                          op: "=", value: evalLiteral(ctx, entry.expr))
 
   proc walk(e: Expr) =
     if e == nil:
@@ -487,7 +502,17 @@ proc plan*(ctx: QueryCtx, q: Query): Plan =
         discard ids
         let code = (if head.label.len > 0: ctx.store.labels.lookup(head.label)
                     else: 0'i32)
-        seed = newIndexSeek(ctx, head.varName, ids, code, ix.name)
+        ## The seek is the chain's *head node*, not the whole pattern. It
+        ## used to be assigned to `seed` and nothing else, so every
+        ## relationship in the pattern was dropped whenever the planner
+        ## seeked: `MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.id = 0`
+        ## answered with the seek row alone, `b` unbound, and no error —
+        ## one row with a null where the traversal's rows should be. The
+        ## wrong answer was also *faster*, so nothing measured it.
+        ## Building the pattern from the seek keeps the Expands.
+        seed = buildPatternFrom(ctx, part.patterns[0],
+                                newIndexSeek(ctx, head.varName, ids, code, ix.name),
+                                head.varName)
         seeked = true
       if not seeked:
         seed = buildPattern(ctx, part.patterns[0])
