@@ -37,6 +37,7 @@
 ##   nimble soakLeak 90 20          # a smoke run that proves the harness works
 
 import std/os
+import std/osproc
 import std/[strutils, times, atomics, random]
 import ../../src/store/store
 import ../../src/store/prop
@@ -50,6 +51,10 @@ const
   ## test gets one sample and reports INCONCLUSIVE — which is what happened
   ## the first time, and an inconclusive gate gets ignored.
   MinSamples = 4
+  ## Per-writer cap on live nodes. The graph's live set is this times the
+  ## writer count and does not grow, which is what makes the slope a
+  ## verdict rather than a restatement of how long the run was.
+  KeepPerWriter = 100
   ## A leak shows as a slope, so the verdict is computed between these two
   ## fractions of the samples. The first quarter is skipped because the
   ## allocator's first arena allocations are one-off and are not a leak; the
@@ -71,22 +76,25 @@ type
   WriterArgs = tuple[d: ptr GraphStore, w: ptr Wal, c: ptr Counters, seed: int]
 
 
-proc rssMb(): int64 =
-  ## Resident set size in MiB, from procps. macOS has no /proc, so this is
-  ## 0 there and the run is judged on ORC's own accounting — which is the
-  ## number the gate is actually about. A missing procps must not be a
-  ## crash: the soak's verdict does not depend on RSS, and failing a
-  ## five-day run because a diagnostic file is missing would be absurd.
+proc rssBytes(): int64 =
+  ## Resident set size in bytes, read from `ps`.
+  ##
+  ## The first version read `/proc/self/statm`, which does not exist on
+  ## Darwin and so reported 0 for every sample — a silent zero beside a real
+  ## number reads as "no growth", which is the one thing this number must
+  ## never say by accident. `ps` exists on both platforms this runs on.
+  ##
+  ## `ps -o rss=` is in kilobytes on macOS and Linux alike. It is *current*
+  ## RSS, not the high-water mark `getrusage` would give, and that is the
+  ## better number here: a leak is a line that climbs, and current RSS draws
+  ## the climb rather than the record of it.
+  let res = execCmdEx("ps -o rss= -p " & $getCurrentProcessId())
+  let text = res.output.strip()
+  if text.len == 0:
+    return 0
   try:
-    let f = open("/proc/self/statm", fmRead)
-    defer: close(f)
-    let parts = f.readLine().splitWhitespace()
-    if parts.len < 2:
-      return 0
-    ## Page size is 4 KiB on every platform this runs on; sysconf would be
-    ## more correct and less portable in a thread proc.
-    return (parseBiggestInt(parts[1]) * 4096) div (1024 * 1024)
-  except IOError, ValueError:
+    parseBiggestInt(text) * 1024
+  except ValueError:
     return 0
 
 proc reader(a: ReaderArgs) {.thread, gcsafe.} =
@@ -123,21 +131,44 @@ proc reader(a: ReaderArgs) {.thread, gcsafe.} =
     discard rng.rand(1 .. 3)
 
 proc writer(a: WriterArgs) {.thread, gcsafe.} =
+  ## Steady state: create a little, retire a little.
+  ##
+  ## The first version only ever created, so over a long run the live set
+  ## grew without bound and the heap grew with it — and the gate, which
+  ## measures a *slope*, would have called that a leak with a straight
+  ## face. A gate that cannot tell its own workload's growth from a defect
+  ## is worse than no gate, because it is believed.
+  ##
+  ## Each writer retires its own oldest nodes, so there is no shared queue
+  ## and no lock: a writer's live set is bounded by `KeepPerWriter` and the
+  ## graph's by `KeepPerWriter * writers`. After the first few rounds the
+  ## node and edge counts are flat, and from that point any growth in the
+  ## heap is the engine keeping something it should not.
   let db = a.d
   let log = a.w
   var rng = initRand(a.seed)
   let ctr = a.c
+  ## This writer's unretired nodes, oldest first.
+  var mine: seq[int64] = @[]
   while not ctr.stop.load():
     try:
       let tx = begin(db[], log[], uint32(a.seed), doSync = false)
       var prev = 0'i64
-      let batch = 1 + rng.rand(0 .. 8)
+      let batch = 1 + rng.rand(0 .. 4)
       for i in 0 ..< batch:
         let id = tx.createNode("Person")
         discard tx.setNodeProp(id, "n", Value(kind: vkInt, i: id))
         if prev != 0:
           discard tx.createEdge(prev, id, "KNOWS")
         prev = id
+        mine.add id
+      ## Retire from the front until back under the cap. `cascade` takes the
+      ## incident edges with the node; a node with edges is not otherwise
+      ## deletable, and leaving them would be a workload that never shrinks.
+      while mine.len > KeepPerWriter:
+        let victim = mine[0]
+        mine.delete(0)
+        discard tx.deleteNode(victim, true)
       discard tx.commit()
       discard ctr.writes.fetchAdd(1)
     except TxError:
@@ -173,7 +204,7 @@ proc main() =
     let w = openWal(walPath)
     let tx = begin(db, w, 1'u32, doSync = false)
     var prev = 0'i64
-    for i in 0 ..< 2000:
+    for i in 0 ..< 200:
       let id = tx.createNode("Person")
       discard tx.setNodeProp(id, "n", Value(kind: vkInt, i: int64(id)))
       if prev != 0:
@@ -200,12 +231,15 @@ proc main() =
   while epochTime() - started < seconds:
     sleep(int(interval * 1000))
     let el = epochTime() - started
-    samples.add (el, getOccupiedMem().int64, rssMb(),
+    samples.add (el, getOccupiedMem().int64, rssBytes(),
                  db.nodeCount(), db.edgeCount())
-    stdout.writeLine("  t=" & align($int(el), 8) &
-      "s orc=" & align($(getOccupiedMem() div (1024 * 1024)), 5) &
-      " MiB rss=" & align($rssMb(), 5) &
-      " MiB nodes=" & $db.nodeCount() &
+    ## KiB, not MiB. A five-day soak reporting whole megabytes cannot see a
+    ## leak of a few hundred kilobytes an hour, and the first version's
+    ## "slope 0.000 MiB/s" was the resolution, not the result.
+    stdout.writeLine("  t=" & align($int(el), 7) &
+      "s orc=" & align($(getOccupiedMem() div 1024), 8) &
+      " KiB rss=" & align($(rssBytes() div 1024), 7) &
+      " KiB nodes=" & $db.nodeCount() &
       " edges=" & $db.edgeCount() &
       " reads=" & $counters.reads.load() &
       " writes=" & $counters.writes.load())
@@ -227,14 +261,16 @@ proc main() =
   let a = samples[first]
   let b = samples[^1]
   let span = max(1.0, b.t - a.t)
-  let orcSlope = (b.orc - a.orc).float / (span * 1024.0 * 1024.0)
-  let rssSlope = (b.rss - a.rss).float / span
+  ## KiB/s, for the same reason the samples are KiB.
+  let orcSlope = (b.orc - a.orc).float / (span * 1024.0)
+  let rssSlope = (b.rss - a.rss).float / (span * 1024.0)
 
   echo "steady state (samples ", first, "..", samples.len - 1, ", ",
        span.formatFloat(ffDecimal, 0), "s):"
-  echo "  orc : ", a.orc div (1024 * 1024), " MiB -> ", b.orc div (1024 * 1024),
-       " MiB   slope ", orcSlope.formatFloat(ffDecimal, 3), " MiB/s"
-  echo "  rss : ", a.rss, " MiB -> ", b.rss, " MiB   slope ", rssSlope.formatFloat(ffDecimal, 4), " MiB/s"
+  echo "  orc : ", a.orc div 1024, " KiB -> ", b.orc div 1024, " KiB   slope ",
+       orcSlope.formatFloat(ffDecimal, 4), " KiB/s"
+  echo "  rss : ", a.rss div 1024, " KiB -> ", b.rss div 1024, " KiB   slope ",
+       rssSlope.formatFloat(ffDecimal, 4), " KiB/s"
   echo "  data: ", a.nodes, " -> ", b.nodes, " nodes, ",
        a.edges, " -> ", b.edges, " edges (growth here is the store, not a leak)"
   echo "  work: ", counters.reads.load(), " reads, ", counters.writes.load(), " writes, ",
@@ -245,8 +281,29 @@ proc main() =
   ## threshold is deliberately loose — five days of noise will not produce a
   ## clean line, and a gate that fails on noise is a gate people disable.
   var ok = true
-  if orcSlope > 0.05:
-    echo "  FAIL: ORC heap grew at ", orcSlope.formatFloat(ffDecimal, 3), " MiB/s over the steady state"
+  ## The workload must be *steady* before a slope means anything.
+  ##
+  ## The writers fill their quota before they start retiring, so a run has a
+  ## ramp at the front. If the ramp is still inside the measured window, the
+  ## heap slope is partly just this soak creating more graph — and reporting
+  ## that as a leak would be the harness grading its own homework. It is
+  ## therefore INCONCLUSIVE, not RED: no conclusion was reached, which is a
+  ## different claim from "the engine kept something".
+  let nodeGrowth = b.nodes - a.nodes
+  let liveIsSteady = nodeGrowth <= int64(KeepPerWriter)
+  if not liveIsSteady:
+    echo "  INCONCLUSIVE: the live set never settled — ", a.nodes, " -> ",
+         b.nodes, " nodes across the measured window (tolerance ",
+         KeepPerWriter, ")."
+    echo "                A heap slope over a still-growing graph is not a leak"
+    echo "                measurement. Run longer."
+    quit(1)
+  ## Threshold in KiB/s. 1 KiB/s is ~86 MiB/day — a real leak, and loose
+  ## enough that five days of allocator noise will not trip it.
+  if orcSlope > 1.0 or rssSlope > 1.0:
+    echo "  FAIL: heap grew at ", orcSlope.formatFloat(ffDecimal, 4),
+         " KiB/s (ORC) and ", rssSlope.formatFloat(ffDecimal, 4),
+         " KiB/s (RSS) over the steady state"
     ok = false
   if counters.errors.load() > 0:
     echo "  FAIL: ", counters.errors.load(), " thread errors"
