@@ -243,7 +243,7 @@ Recurring requests to decline, so the answer is written down:
 | A cost-based optimizer | PRD pin P7. A planner with cardinality estimation is a project; a greedy one is 300 lines and predictable |
 | Savepoints | Genuinely wanted by real importers — "commit 900 000 rows, roll back the bad one". ~400 lines, phase 2, the most requested item in that list |
 | Parallel query execution | The GIL means Ruby threads do not run engine code in parallel. Processes are the deployment model (`RUBY.md` Y14) |
-| Write-ahead time-travel / MVCC | Phase 2. Needs a second process writing the same file |
+| Durable versioning, branches, diff | Specified: [`docs/PRD-VERSIONING.md`](docs/PRD-VERSIONING.md). Supersedes the time-travel line that stood here |
 | Full openCypher conformance | `CYPHER.md` §5's rejection list is the contract. Conformance is a multi-year project and the subset is the 70% that real queries use |
 
 ---
