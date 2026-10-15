@@ -42,8 +42,9 @@
 ## `WAL.md` §3 said "slot 16 B" for this opcode. That was wrong in a way
 ## only implementing it revealed, and the spec has been amended.
 
-import std/[tables, sets]
+import std/[tables, sets, algorithm]
 import ../store/prop
+import ../store/revision
 import ../wal/wal
 import ../store/store
 import ../index/index
@@ -146,6 +147,31 @@ type
     nextEdgeId*: int64
     nextLsn*: uint64
     closed*: bool
+    ## The version-history commit this transaction is building, opened at
+    ## `begin` and sealed at `commit`. Revisions are noted *as the writes
+    ## happen* rather than re-read at commit: the plan makes this the one
+    ## design decision of V0.2, because re-reading would make a revision's
+    ## contents depend on when it was written, and V0.4's differential test
+    ## exists to catch exactly that.
+    ##
+    ## Per-node accumulator, because a transaction may set, remove and delete
+    ## the same node, and the revision is one row that has to describe the
+    ## transaction's net effect — not one row per operation. 0 until `begin`
+    ## opens one; the field exists so a transaction that touches nothing does
+    ## not create an empty commit.
+    histCommit*: uint64
+    ## nodeId -> the keys it set and the keys it removed, in this
+    ## transaction. Ordered on purpose: the revision records what the
+    ## transaction did in the order it did it, so two transactions that reach
+    ## the same end state still read differently if they got there
+    ## differently — which is what makes "diff these two commits" a question
+    ## about the transactions rather than about their endpoints.
+    histSet*: Table[int64, seq[(int32, Value)]]
+    histRemoved*: Table[int64, seq[int32]]
+    ## Nodes whose liveness this transaction changed, as (nodeId, nowLive).
+    ## Separate from the property tables because a delete with no property
+    ## change is still a revision — a tombstone is a revision, not an erasure.
+    histLiveness*: Table[int64, bool]
 
   TxError* = ref object of CatchableError
     ## Internal. Crosses to the ABI as a status code, never as itself.
@@ -238,6 +264,10 @@ proc begin*(store: GraphStore, w: Wal; id: uint32; doSync = true;
   result.deltaSeekIdx = initTable[(int32, string, uint64), seq[(Value, int64)]]()
   result.nodeProps = initTable[int64, PropView]()
   result.edgeProps = initTable[int64, PropView]()
+  result.histCommit = 0
+  result.histSet = initTable[int64, seq[(int32, Value)]]()
+  result.histRemoved = initTable[int64, seq[int32]]()
+  result.histLiveness = initTable[int64, bool]()
   result.frames = @[]
   # Ids continue past everything the store has issued, so a transaction
   # can never collide with a live record. The store's allocator is
@@ -257,6 +287,53 @@ proc begin*(store: GraphStore, w: Wal; id: uint32; doSync = true;
 proc assertOpen(tx: WriteTransaction) =
   if tx.closed:
     failTx("transaction " & $tx.id & " is already finished")
+
+proc histNoteSet(tx: WriteTransaction; nodeId: int64; code: int32; v: Value) =
+  ## Note "this node had `code` set to `v` in this transaction". Opens the
+  ## revision commit on first use, so a transaction that writes nothing never
+  ## creates an empty one.
+  if tx.histCommit == 0:
+    tx.histCommit = tx.store.history.openCommit("main", @[],
+                                                 tx.nextLsn)
+  tx.histSet.mgetOrPut(nodeId, @[]).add((code, v))
+  ## A set after a remove in the same transaction cancels the removal: the
+  ## node's net effect is that the key holds a value, which is what the
+  ## revision has to say. The revision records the operations in order and
+  ## the fold applies them in order, so the last word on a key wins either
+  ## way — but dropping a now-false `removed` keeps the recorded delta equal
+  ## to the transaction's net effect rather than to its history of attempts.
+  var rm = tx.histRemoved.getOrDefault(nodeId, @[])
+  for i, k in rm:
+    if k == code:
+      rm.delete(i)
+      break
+  if rm.len > 0: tx.histRemoved[nodeId] = rm
+  else: tx.histRemoved.del(nodeId)
+  tx.histLiveness[nodeId] = true
+
+proc histNoteRemoved(tx: WriteTransaction; nodeId: int64; code: int32) =
+  ## Note "this node had `code` removed in this transaction".
+  if tx.histCommit == 0:
+    tx.histCommit = tx.store.history.openCommit("main", @[],
+                                                 tx.nextLsn)
+  tx.histRemoved.mgetOrPut(nodeId, @[]).add(code)
+  var st = tx.histSet.getOrDefault(nodeId, @[])
+  for i, kv in st:
+    if kv[0] == code:
+      st.delete(i)
+      break
+  if st.len > 0: tx.histSet[nodeId] = st
+  else: tx.histSet.del(nodeId)
+  tx.histLiveness[nodeId] = true
+
+proc histNoteLive(tx: WriteTransaction; nodeId: int64; live: bool) =
+  ## Note a create or a delete. A tombstone is a revision, not an erasure,
+  ## so liveness is its own axis of a node's state and is tracked here even
+  ## when the transaction touched no property.
+  if tx.histCommit == 0:
+    tx.histCommit = tx.store.history.openCommit("main", @[],
+                                                 tx.nextLsn)
+  tx.histLiveness[nodeId] = live
 
 proc chargeOp(tx: WriteTransaction, bytes: int) =
   ## Budgets are checked here — once per operation — rather than per row,
@@ -360,6 +437,10 @@ proc createNode*(tx: WriteTransaction, labelName: string): int64 =
   putI64(payload, id)
   putI32(payload, code)
   tx.emit(opCreateNode, payload)
+  ## A create is a revision, not just a property change — this node's first
+  ## appearance in the history is itself something `diff` has to be able to
+  ## report, and the fold needs `live` to start true for it.
+  tx.histNoteLive(id, true)
   id
 
 proc deleteEdge*(tx: WriteTransaction, id: int64): bool {.gcsafe.}
@@ -462,6 +543,11 @@ proc deleteNode*(tx: WriteTransaction, id: int64; cascade: bool): bool {.gcsafe.
   n.setFlag nfTombstone
   tx.nodeDelta[id] = n
   tx.forgetSeekKey(id)
+  ## A delete is a revision. This is the case that makes liveness a first-class
+  ## axis rather than a detail of the property delta: the node loses no key
+  ## here, it just stops existing, and a revision that could not say that
+  ## would report the node as unchanged.
+  tx.histNoteLive(id, false)
   var payload = ""
   putI64(payload, id)
   tx.emit(opDeleteNode, payload)
@@ -593,6 +679,10 @@ proc setPropCommon(tx: WriteTransaction; target: char; id: int64;
     rec.setPropView pv
     tx.nodeDelta[id] = rec
     tx.noteSeekKey(id, key, v)
+    ## Node property history only. Edge history is a separate document
+    ## (PRD §7), and recording edges here would put keys in the node revision
+    ## store that the diff contract does not describe.
+    tx.histNoteSet(id, code, v)
   else:
     tx.edgeProps[id] = pv
     var rec = tx.peekEdge(id)
@@ -648,6 +738,10 @@ proc removePropCommon(tx: WriteTransaction, target: char, id: int64, key: string
     ## against the real property, so an entry that outlives its removal
     ## costs a candidate, never a row.
     tx.noteSeekKey(id, key, Value(kind: vkNull))
+    ## The key is gone, and the revision has to say so as an absence rather
+    ## than as a null — a removed property and a property set to null are
+    ## different states, and `Revision.removed` is how the two stay apart.
+    tx.histNoteRemoved(id, code)
   else:
     tx.edgeProps[id] = pv
     var rec = tx.peekEdge(id)
@@ -684,6 +778,53 @@ proc removeEdgeProp*(tx: WriteTransaction, edgeId: int64, key: string): bool =
   removePropCommon(tx, '\x01', edgeId, key, false)
 
 # ------------------------------------------------------------------ commit
+
+proc histSeal(tx: WriteTransaction) =
+  ## Turn the transaction's per-node accumulators into revisions on its open
+  ## revision commit, then seal it. Called from `commit` inside the write
+  ## exclusion, so the revision store's single-writer claim and this
+  ## transaction's single-writer claim are the same writer and cannot drift.
+  ##
+  ## Idempotent by construction: a transaction that touched nothing never
+  ## opened a commit, so `histCommit == 0` and there is nothing to seal.
+  if tx.histCommit == 0:
+    return
+  ## Deterministic order over the touched nodes — the accumulators are tables,
+  ## and a revision set written in hash order would make two identical
+  ## transactions produce different `changed` orderings.
+  var ids: seq[int64] = @[]
+  for nid in tx.histSet.keys: ids.add nid
+  for nid in tx.histRemoved.keys: ids.add nid
+  for nid in tx.histLiveness.keys: ids.add nid
+  ids.sort()
+  var seen = initHashSet[int64]()
+  for nid in ids:
+    if nid in seen: continue
+    seen.incl nid
+    let liveNow = tx.histLiveness.getOrDefault(nid, true)
+    tx.store.history.noteRevision(tx.histCommit, nid,
+                                  tx.histSet.getOrDefault(nid, @[]),
+                                  liveNow,
+                                  tx.histRemoved.getOrDefault(nid, @[]))
+  ## Stamp the commit's WAL position to where the log actually stands now,
+  ## not where it stood when the first revision opened it. V1 replays the
+  ## history from these positions, so a commit claiming the LSN of an
+  ## operation in the middle of its own transaction would put the replay
+  ## pointer inside the transaction it describes.
+  if tx.histCommit.int - 1 < tx.store.history.commits.len:
+    tx.store.history.commits[tx.histCommit.int - 1].lsn = tx.nextLsn
+  tx.store.history.sealCommit(tx.histCommit)
+  tx.histCommit = 0
+
+proc histAbort(tx: WriteTransaction) =
+  ## Drop the revision commit a rolled-back transaction opened. `abortCommit`
+  ## erases it and every revision it recorded, so a failed transaction leaves
+  ## no trace in the history — the same guarantee the base arrays get for free
+  ## from never being touched.
+  if tx.histCommit == 0:
+    return
+  tx.store.history.abortCommit(tx.histCommit)
+  tx.histCommit = 0
 
 proc commit*(tx: WriteTransaction): bool =
   ## Returns false when the transaction was already finished.
@@ -845,6 +986,10 @@ proc commit*(tx: WriteTransaction): bool =
   #    visible at once (TXN.md §3.1 step 8, pin X3).
   inc s.generation
   s.publish()
+  ## Seal the version-history commit. Inside the write exclusion, next to the
+  ## index update: both are post-merge steps that must run before readers are
+  ## let back in, and the history is single-writer just as this transaction is.
+  tx.histSeal()
   if tx.indicesToUpdate != nil:
     applyDelta(tx.indicesToUpdate, s, tx.nodeDelta, tx.edgeDelta)
   s.endWrite()
@@ -857,6 +1002,12 @@ proc rollback*(tx: WriteTransaction): bool =
   if tx.closed:
     return false
   tx.closed = true
+  ## The history erases what this transaction recorded. It has to be explicit:
+  ## the revision store is outside the base arrays, so the "the base was never
+  ## touched, so there is nothing to undo" argument that makes rollback free
+  ## here does not reach it, and a revision written by a transaction that then
+  ## failed would be a commit that never happened.
+  tx.histAbort()
   tx.deltaNodesIdx = @[]
   tx.deltaNodeSet.clear()
   tx.deltaOutIdx.clear()

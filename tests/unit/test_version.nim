@@ -130,6 +130,10 @@ proc oracleStateAncestry(o: Oracle, rv: Revisions, commit: uint64,
       live = rev.live
       for (k, v) in rev.props:
         props[k] = v
+      for k in rev.removed:
+        props.del k
+      for k in rev.removed:
+        props.del k
   result.live = live
   var keys: seq[int32] = @[]
   for k in props.keys: keys.add k
@@ -471,6 +475,39 @@ suite "V0 the revision store":
       let st = rv.stateAt(1, uint64(rv.commits.len + 1000))
       check st.live == false
       check st.props.len == 0
+
+  test "a removed property is an absence, not a null":
+    ## `removed` exists because a removed property and a property set to null
+    ## are different states (CYPHER.md §3.2, and `removePropCommon` in txn.nim
+    ## says the same). If a removal were folded as a `vkNull` write, a node
+    ## whose key was removed would fold to a live null and compare as though
+    ## the key still held something — the silent data loss the distinction
+    ## exists to prevent.
+    let rv = initRevisions()
+    let c1 = rv.openCommit("main")
+    rv.noteRevision(c1, 1, @[(key(1), vInt(10)), (key(2), vStr("here"))], true)
+    rv.sealCommit(c1)
+
+    let c2 = rv.openCommit("main")
+    rv.noteRevision(c2, 1, @[], true, @[2'i32])        # remove key 2
+    rv.sealCommit(c2)
+
+    ## Key 2 is gone entirely, not present-and-null.
+    let st = rv.stateAt(1, c2)
+    check sameProps(st.props, @[(key(1), vInt(10))])
+    ## ...and the removal is visible as a diff, because the state changed.
+    let d = rv.diff(c1, c2)
+    check d.len == 1
+    check d[0].nodeId == 1
+    check sameProps(d[0].after.props, @[(key(1), vInt(10))])
+
+    ## Setting a key to null is a *different* state from removing it, and the
+    ## two must not fold to the same thing.
+    let c3 = rv.openCommit("main")
+    rv.noteRevision(c3, 1, @[(key(3), vNull())], true)  # a null, not a removal
+    rv.sealCommit(c3)
+    check rv.stateAt(1, c3).props.len == 2             # key 3 present as null
+    check not sameState(rv.stateAt(1, c2), rv.stateAt(1, c3))
 
   test "diff equals the oracle on a randomized linear history":
     ## G1. The whole claim: `diff` agrees with a from-scratch comparison

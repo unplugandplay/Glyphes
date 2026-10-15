@@ -32,6 +32,16 @@ type
     ## property, so history grows with *revisions* rather than with
     ## `revisions x node size`.
     props*: seq[(int32, Value)]
+    ## Keys *removed* at this revision, carried beside `props` rather than
+    ## inside it.
+    ##
+    ## A removed property is an absence, and an absence is not a `Value`: a
+    ## stored `vkNull` and an absent property are different states (CYPHER.md
+    ## §3.2 pins that difference as silent data loss when confused, and
+    ## txn.nim's `removePropCommon` says the same thing in a comment). So the
+    ## revision says which keys are gone, and a fold removes them rather than
+    ## overwriting them with a null that would then compare as a live null.
+    removed*: seq[int32]
     live*: bool                    ## a delete is a revision, not an erasure
 
   CommitRecord* = object
@@ -209,8 +219,14 @@ proc openCommit*(rv: Revisions, branch: string; parents: seq[uint64] = @[],
   id
 
 proc noteRevision*(rv: Revisions, commit: uint64, nodeId: int64,
-                   props: seq[(int32, Value)], live: bool) =
+                   props: seq[(int32, Value)], live: bool,
+                   removed: seq[int32] = @[]) =
   ## Record that `nodeId` changed as of `commit`.
+  ##
+  ## `props` are the keys this revision *set*; `removed` are the keys it
+  ## *removed*. They are kept apart because a removal is an absence, not a
+  ## value — see `Revision.removed`. Setting a key to `vkNull` is a different
+  ## state from removing it and stays distinguishable through the fold.
   ##
   ## The revision goes on the node's chain, and the node id goes on the
   ## commit's `changed` set — once, even if the transaction touched the node
@@ -220,7 +236,8 @@ proc noteRevision*(rv: Revisions, commit: uint64, nodeId: int64,
   if commit == 0 or commit > rv.commits.len.uint64:
     return
   rv.byNode.mgetOrPut(nodeId, @[]).add Revision(commit: commit,
-                                               props: props, live: live)
+                                               props: props, removed: removed,
+                                               live: live)
   if commit in rv.open:
     rv.open[commit].seen.incl nodeId
 
@@ -447,6 +464,8 @@ proc foldStateIn(rv: Revisions, nodeId: int64, anc: seq[bool],
       live = rev.live
       for (k, v) in rev.props:
         props[k] = v
+      for k in rev.removed:
+        props.del k
 
 proc foldState(rv: Revisions, nodeId: int64, commit: uint64,
                live: var bool, props: var Table[int32, Value]) {.inline.} =
@@ -475,6 +494,8 @@ proc foldState(rv: Revisions, nodeId: int64, commit: uint64,
         live = rev.live
         for (k, v) in rev.props:
           props[k] = v
+        for k in rev.removed:
+          props.del k
   else:
     foldStateIn(rv, nodeId, ancestorSetCached(rv, commit), live, props)
 

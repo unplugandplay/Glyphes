@@ -19,6 +19,7 @@ import ./prop
 import ./node
 import ./edge
 import ./label
+import ./revision
 
 export Value, ValueKind, GlyType, SlotInline
 export NodeRec, EdgeRec, PropSlot, PropView, newNode, newEdge
@@ -67,6 +68,15 @@ type
     ## a zeroed GlyStat never reads as a valid generation.
     generation*: uint64
     arena*: Arena
+    ## The version history (VERSIONING-PLAN V0.2). In-memory only until V1
+    ## gives it the `.vhist` sidecar; the shape is the same either way, which
+    ## is the point of proving it without a file behind it.
+    ##
+    ## On the store rather than the transaction because history outlives any
+    ## one transaction and because the revision store is single-writer, the
+    ## same way this store is: `commit` opens, fills and seals one revision
+    ## commit inside the write exclusion, so the two writers cannot drift.
+    history*: Revisions
     nodeIds*: IdAllocator
     edgeIds*: IdAllocator
     labels*: Dictionary
@@ -198,6 +208,7 @@ proc newStore*(arenaCapacity: int = 1 shl 20): GraphStore =
   result.writerInside = false
   result.writerWaiting = false
   initArena(result.arena, arenaCapacity)
+  result.history = initRevisions()
   initIds(result.nodeIds)
   initIds(result.edgeIds)
   initDict(result.labels)
