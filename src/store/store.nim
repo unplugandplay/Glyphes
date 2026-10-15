@@ -20,6 +20,7 @@ import ./node
 import ./edge
 import ./label
 import ./revision
+import ./vhist
 
 export Value, ValueKind, GlyType, SlotInline
 export NodeRec, EdgeRec, PropSlot, PropView, newNode, newEdge
@@ -77,6 +78,16 @@ type
     ## same way this store is: `commit` opens, fills and seals one revision
     ## commit inside the write exclusion, so the two writers cannot drift.
     history*: Revisions
+    ## The open `<db>.vhist` sidecar, or nil for a memory database and for
+    ## a read-only open. Written inside the transaction's fsync (PRD §4.1),
+    ## before the log's COMMIT frame, so history is never behind the graph.
+    vhistFile*: VhistFile
+    ## The path history is sidecar'd to, or "" when there is none.
+    vhistPath*: string
+    ## The generation the last committed history frame was written against.
+    ## A replay stops at the first frame above it, which is what repairs a
+    ## crash between the history append and the log's COMMIT frame.
+    histGeneration*: uint64
     nodeIds*: IdAllocator
     edgeIds*: IdAllocator
     labels*: Dictionary

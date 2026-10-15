@@ -45,6 +45,7 @@
 import std/[tables, sets, algorithm]
 import ../store/prop
 import ../store/revision
+import ../store/vhist
 import ../wal/wal
 import ../store/store
 import ../index/index
@@ -779,16 +780,16 @@ proc removeEdgeProp*(tx: WriteTransaction, edgeId: int64, key: string): bool =
 
 # ------------------------------------------------------------------ commit
 
-proc histSeal(tx: WriteTransaction) =
+proc histSeal(tx: WriteTransaction): uint64 =
   ## Turn the transaction's per-node accumulators into revisions on its open
-  ## revision commit, then seal it. Called from `commit` inside the write
-  ## exclusion, so the revision store's single-writer claim and this
-  ## transaction's single-writer claim are the same writer and cannot drift.
-  ##
-  ## Idempotent by construction: a transaction that touched nothing never
-  ## opened a commit, so `histCommit == 0` and there is nothing to seal.
+  ## revision commit, then seal it. Returns the commit id it sealed, or 0 if
+  ## there was nothing to seal (a transaction that touched nothing). Called
+  ## from `commit` before the sidecar write, inside the write exclusion, so
+  ## the revision store's single-writer claim and this transaction's
+  ## single-writer claim are the same writer and cannot drift.
   if tx.histCommit == 0:
-    return
+    return 0'u64
+  let cid = tx.histCommit
   ## Deterministic order over the touched nodes — the accumulators are tables,
   ## and a revision set written in hash order would make two identical
   ## transactions produce different `changed` orderings.
@@ -802,7 +803,7 @@ proc histSeal(tx: WriteTransaction) =
     if nid in seen: continue
     seen.incl nid
     let liveNow = tx.histLiveness.getOrDefault(nid, true)
-    tx.store.history.noteRevision(tx.histCommit, nid,
+    tx.store.history.noteRevision(cid, nid,
                                   tx.histSet.getOrDefault(nid, @[]),
                                   liveNow,
                                   tx.histRemoved.getOrDefault(nid, @[]))
@@ -811,10 +812,11 @@ proc histSeal(tx: WriteTransaction) =
   ## history from these positions, so a commit claiming the LSN of an
   ## operation in the middle of its own transaction would put the replay
   ## pointer inside the transaction it describes.
-  if tx.histCommit.int - 1 < tx.store.history.commits.len:
-    tx.store.history.commits[tx.histCommit.int - 1].lsn = tx.nextLsn
-  tx.store.history.sealCommit(tx.histCommit)
+  if cid.int - 1 < tx.store.history.commits.len:
+    tx.store.history.commits[cid.int - 1].lsn = tx.nextLsn
+  tx.store.history.sealCommit(cid)
   tx.histCommit = 0
+  cid
 
 proc histAbort(tx: WriteTransaction) =
   ## Drop the revision commit a rolled-back transaction opened. `abortCommit`
@@ -825,6 +827,30 @@ proc histAbort(tx: WriteTransaction) =
     return
   tx.store.history.abortCommit(tx.histCommit)
   tx.histCommit = 0
+
+proc histWriteAndSync(tx: WriteTransaction; sealed: uint64) =
+  ## Append a *sealed* revision commit to the `.vhist` sidecar and make it
+  ## durable, before the log's COMMIT frame. Does nothing for a memory
+  ## database, an open with no sidecar, or a transaction that touched nothing
+  ## (`sealed == 0`).
+  ##
+  ## The frame is stamped with the generation the graph is *about to* have
+  ## (`store.generation + 1`, because the merge that bumps it has not run yet).
+  ## If a crash loses the log's COMMIT frame, the history's frame is above a
+  ## generation the graph never reached and replay drops it — the ordering
+  ## that keeps history from being *behind* the graph at the cost of it
+  ## briefly being ahead, which the stamp repairs.
+  if sealed == 0 or tx.store.vhistFile == nil:
+    return
+  let rec = tx.store.history.commits[sealed.int - 1]
+  let payload = encodeCommitPayload(tx.store.history, rec)
+  appendCommit(tx.store.vhistFile, sealed, tx.store.generation + 1, payload)
+  ## Synced unconditionally, unlike the log's `sync` flag which a caller can
+  ## trade away: the history's durability claim is per-commit, and a batched
+  ## load that skipped it would have a history whose last frame is not durable
+  ## when the log's is.
+  syncVhist(tx.store.vhistFile)
+  tx.store.histGeneration = tx.store.generation + 1
 
 proc commit*(tx: WriteTransaction): bool =
   ## Returns false when the transaction was already finished.
@@ -875,6 +901,18 @@ proc commit*(tx: WriteTransaction): bool =
   #       is what makes the transaction real; a crash before it leaves
   #       frames that recovery discards as uncommitted. Skipped whole for a
   #       memory database, which has no log and nothing to recover.
+  #
+  #       The version-history append goes *before* the log's COMMIT frame and
+  #       inside the same fsync discipline (PRD §4.1, V1.3). Inside, not
+  #       after: if the history were synced after the graph, a crash in
+  #       between would leave a commit the graph has and the history does
+  #       not, and a history that silently omits a commit the graph accepted
+  #       is the one incoherence this feature cannot have. The reverse
+  #       ordering — history ahead of the graph — is possible and is repaired
+  #       by the generation stamp on replay, which is a better failure than
+  #       an omission nobody notices.
+  let sealedHistory = tx.histSeal()
+  tx.histWriteAndSync(sealedHistory)
   if tx.wal != nil:
     var batch = tx.frames
     batch.add Frame(lsn: tx.nextLsn, txnId: tx.id, op: opNoop,
@@ -986,10 +1024,12 @@ proc commit*(tx: WriteTransaction): bool =
   #    visible at once (TXN.md §3.1 step 8, pin X3).
   inc s.generation
   s.publish()
-  ## Seal the version-history commit. Inside the write exclusion, next to the
-  ## index update: both are post-merge steps that must run before readers are
-  ## let back in, and the history is single-writer just as this transaction is.
-  tx.histSeal()
+  ## The revision commit was already sealed above, next to the log's COMMIT
+  ## frame — it has to be, because the file write needs the sealed record to
+  ## encode and the seal needs nothing from the merge. `histSeal` is a no-op
+  ## the second time (it clears `histCommit`), so this call is the belt to
+  ## that braces: a commit whose file write was skipped still seals here.
+  discard tx.histSeal()
   if tx.indicesToUpdate != nil:
     applyDelta(tx.indicesToUpdate, s, tx.nodeDelta, tx.edgeDelta)
   s.endWrite()

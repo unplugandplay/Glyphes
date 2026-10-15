@@ -29,6 +29,8 @@ import ./errors
 import ./handles
 import ./store/store
 import ./store/prop
+import ./store/revision
+import ./store/vhist
 import ./index/index
 import ./cypher/expr
 import ./wal/wal
@@ -77,6 +79,44 @@ proc isValidMode(mode: int32): bool =
   const known = GLY_OPEN_READONLY or GLY_OPEN_CREATE or GLY_OPEN_MEMORY or
                 GLY_OPEN_SNAPSHOT
   mode >= 0 and (mode and (not known)) == 0
+
+proc replayHistory(store: GraphStore, path: string) =
+  ## Rebuild `store.history` from the `.vhist` sidecar (PRD §4.1, V1.2).
+  ##
+  ## Replayed in the same open/seal sequence the live writer uses, so the
+  ## in-memory history a reopen produces is byte-identical in shape to the one
+  ## a running process holds — a history whose in-memory and on-disk forms
+  ## diverged would make a diff mean different things before and after a
+  ## restart, which is the failure a user cannot detect.
+  ##
+  ## A file that does not exist is "no history", not an error: history is
+  ## additive and its loss costs the history and not the data (the same
+  ## reasoning index.nim:657 gives for the `.indexes` sidecar). A file that
+  ## exists and cannot be read is a refusal — the caller asked for durability
+  ## and quietly continuing with an empty history would be the opposite.
+  store.vhistPath = path
+  store.vhistFile = openVhist(path)
+  let replay = replayVhist(path, store.generation)
+
+  for fr in replay.frames:
+    let dec = decodeCommitPayload(fr.payload)
+    let cid = store.history.openCommit("", dec.parents, dec.lsn)
+    ## Every node the commit's `changed` names gets a revision folded from the
+    ## frame's per-node rows. `changed` is authoritative (vhist.nim), so a
+    ## node with no row records an empty live revision — the same state a
+    ## commit that touched a node and left it identical would have.
+    for id in dec.changed:
+      let rev = dec.revisions.getOrDefault(id,
+                Revision(commit: cid, live: true))
+      store.history.noteRevision(cid, id, rev.props, rev.live, rev.removed)
+    store.history.sealCommit(cid)
+  store.histGeneration =
+    if replay.frames.len > 0: replay.frames[^1].generation else: store.generation
+
+  ## Cut the untrusted tail so a discarded frame is discarded once rather than
+  ## re-examined — and declined — at every open.
+  if replay.truncated:
+    truncateVhist(path, replay.goodBytes)
 
 proc openDatabase*(path: string, mode: int32): Database =
   ## `mode` must not ask for read-only and create at once; that pair has
@@ -141,6 +181,18 @@ proc openDatabase*(path: string, mode: int32): Database =
     except IOError as e:
       fail(glyErrIo, fmt"{path}: {e.msg}")
 
+  ## The version history is replayed from its own sidecar, bounded by the
+  ## graph's generation (PRD §4.1, V1.2). Done after `recover` so the bound is
+  ## the generation the graph actually reached. A frame above it is a commit
+  ## the graph never accepted — the crash-between-append-and-COMMIT case — and
+  ## is dropped along with everything after it. A memory database has no
+  ## sidecar and no history.
+  if not memory and not readOnly:
+    try:
+      replayHistory(result.store, path)
+    except IOError as e:
+      fail(glyErrIo, fmt"{path}: {e.msg}")
+
   ## STORAGE.md / TXN.md §2: monotonic from 1. Zero is reserved so a
   ## zeroed GlyStat never reads as a valid generation. `recover` has
   ## already moved it forward if the file was ahead of 1.
@@ -198,6 +250,14 @@ proc close*(db: Database) =
     db.wal.sync()
     closeWal(db.wal)
     db.wal = nil
+  ## Close the history sidecar with the log. Every commit already synced it,
+  ## so nothing is lost by not syncing here — but the handle has to be closed
+  ## or its last buffered bytes never land, and a reader that reopens the file
+  ## while this handle is still open sees a file that is short by whatever the
+  ## stdio buffer is holding.
+  if db.store != nil and db.store.vhistFile != nil:
+    closeVhist(db.store.vhistFile)
+    db.store.vhistFile = nil
   db.store = nil
   db.closed = true
   ## Out of the process-wide registry, or a closed handle's arena would

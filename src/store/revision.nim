@@ -541,8 +541,30 @@ proc stateAt*(rv: Revisions, nodeId: int64, commit: uint64): NodeState =
   result.live = live
   result.props = propsSorted(props)
 
+proc revisionAt*(rv: Revisions, nodeId: int64, commit: uint64): Revision =
+  ## The node's effective revision *at* one commit — every revision bearing
+  ## that commit, merged in chain order into one row.
+  ##
+  ## The history writer notes one revision per node per commit (txn.nim's
+  ## `histSeal` collapses a transaction's writes into one), so in practice a
+  ## commit carries one revision per node. This merges rather than assuming
+  ## that, because a caller that calls `noteRevision` twice for one commit
+  ## would otherwise get two rows and a format that cannot describe two.
+  result.live = false
+  var any = false
+  for rev in rv.byNode.getOrDefault(nodeId, @[]):
+    if rev.commit == commit:
+      any = true
+      result.live = rev.live
+      for (k, v) in rev.props:
+        result.props.add (k, v)
+      for k in rev.removed:
+        result.removed.add k
+  if not any:
+    result.props = @[]
+    result.removed = @[]
+
 proc diff*(rv: Revisions, a, b: uint64): seq[DiffEntry] =
-  ## Which nodes differ between commit `a` and commit `b`.
   ##
   ## The ids come from the two `changed` sets between the merge base and each
   ## side; each node's two states come from its revision chain. No label

@@ -6,9 +6,9 @@ release with a table. This one is the list of things glyphes is bad at, with
 measurements, written by the people who measured them.
 
 glyphes is 0.1. It is an embedded graph store with a Cypher subset, a Rails-
-shaped Ruby model layer, hybrid index families, and a write-ahead log. It is
-not a database that should be dropped into production, and most of the rest of
-this file is about why.
+shaped Ruby model layer, hybrid index families, a write-ahead log, and durable
+version history. It is not a database that should be dropped into production,
+and most of the rest of this file is about why.
 
 ---
 
@@ -189,7 +189,67 @@ Named honestly rather than left to be discovered:
   which is testable, and it is not smart.
 - **Memory growth under long reads.** The snapshot path is exercised by the
   soak, which found no leak — but the soak is one configuration of one machine.
-## 8. What M11 changed about the engine itself
+- **Version history cannot be queried.** §8 describes a durable, crash-safe
+  history and a `diff` that is O(changed); there is no statement, no Ruby
+  method, and no CLI that reaches it. It is infrastructure with nothing on top
+  of it yet, and §8 is the honest accounting of what that costs.
+## 8. Version history is durable, and it is not free
+
+Added in the same release as everything above, and every cost below is real
+and measured rather than anticipated. History is **not** on by default: a
+database gets a `.vhist` sidecar only when it is opened by path, and nothing in
+the query surface can read it yet (that is V3). It exists, it survives a
+crash, and nothing can ask for it.
+
+**A commit is now O(changed) rather than O(1), in a new place.** V0.2 records
+the property delta every transaction produced, which is what makes a revision
+honest rather than a snapshot of whatever the node happened to look like at
+commit time. The cost is that a revision holds a `Value`, so a bulk load that
+writes vectors now holds two copies of every vector for the life of the
+history. At 10⁶ nodes with 768-dim embeddings that is not a rounding error,
+and it has not been measured end to end.
+
+**A large transaction is a large frame.** The sidecar is one frame per commit
+rather than one per revision, because a commit is the transaction and a
+transaction is atomic — but that means a 10⁶-node bulk load is a single frame
+of hundreds of megabytes, held in memory while it is encoded. The framing
+choice is right for recovery and wrong for very large transactions, and the
+right answer is a commit framing that can span frames, which V1 does not have.
+
+**`diff` is O(changed + depth), not O(changed).** The PRD §5.1 claim holds on
+the axis it makes — a 10⁴-node and a 10⁶-node graph cost the same, measured
+flat at ~1× — but history depth is a second axis, and a diff resolves each
+head's ancestry once into a flag array sized to the whole history. At a 10⁵
+commit history that is 8.8× for a 50 000× deeper history: paid once, sublinear,
+and still real. Making it O(1) needs per-commit ancestor bitmaps or generation
+numbers, which is V1/V2 work that has not been done.
+
+**The history can be ahead of the graph, by one commit, after a crash.** The
+sidecar is written and `fdatasync`ed *before* the log's COMMIT frame, so
+history is never *behind* the graph — a silent omission is the one incoherence
+this feature cannot have. The price is the mirror case: a crash between the two
+leaves a commit in the file that the graph never accepted. Each frame carries
+the generation it was written against and replay drops anything above the
+graph's, so it is repaired at the next open. This is a deliberate trade, not an
+oversight, and the alternative ordering is the one that loses commits quietly.
+
+**Renumbering rewrites history.** Compaction (`STORAGE.md` §4.7,
+`src/store/ids.nim`'s `reclaim`/`renumberTo`) densifies live ids, so a revision
+recorded against id 41 would start describing whichever node became 41. The
+machinery has **no caller in `src/`** today, so there is no live bug — which is
+exactly why the decision belongs in a PRD rather than in a fix. Versioned node
+ids are pinned to never participate in renumbering, which means a versioned
+graph gets a dense id space that stops being dense, and compaction of the node
+array is partial or absent. That is the price of keeping history.
+
+**What is deliberately absent, and why.** Edge history (a separate document),
+historical indexed scans (the index indexes the head; serving "which nodes
+matched at commit C" means an index per commit), and merge resolution across
+branches (refused by name, like every other out-of-contract row in §1). Branch
+history and the read surface are V2 and V3; until then a two-branch graph has
+the union of its branches and no way to ask for one of them.
+
+## 9. What M11 changed about the engine itself
 
 `limitations.md` is not only about what is missing. M11's benchmark found four
 defects, all fixed in the same milestone, all of them the kind a correctness
