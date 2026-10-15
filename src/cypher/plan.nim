@@ -348,6 +348,8 @@ proc seekCandidates(ctx: QueryCtx, part: QueryPart,
 proc plan*(ctx: QueryCtx, q: Query): Plan =
   var seed: Operator = nil
   var columns: seq[string] = @[]
+  ## Column names a retrieval produced, for a statement that ends at one.
+  var yielded: seq[string] = @[]
   var matchSeen = false
   var optionalSeen = false
   var tail: seq[QueryPart] = @[]
@@ -528,6 +530,21 @@ proc plan*(ctx: QueryCtx, q: Query): Plan =
                       $ord(qval.kind))
         seed = newTextSearch(ctx, part.indexName, qval.s,
                              part.yieldNode, part.yieldScore)
+      ## What this retrieval yields, kept so a statement that *ends* at the
+      ## CALL reports those columns. `columns` was only ever filled by a
+      ## projection, so a bare
+      ##
+      ##   CALL db.idx.text('Doc.body') AGAINST $q YIELD doc, score
+      ##
+      ## planned a correct operator and then answered a statement with no
+      ## columns at all: the rows came back empty through Ruby, for text and
+      ## for vector alike, while `... YIELD doc, score RETURN doc, score`
+      ## worked — because the RETURN supplied the names. The retrieval was
+      ## never wrong; it was never described.
+      if part.yieldNode.len > 0:
+        yielded.add part.yieldNode
+        if part.yieldScore.len > 0:
+          yielded.add part.yieldScore
       if consumedWhere:
         if rest.len > 0:
           var cond = rest[0]
@@ -618,6 +635,14 @@ proc plan*(ctx: QueryCtx, q: Query): Plan =
       ## truncates — the difference between "the 10 largest" and "10 of them,
       ## sorted".
       tail.add part
+
+  ## A projection names the answer; a statement that ends at a retrieval is
+  ## named by what that retrieval yielded. Assigned here rather than at the
+  ## end because `ORDER BY` below resolves a bare name against `columns`, and
+  ## `CALL ... YIELD doc, score ORDER BY score` was refused for the same
+  ## reason the bare call returned nothing: the names were never in scope.
+  if columns.len == 0 and yielded.len > 0:
+    columns = yielded
 
   for part in tail:
     case part.kind

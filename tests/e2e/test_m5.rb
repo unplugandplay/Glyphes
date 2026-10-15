@@ -559,6 +559,72 @@ class M5Test < Minitest::Test
     end
   end
 
+  # A bare `CALL ... YIELD` is a complete statement, and its answer is the
+  # columns it yields. The planner filled `columns` only from a projection,
+  # so the bare form planned a correct operator and then described the
+  # answer as zero columns — rows came back empty through Ruby, for text and
+  # for vector alike. Every retrieval test before this one ended in RETURN,
+  # which is why it survived: the RETURN supplied the names.
+  def test_a_bare_retrieval_reports_the_columns_it_yields
+    with_db do |db|
+      db.exec("CREATE (:Doc {body: 'the quick brown fox', t: [0.1, 0.2, 0.3]})")
+      db.exec("CREATE (:Doc {body: 'quick brown', t: [0.9, 0.1, 0.1]})")
+      db.index_create(kind: :text, label: "Doc", property: "body")
+      db.index_create(kind: :vector, label: "Doc", property: "t", dim: 3, metric: :cosine)
+
+      res = db.query("CALL db.idx.text('Doc.body') AGAINST $q YIELD doc, score",
+                     q: "quick")
+      assert_equal %w[doc score], res.columns
+      assert_equal 2, res.count
+      assert res.to_a.all? { |r| r[1].is_a?(Float) }
+
+      res2 = db.query("CALL db.idx.vector('Doc.t') AGAINST $q YIELD doc, score",
+                      q: [0.1, 0.2, 0.3])
+      assert_equal %w[doc score], res2.columns
+      assert_equal 2, res2.count
+      ## The identical vector scores ~1.0 against itself on cosine. Not
+      ## exactly 1.0: vectors are stored float32, so the dot product of a
+      ## vector with itself rounds. A 1e-9 tolerance here would be testing
+      ## float64 against a float32 store.
+      assert_in_delta 1.0, res2.to_a.first.last, 1e-5
+
+      ## A projection still names the answer; the two must not double up.
+      res3 = db.query("CALL db.idx.text('Doc.body') AGAINST $q YIELD doc, score " \
+                      "RETURN doc", q: "quick")
+      assert_equal %w[doc], res3.columns
+      assert_equal 2, res3.count
+    end
+  end
+
+  def test_a_retrievals_yielded_names_are_in_scope_for_what_follows
+    with_db do |db|
+      3.times do |i|
+        db.exec("CREATE (:Doc {body: 'shared word', t: $t})",
+                "t" => [i * 0.3, 0.1, 0.1])
+      end
+      db.index_create(kind: :text, label: "Doc", property: "body")
+      db.index_create(kind: :vector, label: "Doc", property: "t", dim: 3, metric: :cosine)
+
+      ## WITH resolves the yielded name — it used to be refused as undefined.
+      res = db.query("CALL db.idx.text('Doc.body') AGAINST $q YIELD doc, score " \
+                     "WITH score RETURN score", q: "shared")
+      assert_equal %w[score], res.columns
+      assert_equal 3, res.count
+
+      ## So does WHERE on the pushed-down filter.
+      res2 = db.query("CALL db.idx.text('Doc.body') AGAINST $q YIELD doc, score " \
+                      "WHERE score > 0 RETURN score", q: "shared")
+      assert_equal 3, res2.count
+
+      ## And ORDER BY, which resolves a bare name against the answer's shape.
+      res3 = db.query("CALL db.idx.vector('Doc.t') AGAINST $q YIELD doc, score " \
+                      "WITH score ORDER BY score RETURN score", q: [0.1, 0.1, 0.1])
+      scores = res3.to_a.map(&:last)
+      assert_equal 3, scores.length
+      assert_equal scores.sort, scores, "ORDER BY did not order"
+    end
+  end
+
   def test_a_text_search_scores_through_the_query_door
     with_db do |db|
       db.exec("CREATE (:Doc {body: 'the quick brown fox jumps'})")
