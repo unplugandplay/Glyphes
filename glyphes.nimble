@@ -177,6 +177,14 @@ task benchImport, "M9 import/export benchmark (RUBY.md R8: 10^6-row CSV, Parquet
   ## 10^6).
   exec "ruby tests/bench/bench_import.rb"
 
+task benchVersion, "M11 versioning benchmark: diff is O(changed), not O(graph)":
+  ## G2, and the measurement that decides whether versioning is worth
+  ## building at all. Two commits touching the same number of nodes, on
+  ## graphs 100x apart: if the diff time follows the graph, the PRD's core
+  ## claim is false and V1 does not start.
+  exec "nim c -d:release --mm:atomicArc --threads:on --nimcache:tmp/nimcache-bv -o:tmp/bench_version tests/bench/bench_version.nim"
+  exec "./tmp/bench_version"
+
 task benchIndex, "M6.1 range-index benchmark (INDEX.md I5)":
   ## I5: a 10^6-node point lookup < 1 ms and a range scan < 10 ms, against
   ## the same queries with no index as a baseline. One argument overrides the

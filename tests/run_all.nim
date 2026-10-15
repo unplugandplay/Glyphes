@@ -15,6 +15,7 @@ import unit/test_cypher
 import unit/test_exec
 import unit/test_write
 import unit/test_index
+import unit/test_version
 
 # Store (M1), durability (M2), transactions (M3) and the exported C
 # surface are landed here; query (M4-M6) suites are added as their
