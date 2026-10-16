@@ -113,19 +113,23 @@ nothing the database did not acknowledge.
 | V0–V1 version history | **landed** | every transaction records a node revision; `.vhist` sidecar is durable and crash-safe; `diff` is O(changed) |
 | F0 cross-process lock | **landed** | two writers over one file refused; `soakShared` two-process soak green |
 | F1–F3 the follower | **landed** | SG5 the barrier never lies; SG6 the rebuilt timeline == the writer's; SG7 a crashed writer leaves the follower off by exactly one |
+| S1–S4 the surface | **landed** | C ABI, Ruby `Glyphes::Follower`, `glyphes follow` CLI; the crash guarantee holds across the ABI; no write symbol exists anywhere in the surface |
 
-The follower is **Nim-only today** — its C ABI, Ruby binding, and CLI are
-planned in [`docs/FOLLOWER-SURFACE-PLAN.md`](docs/FOLLOWER-SURFACE-PLAN.md),
-not yet built. See "What is not done" below.
+The follower is reachable from **C, Ruby, and the CLI**. Its surface —
+attach, poll, `head`/`generation`/`lsn`, and the reason when the watermark
+is absent — is deliberately write-free: there is no `glyphes_follower_commit`
+to forget to guard, because there is no such function. The structured
+timeline reads (`followState`/`followDiff`/`commitsUpTo` across the ABI) are
+the planned next increment, not yet built.
 
 ### Verification state
 
 Verified **after** the M10 changes, on the full gate (`nimble gate`):
 
-- **439 Nim tests, 0 failures** — store, WAL, recovery, transactions,
+- **447 Nim tests, 0 failures** — store, WAL, recovery, transactions,
   Cypher, all three index families, the model layer's statement compiler,
   version history, and the follower's watermark/timeline gates.
-- **216 Ruby tests / 718 assertions, 0 failures** — the seam, the model
+- **228 Ruby tests / 769 assertions, 0 failures** — the seam, the model
   layer, import/export, status mapping.
 - `nimble tck` — the committed TCK subset: **132/132 in-contract rows
   pass, all 17 out-of-contract rows refuse by name.**
@@ -170,12 +174,12 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 - **Bulk loading through the query language costs ~3 800 edges/second.**
   Three defects made it 20x worse than that; all are fixed and the numbers
   are in [`limitations.md`](limitations.md) §2.
-- **The follower is Nim-only.** The watermark, the replay, and the read
-  APIs exist and are gated, but nothing in the C ABI, the Ruby gem, or the
-  CLI reaches them. The external surface — C ABI, Ruby binding, CLI — is
-  planned in [`docs/FOLLOWER-SURFACE-PLAN.md`](docs/FOLLOWER-SURFACE-PLAN.md)
-  and deliberately not built yet. A follower you can only reach from Nim is
-  a mechanism, not a door.
+- **The follower's external surface reports counters, not content.** The
+  C ABI, Ruby binding, and CLI expose attach/poll/`head`/`generation`/`lsn`
+  — how far a follower has seen — but not yet `followState`/`followDiff`/
+  `commitsUpTo`. Auditing *what* changed still happens from Nim. That
+  structured-reads increment is planned in
+  [`docs/FOLLOWER-SURFACE-PLAN.md`](docs/FOLLOWER-SURFACE-PLAN.md).
 - **Follower history is node-only.** Edges, labels, and indexes are not in
   the log, so a follower cannot audit a relationship change. That is a
   format change (`vhist.nim`), not a surface one, and is out of scope for
@@ -191,10 +195,10 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 
 ```
 nimble build        the shared library (release, ORC, threaded)
-nimble test         439 Nim tests (fast)
-nimble testGate     439 Nim tests at full churn
+nimble test         447 Nim tests (fast)
+nimble testGate     447 Nim tests at full churn
 nimble fixture      rebuild tests/fixtures/social.glyph
-nimble gemtest      216 Ruby runs / 718 assertions
+nimble gemtest      228 Ruby runs / 769 assertions
 nimble crash        W1 crash gate
 nimble crashFollower  SG7: a writer SIGKILLed mid-commit leaves the follower off by exactly one
 nimble bitflip      W3 bit-flip sweep + W2 truncate sweep (GLYPHES_BITFLIPS=N)
@@ -242,6 +246,7 @@ it was gated in. The gate is the budget, not a reading.
 | M11 | Benchmark suite vs SQLite, docs, published `limitations.md`, soak harness | **landed** |
 | V0–V1 | Version history: revision per transaction, durable `.vhist`, O(changed) `diff` | **landed** |
 | F0–F3 | Shared mode: cross-process lock, watermark, the follower and its gates | **landed** |
+| S1–S4 | The follower's surface: C ABI, Ruby binding, CLI | **landed** |
 
 **[`limitations.md`](limitations.md)** is the honest list: what glyphes is
 bad at, with measurements, published *before* the release rather than after.

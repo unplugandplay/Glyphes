@@ -3057,3 +3057,56 @@ and three of its gates were proved to have teeth by deliberate corruption
 before being trusted. The follower's largest gap is reachability — it is
 Nim-only, and the surface that would make it a data-sharing space is a plan,
 not code.
+
+## S1–S4 — the follower grows a door
+
+Four commits (`a2f885c`, `404b3b0`, `205d212`, `4148cf3`) take the follower
+from Nim-only to reachable, in the order the surface plan set: the ABI
+boundary first (the uncertain thing, a struct-layout slip there being
+memory corruption, not a type error), then Ruby, then the CLI, then
+hardening.
+
+The design rule, from the whole point of the feature: **a follower is
+read-only, and the surface must make writing physically impossible, not
+just checked against.** So there is no `glyphes_follower_commit`. The
+write-defense is the absence of the symbol — SS2 checks the exported
+symbol table rather than a behaviour, because the guarantee is that there
+is nothing to call. The Ruby class asserts the same structurally:
+`Follower` must not respond to `commit`, `write`, `exec`, or ten other
+verbs, so restoring a write means adding a method *and* editing a test that
+asserts it is not there.
+
+Gates, and what they caught. SS1 (the ABI follower must agree with the Nim
+follower on the same database) was verified against a deliberately wrong
+boundary — `head` reporting `generation` — and failed, so the agreement
+check carries the safety property across the boundary, not just the happy
+path. SS3 put a forked writer child in front of a Ruby follower and
+converged on all ten commits: the first proof the door is real. The CLI
+gate caught two bugs in `bin/glyphes` itself, not the test: a discarded
+exit code (a missing watermark exited 0), and stdout buffering making
+`--watch` silent over a pipe — a streaming command must flush per line or
+a consumer sees nothing until the buffer fills. SS5 carried SG7 across the
+ABI: a writer SIGKILLed mid-commit leaves the ABI follower off by exactly
+one, agreeing with a Nim follower on the same crashed database.
+
+Two honest findings, recorded rather than smoothed over. The plan's example
+CLI output showed "(2 commits behind writer)", which is wrong by the
+follower's own contract — the follower reads to the watermark, which is the
+writer's committed progress, so it is never behind on what it may show; the
+CLI prints what is true. And the Ruby half of `nimble asan` crashes on this
+macOS with "unable to unmmap" — proven *pre-existing* by stashing all of
+this work, rebuilding the ASan library from pristine code, and watching the
+old suite crash identically. The Nim half is green under ASan, including
+the follower ABI and the crash test; the Ruby crash is a
+DYLD_INSERT_LIBRARIES runtime break on this machine, not a leak the
+boundary introduced. The new e2e tests guard themselves off under ASan so
+the suite is safe wherever the runtime is not broken.
+
+What the surface deliberately is not, yet: the structured timeline reads
+(`followState`/`followDiff`/`commitsUpTo` over the ABI) remain the planned
+next increment. An external follower today reports how far it has seen,
+not what changed — counters, not content.
+
+```
+447 Nim tests   228 Ruby runs / 769 assertions   C1 132/132 + 17/17 refusals
+```
