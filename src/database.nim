@@ -248,6 +248,20 @@ proc openDatabase*(path: string, mode: int32): Database =
     ## read-only open one too, so it can *read* the watermark; until then only
     ## the writer maps it.
     result.store.shm = openShm(path)
+    ## Recovery may have accepted commits the previous process never
+    ## announced: the watermark is published at the very end of the commit
+    ## path, so a crash between the log's COMMIT and the announcement leaves
+    ## the shared mark behind what the graph durably holds. A follower would
+    ## then report a history that ends before an acknowledged commit —
+    ## indefinitely, if the writer stays idle, because the mark moves only
+    ## when someone commits again. The open is where the graph's real
+    ## position is known, so it republishes when the mark is behind. There
+    ## is no un-publish: a mark ahead of the graph is the crash-window case
+    ## the generation stamp already handles, and lowering it here would
+    ## hide a commit a follower may already have applied.
+    if result.store.shm.loadGeneration() < result.store.generation:
+      result.store.shm.publishCommitted(result.store.generation,
+                                        result.store.lastLsn)
   elif not memory and readOnly:
     ## A read-only open maps the watermark (F1.3) so it can learn the last
     ## committed generation. It takes **no** write lock — this is the follower

@@ -352,3 +352,33 @@ suite "F3 SG8 a follower cannot write, and never holds the writer lock":
     check f2.refresh()
     check f2.head == 6
     close(w2)
+
+suite "review regression: recovery republishes the watermark":
+  test "a writer that recovers commits a follower never saw announces them":
+    ## The watermark is published at the very end of the commit path, so a
+    ## crash between the log's COMMIT and the announcement leaves the shared
+    ## mark behind what the graph durably holds. Nothing moved it again
+    ## until someone committed, so an idle writer hid an acknowledged commit
+    ## from every follower indefinitely. The open now republishes when the
+    ## mark is behind; deleting the block is the sharpest stand-in for
+    ## "behind" — generation 0 against a graph holding a recovered
+    ## generation. The expected mark is taken from the live writer rather
+    ## than hardcoded, because generation numbering is the writer's business
+    ## and the test's claim is only "the follower sees what the graph holds".
+    let p = freshDb()
+    var g = 0'u64
+    block:
+      let w = openDatabase(p, GLY_OPEN_CREATE)
+      g = w.commitOne("A")
+      close(w)
+    removeFile(p & "-shm")
+    let w2 = openDatabase(p, 0'i32)
+    check w2.store.generation == g   ## recovery put the graph back
+    let f = openFollower(p)
+    check f.unavailable == ""
+    check f.refresh()
+    check f.generation == g          ## and the mark names it again
+    check f.head == 1
+    check f.followAt(0).len == 1
+    close(f)
+    close(w2)

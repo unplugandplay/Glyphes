@@ -382,3 +382,35 @@ suite "property slots under a concurrent writer":
     check v.s[0] == 'b'
     check v.s[2] == 'c'
     closeWal(w)
+suite "review regressions: a finished transaction has exactly one ending":
+  test "a committed transaction is finished":
+    ## `commit` checked `closed` and never set it, so a post-commit rollback
+    ## was a real second ending: a ROLLBACK marker whose LSN the COMMIT had
+    ## already consumed, and an unconditional writer-claim release that by
+    ## then could name a different transaction — two writers in. Post-commit
+    ## mutation was already `assertOpen`'s named error; post-commit rollback
+    ## is now a no-op too.
+    let s = newStore()
+    let id = s.createNode("P")
+    let tx = begin(s, nil, 1'u32, doSync = false)
+    discard tx.setNodeProp(id, "x", Value(kind: vkInt, i: 1))
+    check tx.commit()
+    check tx.rollback() == false        ## no second ending
+    var v: Value
+    check s.getNodeProp(id, "x", v)
+    check v.i == 1                      ## the committed value, untouched
+    expect TxError:
+      discard tx.setNodeProp(id, "x", Value(kind: vkInt, i: 2))
+    ## The claim was released exactly once: the next writer begins.
+    let tx2 = begin(s, nil, 2'u32, doSync = false)
+    check tx2.commit()
+
+  test "a rolled-back transaction is finished too":
+    let s = newStore()
+    let tx = begin(s, nil, 1'u32, doSync = false)
+    check tx.rollback()
+    check tx.rollback() == false        ## idempotent, as it already was
+    expect TxError:
+      discard tx.createNode("P")
+    let tx2 = begin(s, nil, 2'u32, doSync = false)
+    check tx2.commit()

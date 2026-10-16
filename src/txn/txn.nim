@@ -977,6 +977,15 @@ proc commit*(tx: WriteTransaction): bool =
   ## merge safe: no reader can be inside the published arrays while this
   ## runs, so there is nothing to copy for.
   s.beginWrite()
+  ## The gate is released on every exit path, not only the successful one.
+  ## A raise inside the merge used to leave `writerInside` set forever, and
+  ## every `beginRead` in the process blocked behind it until restart. The
+  ## explicit `endWrite` the success path used to call is replaced by this:
+  ## `defer` runs it at scope exit, whichever way the scope is left. A raise
+  ## here still leaves a half-applied delta in memory — nothing un-applies
+  ## the merge — so the repair for that is reopening the database; what this
+  ## buys is that the process survives to do it.
+  defer: s.endWrite()
 
   # 4a. Reserve slots and label membership, but do not write the records
   #     yet. A node's adjacency is rebuilt by the edge merge below, so
@@ -1097,8 +1106,14 @@ proc commit*(tx: WriteTransaction): bool =
   discard tx.histSeal()
   if tx.indicesToUpdate != nil:
     applyDelta(tx.indicesToUpdate, s, tx.nodeDelta, tx.edgeDelta)
-  s.endWrite()
   s.releaseWriter()
+  ## The transaction is finished. `commit` checked `closed` but never set it,
+  ## so a post-commit `rollback` was a real rollback: a ROLLBACK marker whose
+  ## LSN the COMMIT had already consumed, and an unconditional writer-claim
+  ## release that by then could name a *different* transaction — two writers
+  ## in. `assertOpen` makes post-commit mutation a named error; this makes
+  ## post-commit rollback a no-op rather than a second ending.
+  tx.closed = true
   true
 
 proc rollback*(tx: WriteTransaction): bool =

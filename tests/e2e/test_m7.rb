@@ -78,10 +78,21 @@ class M7Test < Minitest::Test
       db.index_create(kind: :range, label: "User", property: "email",
                       constraint: :unique)
       assert_raises(Glyphes::ConstraintError) { db.exec("CREATE (:User {email: 'a@x'})") }
-      # Busy: a second concurrent writer on one handle.
-      assert_raises(Glyphes::BusyError) do
-        db.transaction do
-          db.transaction { db.exec("CREATE (:X)") }
+      # Busy: a second writer on one file. The nested `transaction` spelling
+      # cannot raise at all — an inner transaction joins the outer by design,
+      # and the join counter lives on the handle, so even a second Ruby
+      # thread on one object joins. The busy status is what a second *open*
+      # of the same file gets, which is the real second-writer case the
+      # cross-process lock exists for. (This assertion used to pass for the
+      # wrong reason: the constraint failure above leaked the writer claim,
+      # and the next `transaction` began by raising BUSY.)
+      Dir.mktmpdir do |dir|
+        p2 = File.join(dir, "busy.glyph")
+        w1 = Glyphes::Database.open(p2, create: true)
+        begin
+          assert_raises(Glyphes::BusyError) { Glyphes::Database.open(p2) }
+        ensure
+          w1.close
         end
       end
       # ReadOnly: a write on a read-only handle (RUBY.md §3).

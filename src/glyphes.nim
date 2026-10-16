@@ -1066,7 +1066,19 @@ proc glyphes_exec*(hDb: GlyHandle, cypher: cstring, paramsJson: cstring,
         st.close()
       if not joined:
         if finished:
-          discard db.commitTransaction(tx)
+          try:
+            discard db.commitTransaction(tx)
+          except CatchableError:
+            ## A commit that raises must still roll back. The transaction's
+            ## writer claim is released only by commit or rollback, and an
+            ## exception unwinding out of this `finally` skipped both: the
+            ## statement failed, and every later write answered BUSY until
+            ## the process restarted. A commit-time unique-constraint
+            ## violation in a plain `db.exec` was enough to trigger it.
+            ## The rollback runs first, then the original error is re-raised
+            ## so the host still sees why.
+            discard db.rollbackTransaction(tx)
+            raise
         else:
           discard db.rollbackTransaction(tx)
     int32(glyOk)
@@ -1134,7 +1146,19 @@ proc glyphes_exec_returning*(hDb: GlyHandle, cypher: cstring,
         st.close()
       if not joined:
         if finished:
-          discard db.commitTransaction(tx)
+          try:
+            discard db.commitTransaction(tx)
+          except CatchableError:
+            ## A commit that raises must still roll back. The transaction's
+            ## writer claim is released only by commit or rollback, and an
+            ## exception unwinding out of this `finally` skipped both: the
+            ## statement failed, and every later write answered BUSY until
+            ## the process restarted. A commit-time unique-constraint
+            ## violation in a plain `db.exec` was enough to trigger it.
+            ## The rollback runs first, then the original error is re-raised
+            ## so the host still sees why.
+            discard db.rollbackTransaction(tx)
+            raise
         else:
           discard db.rollbackTransaction(tx)
     int32(glyOk)

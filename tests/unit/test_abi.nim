@@ -261,3 +261,25 @@ suite "ABI: the handle registry does not leak (ABI.md §3)":
     check liveHandleCount() == base + 1
     check glyphes_close(dbh) == 0
     check liveHandleCount() == base
+suite "ABI: a failed autocommit must not wedge the writer":
+  test "a constraint violation in db.exec leaves the next write working":
+    ## The autocommit `finally` called commitTransaction and let a commit-time
+    ## raise unwind out of `finally` — the rollback branch below it never
+    ## ran, the transaction's writer claim was never released, and every
+    ## later write answered BUSY until the process restarted. The trigger
+    ## needs a failure at *commit* time, which is what a unique constraint
+    ## provides: the statement runs to completion, the merge refuses.
+    let path = freshPath("wedge.glyph")
+    let dbh = openAt(path)
+    check glyphes_index_create(dbh, 0,
+      "{\"label\": \"P\", \"property\": \"email\", \"constraint\": \"unique\"}".cstring) == 0
+    var n: int64
+    check glyphes_exec(dbh, "CREATE (:P {email: 'a@x'})", nil, addr n) == 0
+    ## The duplicate: the statement runs, the commit fails.
+    let bad = glyphes_exec(dbh, "CREATE (:P {email: 'a@x'})", nil, addr n)
+    check bad != 0
+    ## This used to be BUSY forever.
+    check glyphes_exec(dbh, "CREATE (:P {email: 'c@x'})", nil, addr n) == 0
+    ## And the constraint still holds: two distinct emails, one refused.
+    check glyphes_exec(dbh, "CREATE (:P {email: 'a@x'})", nil, addr n) != 0
+    check glyphes_close(dbh) == 0
