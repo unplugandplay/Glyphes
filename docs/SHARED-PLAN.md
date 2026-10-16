@@ -9,11 +9,14 @@
 catch-up into the writer's arrays. Those phases assumed a follower wants the
 live graph; the log does not contain one, so they are gone. See PRD §13.
 
-**Status:** plan. F0 and F1 are done; **F1.0 settled the barrier question**
-(the gate was red for a while and the barrier turned out to have been correct
-— see below). F2 is next. The `nimble crashFollower` task named in the gate
-table does not exist yet; it is built with F2, and until then `nimble test` is
-the whole gate.
+**Status:** F0, F1, F2, F3 and the SG7 crash gate are all **done**. Every
+gate in the table below is green, and three of them were checked against
+deliberate corruption rather than trusted because they pass: SG5 (the barrier
+was correct and the *test* was dirty), SG6 (a one-bit liveness corruption is
+caught by the oracle and nothing else), and SG7 (a follower that reads to EOF
+is caught showing a rolled-back commit). A gate that has never failed is not
+yet evidence, and all three of these were made evidence before being called
+done.
 
 Two rules govern the ordering, both learned the hard way in the discovery:
 
@@ -208,7 +211,7 @@ lock (the cheap regression guard for F0 from the other side).
 | SG1a/SG1b | writer lock (F0, shipped) | `nimble test`, `nimble soakShared` |
 | **SG5** | a follower never sees a generation paired with a stale LSN, ≥10⁶ iterations | `nimble test` — **green**, F1.0 |
 | SG6 | follower's `stateAt`/`diff` == the writer's own history | `nimble test` — **green**, and proved to catch a 1-bit corruption |
-| SG7 | crash mid-commit → follower off by exactly the unacknowledged commit | `nimble crashFollower` |
+| SG7 | crash mid-commit → follower off by exactly the unacknowledged commit | `nimble crashFollower` — **green**, and catches a read-to-EOF follower |
 | SG8 | follower cannot write; never holds the lock | `nimble test` — **green** |
 
 **SG5 is the gate that keeps this honest**, and it is the only one whose

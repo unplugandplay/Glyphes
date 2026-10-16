@@ -42,7 +42,7 @@
 ## `WAL.md` §3 said "slot 16 B" for this opcode. That was wrong in a way
 ## only implementing it revealed, and the spec has been amended.
 
-import std/[tables, sets, algorithm]
+import std/[tables, sets, algorithm, os, posix, strutils]
 import ../store/prop
 import ../store/revision
 import ../store/vhist
@@ -178,6 +178,47 @@ type
   TxError* = ref object of CatchableError
     ## Internal. Crosses to the ABI as a status code, never as itself.
     code*: TxCode
+
+var crashHookArrivals = 0
+
+proc crashHook*(point: string) =
+  ## Test-only fault injection. Kills this process with SIGKILL if
+  ## `GLYPHES_CRASH_AT` names this point, and does nothing otherwise.
+  ##
+  ## This is the one place the durability ordering can be checked rather than
+  ## asserted. The window that matters is the one between this frame being
+  ## durable and the watermark being published: it is the only state in which
+  ## `.vhist` is ahead of the graph, which is precisely the state a follower
+  ## must survive without showing a commit that was rolled back. Simulating
+  ## that by truncating a file afterwards would test the recovery path and not
+  ## this ordering, because the process would still have merged and published.
+  ##
+  ## SIGKILL, not an exception: an exception unwinds, and the code after it
+  ## would run on the way out. The claim under test is about a process that
+  ## stopped existing mid-commit, and only a signal stops that.
+  let want = getEnv("GLYPHES_CRASH_AT")
+  if want.len == 0:
+    return
+  ## `point` kills on the first arrival; `point:N` kills on the Nth. The
+  ## counter matters because "the follower is off by exactly one commit" is
+  ## only a claim when there were commits that *did* land first — killing on
+  ## the first arrival tests a follower that has seen nothing at all, which is
+  ## a different and much easier case.
+  var name = want
+  var nth = 1
+  let colon = want.rfind(':')
+  if colon > 0:
+    name = want[0 ..< colon]
+    nth = parseInt(want[colon + 1 .. ^1])
+  if name != point:
+    return
+  inc crashHookArrivals
+  if crashHookArrivals != nth:
+    return
+  stderr.writeLine "GLYPHES_CRASH_AT=" & want & ": SIGKILL (arrival " &
+                  $crashHookArrivals & ")"
+  stderr.flushFile()
+  discard posix.kill(posix.getpid(), posix.SIGKILL)
 
 proc failTxCode(code: TxCode, msg: string) {.noreturn.} =
   ## Constructed by hand rather than with `newException`, which cannot
@@ -852,6 +893,8 @@ proc histWriteAndSync(tx: WriteTransaction; sealed: uint64) =
   ## when the log's is.
   syncVhist(tx.store.vhistFile)
   tx.store.histGeneration = tx.store.generation + 1
+  crashHook("after-vhist-sync")
+
 
 proc commit*(tx: WriteTransaction): bool =
   ## Returns false when the transaction was already finished.

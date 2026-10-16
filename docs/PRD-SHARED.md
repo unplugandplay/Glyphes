@@ -242,6 +242,44 @@ history grows.
 
 ### 4.4 The rebuilt timeline is checked against the writer's own, and the check was proved to have teeth
 
+### 4.5 The crash gate, and the third time the same confusion bit
+
+`nimble crashFollower` (SG7) is the gate for the reason the watermark exists.
+`.vhist` is fsynced before the graph merge and before the watermark is
+published, so a process that dies inside that window leaves the log **ahead**
+of the database. That state cannot be faked by damaging files afterwards — the
+process would still have merged and published — so a `txn.crashHook`
+SIGKILLs a real writer at exactly that point (`GLYPHES_CRASH_AT=<point>:<N>`,
+the Nth arrival, because "off by exactly one" is a claim about nothing unless
+commits landed first).
+
+The gate asserts three things, in this order: the window was **entered**
+(`.vhist` ahead of the watermark); the follower stops at the watermark; and it
+is short by exactly the in-flight commit, cross-checked against a recovering
+writer and with the untrusted tail left on disk. The first assertion is the
+one that makes the other two mean anything — a crash that never reached the
+vulnerable ordering passes the rest vacuously, and a gate that cannot tell
+that difference is worse than no gate.
+
+**It catches what it exists to catch.** Mutating the follower to read to EOF
+instead of to the watermark makes it report 5 commits where the database has
+4, and both the exactness check and the recovery cross-check fail. That is the
+safety property — a follower that invents a rolled-back commit — proven
+detectable rather than asserted.
+
+Two things about writing this gate are worth recording, because both are
+mistakes I made rather than things I designed around. I opened a *writer*
+before the follower to cross-check recovery, which legitimately truncated the
+tail and destroyed the evidence the gate was checking the follower for not
+destroying — test order is part of the test. And I compared a `histGeneration`
+against a commit count, which is the same generation-versus-commit-id
+confusion that §4.3 describes, now caught in my own test rather than in the
+implementation. It is the third time. The lesson is not "be careful with
+counters"; it is that these two numbers should not both exist unlabelled in
+the same conversation, and every time they did, something read one as the
+other.
+
+
 A follower's history is folded from frames off disk. The writer's is
 accumulated as writes happen. These are different computations, and the only
 reason to believe they mean the same thing is to compare them: for every

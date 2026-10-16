@@ -112,6 +112,20 @@ task soakShared, "S1 two-process write soak (PRD-SHARED gate SG1b)":
   let secs = getEnv("GLYPHES_SHARED_SECS", "240")
   exec "./tmp/soak_shared " & secs
 
+task crashFollower, "F2 SG7 crash a writer mid-commit; follower off by exactly one":
+  ## The gate for the reason the watermark exists. `.vhist` is fsynced before
+  ## the graph merge and before the watermark is published, so a process that
+  ## dies in that window leaves the log *ahead* of the database. This kills a
+  ## real writer there with SIGKILL (see `txn.crashHook`) and checks that a
+  ## follower stops at the watermark, is short by exactly the in-flight commit,
+  ## and leaves the untrusted tail for whoever opens next.
+  ##
+  ## It first asserts that the window was actually entered. A crash that never
+  ## reached the vulnerable ordering passes every other check vacuously, and a
+  ## gate that cannot tell the difference is worse than no gate.
+  exec "nim c -d:release --mm:atomicArc --threads:on --nimcache:tmp/nimcache-cf -o:tmp/crash_follower tests/crash/crashfollow.nim"
+  exec "./tmp/crash_follower"
+
 task soakLeak, "M11 20-node leak soak (5 days by default; --mm:orc instrumented)":
   ## The M11 gate: many nodes, long run, and a verdict on *memory* rather
   ## than on correctness. Two optional arguments, seconds and node count:
