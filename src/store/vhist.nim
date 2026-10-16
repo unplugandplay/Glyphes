@@ -180,7 +180,7 @@ type DecodedCommit* = object
   ## nodeId -> its revision at the commit.
   revisions*: Table[int64, Revision]
 
-proc decodeCommitPayload(payload: string): DecodedCommit =
+proc decodeCommitPayload*(payload: string): DecodedCommit =
   ## The inverse of `encodeCommitPayload`. Every length is checked against
   ## what is actually there: a payload that declares more than it holds is
   ## refused rather than read past the end of.
@@ -272,7 +272,8 @@ proc closeVhist*(vf: VhistFile) =
 
 # ------------------------------------------------------------------- reading
 
-proc replayVhist*(path: string; uptoGeneration: uint64): tuple[
+proc replayVhist*(path: string; uptoGeneration: uint64;
+                  fromByte = 0): tuple[
     frames: seq[VFrame], goodBytes: int, truncated: bool] =
   ## Read every complete frame whose generation the graph has reached, and
   ## report the byte length of what was trusted.
@@ -297,11 +298,22 @@ proc replayVhist*(path: string; uptoGeneration: uint64): tuple[
   ## corrupted", and that is deliberate: both are answered by refusing to read
   ## past the last thing that is provably intact, and neither is answered by
   ## guessing what the missing bytes were.
+  ##
+  ## `fromByte` resumes a scan at an offset a previous replay proved good, and
+  ## is what makes a *polling* reader cheap: a follower that re-read the whole
+  ## sidecar on every tick would pay O(history) per tick forever, which is the
+  ## difference between "follows" and "keeps up". The offset is never a guess
+  ## -- callers pass back a `goodBytes` from an earlier call.
   let file = path & VhistSuffix
   if not fileExists(file):
     return
   let buf = readFile(file)
-  var at = 0
+  var at = fromByte
+  if at < 0 or at > buf.len:
+    ## The file shrank under us (a writer truncated its own untrusted tail).
+    ## Restart from the top rather than trusting an offset that no longer
+    ## refers to a frame boundary we validated.
+    at = 0
   while at + VFrameHeaderSize + 4 <= buf.len:
     let payloadLen = int(readU32(buf, at))
     let commitId = readU64(buf, at + 4)

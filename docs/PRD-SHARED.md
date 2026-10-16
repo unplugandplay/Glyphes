@@ -215,6 +215,31 @@ not the data — but the follower is *told*, because the alternative is a
 follower that cannot tell the difference between "generation 0" and "no
 watermark at all".
 
+### 4.3 Generation and commit id are two counters, and F2 tripped on it
+
+Writing the follower surfaced a distinction the design had been carrying
+without naming: **the watermark is a generation, the timeline is indexed by
+commit id.** They advance on the same transactions, so they look like one
+number, and they are not — after three commits a database's watermark reads
+3 while its timeline holds commits 1 and 2.
+
+The first version of the follower returned `head = watermark` and passed that
+same number to `commitsOnPath`. The result was a follower holding a complete,
+correct history that reported **zero** commits — present and unreachable at
+once, and invisible, because every count it printed was individually
+reasonable. So `Follower` carries both counters and names them for what they
+are: `generation()` asks the writer's progress, `head()` asks the timeline.
+Neither is derived from the other.
+
+Two smaller things came out of the same implementation. A follower attaching
+before the writer has published is an ordinary race, not a dead end, so
+`refresh` re-tries the watermark rather than staying nil forever — a follower
+that watched nothing for the rest of its life would be the most common way to
+be followed at all. And replay resumes from a byte offset the previous replay
+proved good, so polling costs O(new commits) instead of O(history) per tick;
+a follower that re-read everything every tick falls behind exactly as fast as
+history grows.
+
 ## 5. What a follower can and cannot do — the honest boundary
 
 This is the section that decides the product. It is a boundary, not a
