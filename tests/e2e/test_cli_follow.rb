@@ -16,6 +16,18 @@ require_relative "../../lib/glyphes"
 class CliFollowTest < Minitest::Test
   BIN = File.expand_path("../../bin/glyphes", __dir__)
 
+  # See FollowerTest#asan_active?: spawning under ASan-injected Ruby trips
+  # the same macOS munmap breakage as fork. The CLI suite spawns the
+  # watcher process, so it is skipped wholesale under ASan.
+  def asan_active?
+    (ENV["DYLD_INSERT_LIBRARIES"] || "").include?("asan") ||
+      (ENV["GLYPHES_LIB"] || "").include?("asan")
+  end
+
+  def setup
+    skip "spawn under ASan faults on macOS (pre-existing platform breakage)" if asan_active?
+  end
+
   def run_cli(*args)
     # -Ilib so bin/glyphes's require_relative resolves against this tree,
     # and the child inherits the library path for libglyphes.

@@ -15,6 +15,16 @@ require "tmpdir"
 require_relative "../../lib/glyphes"
 
 class FollowerTest < Minitest::Test
+  # ASan cannot survive a fork that returns (the child's copied shadow
+  # memory faults on munmap — the known macOS DYLD_INSERT_LIBRARIES
+  # breakage, which on this machine kills the pre-existing suite too, with
+  # or without these tests). Skip the forked test when ASan is injected so
+  # the suite is ASan-safe wherever the platform runtime is not broken.
+  def asan_active?
+    (ENV["DYLD_INSERT_LIBRARIES"] || "").include?("asan") ||
+      (ENV["GLYPHES_LIB"] || "").include?("asan")
+  end
+
   def with_db(**opts)
     Dir.mktmpdir do |dir|
       path = File.join(dir, "follow.glyph")
@@ -79,6 +89,8 @@ class FollowerTest < Minitest::Test
   # writer, and the follower attaches alongside it, which is exactly the
   # shape the feature exists for.
   def test_follows_a_forked_writer_process
+    skip "fork under ASan faults on macOS (pre-existing platform breakage)" if asan_active?
+
     Dir.mktmpdir do |dir|
       path = File.join(dir, "follow.glyph")
       Glyphes::Database.open(path, create: true) do |db|

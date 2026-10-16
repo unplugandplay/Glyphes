@@ -6,8 +6,16 @@
 
 **Implements:** the external surface over [`PRD-SHARED.md`](PRD-SHARED.md)
 F1–F3, which built the follower and proved it correct.
-**Status:** plan. Nothing here is written. The corrections that this plan
-rests on (the review of F1–F3) are committed separately.
+**Status:** S1, S2, S3 done and gated; S4's crash-through-ABI gate (SS5's
+core) done. S4's ASan half: the Nim suite under ASan is green including the
+follower ABI and the crash test; the Ruby suite under ASan crashes on this
+macOS **with or without this work** (verified by stashing all changes and
+re-running the pristine suite — the munmap fault is a pre-existing
+DYLD_INSERT_LIBRARIES/runtime incompatibility, not a leak the boundary
+introduced). The e2e tests guard themselves off under ASan so the suite is
+ASan-safe wherever the platform runtime is not broken. The structured
+timeline reads across the ABI (`followState`/`followDiff`/`commitsUpTo`)
+remain the planned follow-up, deliberately deferred.
 
 ---
 
@@ -225,11 +233,11 @@ Named now, so no one plans them into a phase they do not belong in:
 
 | gate | asserts | runs as |
 |---|---|---|
-| SS1 | C follower == Nim follower on head/generation/lsn | `nimble test` |
-| SS2 | no exported follower symbol can write | `nimble test` (symbol shape) |
-| SS3 | Ruby follows a forked writer, head advances | `tests/e2e/` |
-| SS4 | CLI prints advancing head; no-writer DB exits nonzero | CLI test |
-| SS5 | follower ABI clean under ASan across crash/recovery | `nimble asanFollower` |
+| SS1 | C follower == Nim follower on head/generation/lsn | `nimble test` — **green**, and caught a wrong-counter boundary |
+| SS2 | no exported follower symbol can write | `nimble test` (symbol shape, `nm`) — **clean** |
+| SS3 | Ruby follows a forked writer, head advances | `tests/e2e/` — **green** |
+| SS4 | CLI prints advancing head; no-writer DB exits nonzero | `tests/e2e/` — **green** |
+| SS5 | follower ABI clean under ASan across crash/recovery | Nim half **green** under `nimble asan`; Ruby half crashes on this macOS pre-existing (see Status) |
 
 The ordering rule from the follower plan still governs: **the uncertain thing
 first, prototyped before designed around.** Here the uncertain thing is the

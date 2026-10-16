@@ -24,6 +24,7 @@
 
 import std/unittest
 import std/os
+import std/posix
 import ../../src/abi
 import ../../src/errors
 import ../../src/handles
@@ -32,6 +33,7 @@ import ../../src/database
 import ../../src/store/store
 import ../../src/store/prop
 import ../../src/store/follow
+import ../../src/store/shm
 import ../../src/txn/txn
 
 proc abiDir(): string =
@@ -215,3 +217,52 @@ suite "ABI: follower (S1, PRD-SHARED F2)":
     check glyphes_follower_refresh(h, addr adv) == 0
     check glyphes_follower_close(h) == 0
     close(w)
+
+suite "ABI: the follower survives a crashed writer (S4, SS5)":
+  ## SG7, pointed at the boundary. A writer is SIGKILLed after its history
+  ## frame is durable but before the watermark moves; the ABI follower must
+  ## be off by exactly the unacknowledged commit, the same guarantee the
+  ## Nim-side gate proves, now carried across the C ABI. If the boundary
+  ## weakened it -- if an out-param or the refresh path read past the
+  ## watermark -- this fails.
+
+  test "a writer SIGKILLed mid-commit leaves the ABI follower off by exactly one":
+    let path = freshPath("crash.glyph")
+
+    let pid = posix.fork()
+    if pid == 0:
+      putEnv("GLYPHES_CRASH_AT", "after-vhist-sync:5")
+      let w = openWriter(path)
+      for i in 1 .. 4:
+        w.commitOne("acked" & $i)
+      w.commitOne("doomed")             ## dies inside: frame durable,
+      quit(0)                           ## watermark never moved
+
+    var st: cint
+    discard posix.waitpid(pid, st, 0)
+    check (st and 0x7f) == 9
+
+    let h = openAbiFollower(path)
+    var advanced: int32
+    check glyphes_follower_refresh(h, addr advanced) == 0
+    check advanced == 1
+    var head, gen, lsn: uint64
+    check glyphes_follower_head(h, addr head) == 0
+    check glyphes_follower_generation(h, addr gen) == 0
+    check glyphes_follower_lsn(h, addr lsn) == 0
+
+    ## Exactly the four acknowledged commits, no phantom fifth: the safety
+    ## property SG7 exists for, carried across the boundary.
+    check head == 4
+    let wm = openShmReadOnly(path).loadGeneration()
+    check gen == wm
+
+    ## And the follower's own view agrees with a fresh Nim follower on the
+    ## same crashed database -- the two surfaces see the same history.
+    let nimSide = openFollower(path)
+    check nimSide.refresh()
+    check head == nimSide.head
+    check gen == nimSide.generation
+    check lsn == nimSide.lsn
+
+    check glyphes_follower_close(h) == 0
