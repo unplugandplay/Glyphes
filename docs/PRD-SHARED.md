@@ -7,6 +7,13 @@
 normative; every *gate* is a merge condition. Where code and this document
 disagree, this document leads.
 
+**Preamble:** [`DISCOVERY-SHARED-MODE.md`](DISCOVERY-SHARED-MODE.md) carries
+the record of how this positioning was arrived at — the claim-vs-code table,
+the three things I got wrong, and the discovery (the log is node history, not
+graph history) that inverted the design. Read it before implementing; this
+document is the decision, that one is the reasoning, and the reasoning is
+where the surprising constraints come from.
+
 This **supersedes** the positioning in the first draft of this document, which
 was *"two or more processes on one graph file, with exactly one of them
 writing at a time, and every other process seeing committed state rather than
