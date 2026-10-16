@@ -11,6 +11,7 @@ import unit/test_store
 import unit/test_wal
 import unit/test_txn
 import unit/test_abi
+import unit/test_follower_abi
 import unit/test_cypher
 import unit/test_exec
 import unit/test_write

@@ -297,6 +297,33 @@ int32_t glyphes_edge_info(GlyHandle db, int64_t id, char *json_out,
 int32_t glyphes_edge_props(GlyHandle db, int64_t id, char *json_out,
                            size_t cap, size_t *out_len);
 
+/* ---- follower (PRD-SHARED F2) -------------------------------------
+ *
+ * A read-only observer of a database's commit history. A follower maps the
+ * writer's watermark, replays the .vhist sidecar up to the generation that
+ * watermark names, and answers how far it has seen. It holds no nodes,
+ * issues no Cypher, takes no write lock, and — deliberately — has no entry
+ * point that writes: there is no glyphes_follower_commit, so a caller
+ * cannot commit through a follower by mistake or malice. The write-defense
+ * is the absence of the symbol, not a check on one that exists.
+ *
+ * A follower handle is not a database handle: passing one where a database
+ * is expected (e.g. glyphes_close) is GLY_ERR_STALE, the same type error a
+ * statement handle gets. head is a commit id; generation is the watermark
+ * generation; the two advance together and are numbered independently. */
+int32_t glyphes_follower_open(char *path, GlyHandle *out_follower);
+int32_t glyphes_follower_close(GlyHandle follower);
+/* out_advanced is 1 when new commits were folded in, 0 when current or
+ * when no watermark is available yet (poll again; attaching early is a
+ * race, not an error). */
+int32_t glyphes_follower_refresh(GlyHandle follower, int32_t *out_advanced);
+int32_t glyphes_follower_head(GlyHandle follower, uint64_t *out_head);
+int32_t glyphes_follower_generation(GlyHandle follower, uint64_t *out_gen);
+int32_t glyphes_follower_lsn(GlyHandle follower, uint64_t *out_lsn);
+/* Why the watermark is unavailable, or "". Same copy-immediately contract
+ * as glyphes_global_error. */
+char *glyphes_follower_error(GlyHandle follower);
+
 #ifdef __cplusplus
 }
 #endif

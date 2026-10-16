@@ -30,6 +30,7 @@ import ./cypher/execute
 import ./cypher/params
 import ./store/prop
 import ./store/store
+import ./store/follow
 import ./cypher/errors
 import ./cypher/expr
 
@@ -1191,5 +1192,132 @@ proc glyphes_cell_len*(c: ptr GlyCell, outLen: ptr uint32): int32
     return int32(glyErr)
   outLen[] = c[].len
   int32(glyOk)
+
+# ----------------------------------------------------------------- follower
+#
+# The read-only observer over the C boundary (PRD-SHARED F2, surface plan
+# S1). Every entry point is shaped like the database ones — guarded, handle
+# typed under hkFollower, non-raising under the file-wide
+# {.push raises: []} — and the set is deliberately write-free. There is no
+# glyphes_follower_commit, no glyphes_follower_apply, no
+# glyphes_follower_truncate: a follower must not have a write to call. The
+# write-defense is the absence of the symbol, not a check on a symbol that
+# exists, so there is nothing a future edit could forget to guard (surface
+# plan §2, gate SS2 checks exactly this absence by listing the exports).
+
+proc glyphes_follower_open*(path: cstring, outHandle: ptr GlyHandle): int32
+    {.cdecl, exportc, dynlib.} =
+  if outHandle == nil:
+    setGlobalError("glyphes_follower_open: out_handle is null")
+    return int32(glyErr)
+  outHandle[] = 0
+  guarded("glyphes_follower_open"):
+    if path == nil:
+      fail(glyErr, "glyphes_follower_open: path is null")
+    let f = openFollower($path)
+    outHandle[] = register(hkFollower, f)
+    ## A missing watermark is reported on the handle, not as an open
+    ## failure: attaching before the writer has published is a race, not an
+    ## error (follow.nim), and the C caller gets the same "says so rather
+    ## than invents one" contract the Nim caller gets.
+    if f.unavailable != "":
+      setError(outHandle[], f.unavailable)
+    int32(glyOk)
+
+proc glyphes_follower_close*(h: GlyHandle): int32
+    {.cdecl, exportc, dynlib.} =
+  if not isLive(h):
+    setGlobalError("glyphes_follower_close: stale handle")
+    return int32(glyErrStale)
+  if not isKind(h, hkFollower):
+    setGlobalError("glyphes_follower_close: handle is not a follower")
+    return int32(glyErrStale)
+  guarded("glyphes_follower_close"):
+    let f = lookup[Follower](h, hkFollower)
+    close(f)
+    discard release[Follower](h)
+    int32(glyOk)
+
+proc glyphes_follower_refresh*(h: GlyHandle, outAdvanced: ptr int32): int32
+    {.cdecl, exportc, dynlib.} =
+  ## Apply everything the watermark now covers. `out_advanced` is 1 when new
+  ## commits were folded in, 0 when the follower is already current (or has
+  ## no watermark to read — poll again later; attaching early is a race, not
+  ## a failure).
+  if outAdvanced == nil:
+    setGlobalError("glyphes_follower_refresh: out is null")
+    return int32(glyErr)
+  outAdvanced[] = 0
+  if not isLive(h) or not isKind(h, hkFollower):
+    setGlobalError("glyphes_follower_refresh: handle is not a live follower")
+    return int32(glyErrStale)
+  guarded("glyphes_follower_refresh"):
+    let f = lookup[Follower](h, hkFollower)
+    outAdvanced[] = if f.refresh(): 1 else: 0
+    ## Keep the handle-local reason in step with the follower's own state,
+    ## so a caller that polls before the writer exists sees the reason
+    ## clear once the watermark appears.
+    setError(h, f.unavailable)
+    int32(glyOk)
+
+proc glyphes_follower_head*(h: GlyHandle, outHead: ptr uint64): int32
+    {.cdecl, exportc, dynlib.} =
+  ## Newest commit **id** applied. This is a commit id, not a generation —
+  ## the two advance together and are numbered independently (PRD §4.3), and
+  ## `head` is for asking the timeline a question, which is indexed by id.
+  if outHead == nil:
+    setGlobalError("glyphes_follower_head: out is null")
+    return int32(glyErr)
+  outHead[] = 0
+  if not isLive(h) or not isKind(h, hkFollower):
+    setGlobalError("glyphes_follower_head: handle is not a live follower")
+    return int32(glyErrStale)
+  guarded("glyphes_follower_head"):
+    let f = lookup[Follower](h, hkFollower)
+    outHead[] = f.head
+    int32(glyOk)
+
+proc glyphes_follower_generation*(h: GlyHandle, outGen: ptr uint64): int32
+    {.cdecl, exportc, dynlib.} =
+  ## The watermark generation — the writer's progress, distinct from `head`.
+  if outGen == nil:
+    setGlobalError("glyphes_follower_generation: out is null")
+    return int32(glyErr)
+  outGen[] = 0
+  if not isLive(h) or not isKind(h, hkFollower):
+    setGlobalError("glyphes_follower_generation: handle is not a live follower")
+    return int32(glyErrStale)
+  guarded("glyphes_follower_generation"):
+    let f = lookup[Follower](h, hkFollower)
+    outGen[] = f.generation
+    int32(glyOk)
+
+proc glyphes_follower_lsn*(h: GlyHandle, outLsn: ptr uint64): int32
+    {.cdecl, exportc, dynlib.} =
+  ## The committed LSN paired with the generation — the WAL position a
+  ## reader would replay to in order to reach the same place.
+  if outLsn == nil:
+    setGlobalError("glyphes_follower_lsn: out is null")
+    return int32(glyErr)
+  outLsn[] = 0
+  if not isLive(h) or not isKind(h, hkFollower):
+    setGlobalError("glyphes_follower_lsn: handle is not a live follower")
+    return int32(glyErrStale)
+  guarded("glyphes_follower_lsn"):
+    let f = lookup[Follower](h, hkFollower)
+    outLsn[] = f.lsn
+    int32(glyOk)
+
+proc glyphes_follower_error*(h: GlyHandle): cstring
+    {.cdecl, exportc, dynlib.} =
+  ## Why the follower's watermark is unavailable, or "" when it is fine.
+  ## Surfaced through the thread-local error buffer with the same
+  ## copy-immediately contract as glyphes_global_error (ABI.md B1: no
+  ## engine-allocated memory crosses the boundary and stays caller-owned).
+  ## Non-raising by construction — `lastError` answers a dead or non-follower
+  ## handle with "" rather than throwing, and this proc returns cstring so
+  ## it cannot ride `guarded`.
+  setGlobalError(lastError(h))
+  globalErrorCStr()
 
 {.pop.}

@@ -29,7 +29,14 @@ type
     ## Which object type a handle names. Checked on every dereference,
     ## so passing a statement handle to glyphes_close is a status error
     ## rather than a type confusion.
-    hkDatabase, hkTransaction, hkStatement
+    ##
+    ## `hkFollower` is the read-only observer (PRD-SHARED F2): it names a
+    ## `Follower`, which holds no graph and cannot write. Keeping it in the
+    ## same registry means the type check that already stops a statement
+    ## handle reaching `glyphes_close` also stops a follower reaching any
+    ## database entry point — the write-defense is the type system, not a
+    ## runtime check that could be forgotten.
+    hkDatabase, hkTransaction, hkStatement, hkFollower
 
   Slot = object
     generation: uint64

@@ -105,6 +105,20 @@ proc openFollower*(path: string): Follower =
   except IOError as e:
     result.unavailable = "watermark unavailable: " & e.msg
 
+proc close*(f: Follower) =
+  ## Unmap the watermark and detach. The follower's own `Revisions` is
+  ## owned by this object and dies with it; the database directory is
+  ## untouched, because nothing here ever wrote to it.
+  ##
+  ## Idempotent: a follower whose watermark never mapped (`shm == nil`) has
+  ## nothing to unmap, and a second close after the first is a no-op rather
+  ## than a double-unmap. The C ABI (`glyphes_follower_close`) detaches the
+  ## handle after calling this, so a stale handle is caught by the registry
+  ## before it can reach a freed mapping.
+  if f != nil and f.shm != nil:
+    closeShm(f.shm)
+    f.shm = nil
+
 proc refresh*(f: Follower): bool =
   ## Apply everything the watermark now covers. Returns true if new commits
   ## were folded in.
