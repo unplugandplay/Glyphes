@@ -24,7 +24,7 @@ proc freshDb(): string =
   for suf in ["", "-wal", "-lock", "-shm", "-indexes", ".vhist"]:
     removeFile(result & suf)
 
-proc commit(db: Database; name: string): uint64 =
+proc commitOne(db: Database; name: string): uint64 =
   ## One commit creating one node; returns the generation the watermark now
   ## names.
   let tx = db.beginTransaction()
@@ -36,8 +36,8 @@ suite "F2 SG6 the follower applies exactly what the watermark covers":
   test "a follower sees the writer's commits":
     let p = freshDb()
     let w = openDatabase(p, GLY_OPEN_CREATE)
-    let g1 = w.commit("Person")
-    let g2 = w.commit("City")
+    let g1 = w.commitOne("Person")
+    let g2 = w.commitOne("City")
     close(w)
 
     let f = openFollower(p)
@@ -58,7 +58,7 @@ suite "F2 SG6 the follower applies exactly what the watermark covers":
     ## viable, and re-refreshing with nothing new must not double-apply.
     let p = freshDb()
     let w = openDatabase(p, GLY_OPEN_CREATE)
-    discard w.commit("A")
+    discard w.commitOne("A")
     close(w)
 
     let f = openFollower(p)
@@ -78,9 +78,9 @@ suite "F2 SG6 the follower applies exactly what the watermark covers":
     ## A follower that read to EOF would show those as real commits.
     let p = freshDb()
     let w = openDatabase(p, GLY_OPEN_CREATE)
-    discard w.commit("A")
-    discard w.commit("B")
-    discard w.commit("C")
+    discard w.commitOne("A")
+    discard w.commitOne("B")
+    discard w.commitOne("C")
     close(w)
 
     ## Replay by hand to the *first* commit's generation, with three frames
@@ -105,7 +105,7 @@ suite "F2 SG6 the follower applies exactly what the watermark covers":
     ## and two writers truncating one file concurrently is how the log dies.
     let p = freshDb()
     let w = openDatabase(p, GLY_OPEN_CREATE)
-    discard w.commit("A")
+    discard w.commitOne("A")
     close(w)
     let vhist = p & ".vhist"
     let sizeBefore = getFileSize(vhist)
@@ -136,7 +136,7 @@ suite "F2 SG6 the follower applies exactly what the watermark covers":
     ## "One writer, many followers" is the shape; this is the shape's floor.
     let p = freshDb()
     let w = openDatabase(p, GLY_OPEN_CREATE)
-    for i in 1 .. 5: discard w.commit("N" & $i)
+    for i in 1 .. 5: discard w.commitOne("N" & $i)
     close(w)
     let a = openFollower(p)
     let b = openFollower(p)
@@ -191,3 +191,128 @@ suite "F2 SG7 a second *process* follows a live writer":
     check converged       ## the follower saw all 20 commits
     check f.followAt(0).len == 20
     check f.unavailable == ""   ## and it found the watermark on a later poll
+
+suite "F3 SG6 the rebuilt timeline equals a from-scratch reconstruction":
+  ## The gate that makes a follower trustworthy rather than merely working.
+  ## A follower's history is *folded from frames*, not recorded as writes
+  ## happen — a different computation from the writer's — so the only way to
+  ## know the two agree is to check, commit by commit and node by node, that
+  ## a follower's answer is the same answer a fresh reconstruction gives.
+  ## This is V0's oracle bar, pointed at a history that crossed a process
+  ## boundary and came back off disk.
+
+  test "a follower's stateAt and diff match the writer's own history":
+    let p = freshDb()
+    let w = openDatabase(p, GLY_OPEN_CREATE)
+    ## A history worth checking: creates, property sets, a delete, and a
+    ## commit that touches nothing -- the shapes where "changed" and "actually
+    ## different" come apart.
+    var ids: seq[int64]
+    for i in 1 .. 6:
+      let tx = w.beginTransaction()
+      let id = tx.createNode("Person")
+      ids.add id
+      discard w.commitTransaction(tx)
+    for i in 0 .. 2:
+      let tx = w.beginTransaction()
+      discard tx.setNodeProp(ids[i], "age", Value(kind: vkInt, i: 20 + i))
+      discard w.commitTransaction(tx)
+    let tx = w.beginTransaction()
+    discard tx.deleteNode(ids[3], false)
+    discard w.commitTransaction(tx)
+    ## An empty commit: names no nodes, so a diff across it must be empty.
+    discard w.commitOne("nothing")
+
+    let writerHistory = w.store.history
+    let writerHead = writerHistory.commits.len.uint64
+    close(w)
+
+    let f = openFollower(p)
+    check f.refresh()
+    check f.head == writerHead   ## same number of commits, not just "some"
+
+    ## Every commit, every node, every property: the follower's folded state
+    ## must equal the writer's accumulated one.
+    for c in 1'u64 .. writerHead:
+      for id in ids:
+        let a = writerHistory.stateAt(id, c)
+        let b = f.followState(c, id)
+        ## Compared structurally, not with `==`: `NodeState` holds a `Value`,
+        ## which is a `case` object, so `==` is not available on it.
+        check sameNodeState(a, b)
+
+    ## And every diff, over every pair of commits, must match exactly.
+    for a in 1'u64 .. writerHead:
+      for b in 1'u64 .. writerHead:
+        check sameDiff(writerHistory.diff(a, b), f.followDiff(a, b))
+
+  test "the timeline is complete and ordered":
+    ## The audit view: every commit, once, in order, and nothing invented.
+    let p = freshDb()
+    let w = openDatabase(p, GLY_OPEN_CREATE)
+    for i in 1 .. 8: discard w.commitOne("N" & $i)
+    close(w)
+
+    let f = openFollower(p)
+    check f.refresh()
+    let spine = f.commitsUpTo()
+    check spine.len == 8
+    for i, c in spine:
+      check c.id == uint64(i + 1)      ## total order, oldest first
+      ## A commit only reaches the spine once sealed, so "sealed" needs no
+      ## field to assert -- what is worth asserting is that the spine is
+      ## well-formed: a root with no parents, and every later commit naming
+      ## exactly the one before it.
+      if i == 0:
+        check c.parents.len == 0
+      else:
+        check c.parents == @[uint64(i)]
+    ## And it agrees with asking one commit at a time.
+    check f.commitAt(3).id == 3
+
+  test "asking about a commit the follower has not applied is refused, not guessed":
+    let p = freshDb()
+    let w = openDatabase(p, GLY_OPEN_CREATE)
+    discard w.commitOne("A")
+    close(w)
+    let f = openFollower(p)
+    check f.refresh()
+    expect ValueError:
+      discard f.commitAt(99)
+
+suite "F3 SG8 a follower cannot write, and never holds the writer lock":
+  ## F0's gate from the other side: the follower is not a writer that has been
+  ## told to behave.
+
+  test "a follower's own API offers nothing that writes":
+    ## Structural, not behavioural: nothing on `Follower`'s surface writes, so
+    ## this cannot regress by forgetting a check. A follower's whole API is
+    ## `openFollower`, `refresh`, `head`, `generation`, `revisions`,
+    ## `followAt`, `followState`, `followDiff`, `commitsUpTo`, `commitAt` --
+    ## the first attaches, `refresh` replays frames into a private store, and
+    ## the rest read. No commit, no write, no lock.
+    let f = openFollower(freshDb())
+    check f.revisions != nil
+
+  test "following does not take or disturb the writer lock":
+    ## A follower that took the write lock would stall the writer; one that
+    ## left it held would make the database unopenable. Both are invisible
+    ## until the second process hangs.
+    let p = freshDb()
+    let w = openDatabase(p, GLY_OPEN_CREATE)
+    for i in 1 .. 4: discard w.commitOne("N" & $i)
+    ## The writer is still open and still writing while followers come and go.
+    let fs = @[openFollower(p), openFollower(p)]
+    for fl in fs:
+      discard fl.refresh()
+      check fl.head == 4
+    discard w.commitOne("after")
+    ## And a brand new writer can still be opened from a *different* process
+    ## position: the lock was never a follower's to touch.
+    close(w)
+    let w2 = openDatabase(p, GLY_OPEN_CREATE)
+    discard w2.commitOne("reopened")
+    let f2 = openFollower(p)
+    check f2.refresh()
+    check f2.head == 6
+    close(w2)

@@ -564,6 +564,36 @@ proc revisionAt*(rv: Revisions, nodeId: int64, commit: uint64): Revision =
     result.props = @[]
     result.removed = @[]
 
+proc sameNodeState*(a, b: NodeState): bool =
+  ## Structural equality for a folded state, without `==`.
+  ##
+  ## `NodeState` carries `Value`, which is a `case` object, and Nim's `==` on a
+  ## `case` object is not something the generic sequence comparison can use --
+  ## so "are these two states the same" had no answer at all. It is a question
+  ## every reader of this module eventually asks, so it belongs here rather
+  ## than in each caller. Note this compares *folded* state, so two states
+  ## reached by different routes still compare equal, which is the point.
+  sameState(a, b)
+
+proc sameDiff*(a, b: seq[DiffEntry]): bool =
+  ## Structural equality for two diffs, entry for entry and in order.
+  ##
+  ## Order-sensitive on purpose: a diff is a report, and a report whose entries
+  ## arrive in a different order is a different report, even if it says the
+  ## same thing. Two implementations that agree on content but disagree on
+  ## ordering have not agreed, and that is exactly the disagreement a rebuilt
+  ## history could have with the writer that produced it.
+  if a.len != b.len:
+    return false
+  for i in 0 ..< a.len:
+    if a[i].nodeId != b[i].nodeId:
+      return false
+    if not sameState(a[i].before, b[i].before):
+      return false
+    if not sameState(a[i].after, b[i].after):
+      return false
+  result = true
+
 proc diff*(rv: Revisions, a, b: uint64): seq[DiffEntry] =
   ##
   ## The ids come from the two `changed` sets between the merge base and each

@@ -164,3 +164,55 @@ proc followAt*(f: Follower; generation: uint64): seq[CommitRecord] =
   if generation >= f.headCommit or f.revisions == nil:
     return @[]
   result = f.revisions.commitsOnPath(generation, f.headCommit)
+
+# ------------------------------------------------------------------- reading
+
+proc followState*(f: Follower; commit: uint64; nodeId: int64): NodeState =
+  ## What this node looked like at `commit`.
+  ##
+  ## A commit id past the head is answered by folding the whole timeline, not
+  ## refused: the follower's history is complete as far as it goes, so asking
+  ## about a commit it has not applied is asking about a commit that may not
+  ## exist yet, and the honest answer to "what will this node be at a commit
+  ## that has not happened" is its latest known state.
+  if f.revisions == nil:
+    return NodeState(live: false, props: @[])
+  f.revisions.stateAt(nodeId, min(commit, f.headCommit))
+
+proc followDiff*(f: Follower; a, b: uint64): seq[DiffEntry] =
+  ## The difference between two commits, over a history that was *rebuilt*
+  ## rather than accumulated.
+  ##
+  ## This is the claim worth making carefully. A follower's timeline is folded
+  ## from frames, not recorded as writes happen, so its `diff` is a different
+  ## computation than the writer's — the writer's ran on live deltas, this one
+  ## runs on deltas recovered from disk. They must agree exactly, because a
+  ## `diff` that meant one thing before a restart and another after would make
+  ## the whole history untrustworthy in the one way nobody would notice.
+  if f.revisions == nil:
+    return @[]
+  f.revisions.diff(min(a, f.headCommit), min(b, f.headCommit))
+
+proc commitsUpTo*(f: Follower): seq[CommitRecord] =
+  ## The timeline's spine, oldest first — every commit this follower has
+  ## applied, in the order they happened.
+  ##
+  ## Ordered by commit id rather than returned in file order, so a caller
+  ## walking this gets a total order it can rely on even on a history with
+  ## merges. This is the audit view: "every commit this observer saw", and
+  ## nothing about what any of them did to the graph.
+  if f.revisions == nil:
+    return @[]
+  for id in 1'u64 .. f.headCommit:
+    if id.uint64 <= f.revisions.commits.len.uint64:
+      result.add f.revisions.commitAt(id)
+
+proc commitAt*(f: Follower; commit: uint64): CommitRecord =
+  ## One commit's record. Raises if the follower has not applied it — a
+  ## missing commit is a question with no answer, not a default.
+  if f.revisions == nil or commit > f.headCommit or
+     commit == 0'u64 or commit.uint64 > f.revisions.commits.len.uint64:
+    raise newException(ValueError,
+      "commit " & $commit & " is not in this follower's history (head " &
+      $f.headCommit & ")")
+  f.revisions.commitAt(commit)
