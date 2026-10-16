@@ -257,6 +257,32 @@ suite "V1 the history sidecar (VERSIONING-PLAN V1)":
     ## Up to 7 and it is accepted.
     check replayVhist(path, 7'u64).frames.len == 1
 
+  test "a backup carries the history":
+    ## backup copied the snapshot, the log and the index sidecar, and
+    ## dropped `.vhist` — and a database without its sidecar opens as "no
+    ## history" by design, so nothing named the loss. The index sidecar's
+    ## own comment in database.nim states the argument; the history is the
+    ## same argument with worse consequences, because the restored
+    ## database's diffs would silently answer from an empty timeline.
+    ## Measured: a two-commit source restored with zero commits.
+    let path = freshPath("bk-src.glyph")
+    let dest = txnDir() / "bk-dest.glyph"
+    block:
+      let db = openDatabase(path, GLY_OPEN_CREATE)
+      for i in 1 .. 2:
+        let t = db.beginTransaction()
+        discard t.createNode("Person")
+        check db.commitTransaction(t)
+      for suf in ["", "-wal", "-lock", "-shm", "-indexes", ".vhist"]:
+        try: removeFile(dest & suf)
+        except: discard
+      db.backup(dest)
+      check fileExists(dest & ".vhist")
+      close(db)
+    let restored = openDatabase(dest, 0'i32)
+    check restored.store.history.commits.len == 2
+    close(restored)
+
   test "an absent sidecar is no history, not a failure":
     ## A database whose history was never enabled, or was lost, still opens.
     ## History is additive; losing it costs the history and not the data.

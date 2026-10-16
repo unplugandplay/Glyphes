@@ -428,6 +428,14 @@ proc backup*(db: Database, dest: string) =
     let sidecar = db.path & IndexSidecarSuffix
     if fileExists(sidecar):
       copyFile(sidecar, dest & IndexSidecarSuffix)
+    ## The history travels with the data, by the same argument the index
+    ## sidecar's comment makes: a backup that restored a database without
+    ## its `.vhist` would open as "no history" *by design* — all the data,
+    ## none of its past, and nothing naming the loss. Measured: a
+    ## two-commit source restored with zero commits. PRD §4.1's copy recipe
+    ## is three files beside the database, not two.
+    if fileExists(db.path & VhistSuffix):
+      copyFile(db.path & VhistSuffix, dest & VhistSuffix)
   finally:
     db.store.endWrite()
 
