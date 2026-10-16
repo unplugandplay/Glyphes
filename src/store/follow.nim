@@ -57,6 +57,18 @@ proc replayInto*(rv: Revisions; path: string; fromByte: int;
   ## follower's timeline is identical in shape to the writer's own — a diff
   ## that meant different things on the two sides would be worse than no diff.
   let replay = replayVhist(path, uptoGeneration, fromByte)
+  ## A note on interruption, because the word "idempotent" gets used loosely
+  ## below. `replayVhist` validates a frame's CRC *before* this loop sees it,
+  ## so a torn or corrupt frame never reaches `openCommit` — the realistic
+  ## corruption case stops cleanly and the caller's offset is not advanced,
+  ## which is why re-running is safe. The one case that is *not* idempotent is
+  ## a frame that passes CRC but whose payload then fails `decodeCommitPayload`
+  ## *after* an earlier frame in the same batch was already sealed: that
+  ## earlier frame is now in `rv`, the offset is not advanced, and a re-run
+  ## would open it a second time. Writer-produced frames cannot hit this (a
+  ## bad payload implies a writer bug, and the CRC would not have passed on
+  ## data the writer did not write), so it is theoretical today; it is named
+  ## here so no one assumes "idempotent" covers a hostile or buggy writer.
   for fr in replay.frames:
     let dec = decodeCommitPayload(fr.payload)
     let cid = rv.openCommit("", dec.parents, dec.lsn)
@@ -152,18 +164,24 @@ proc revisions*(f: Follower): Revisions =
   ## that the type's own design makes unnecessary.
   f.revisions
 
-proc followAt*(f: Follower; generation: uint64): seq[CommitRecord] =
-  ## The commits from `generation` up to the follower's head, newest first
+proc followAt*(f: Follower; commit: uint64): seq[CommitRecord] =
+  ## The commits from `commit` up to the follower's head, newest first
   ## (the order `commitsOnPath` defines, which is a total order regardless of
   ## branch shape).
+  ##
+  ## `commit` is a **commit id**, not a generation: the timeline is indexed by
+  ## commit id, and this parameter names a place in that timeline. Naming it
+  ## `generation` here is the exact confusion §"generation vs commit id" exists
+  ## to prevent, and it survived one round of being "fixed" — so the name is
+  ## load-bearing, not cosmetic.
   ##
   ## This is an audit trail, not a graph query: it answers "what changed
   ## between here and now", and it deliberately cannot answer "what is the
   ## graph now" — nodes are not reconstructed, because the follower's job is
   ## to witness commits, not to hold a second copy of the store.
-  if generation >= f.headCommit or f.revisions == nil:
+  if commit >= f.headCommit or f.revisions == nil:
     return @[]
-  result = f.revisions.commitsOnPath(generation, f.headCommit)
+  result = f.revisions.commitsOnPath(commit, f.headCommit)
 
 # ------------------------------------------------------------------- reading
 

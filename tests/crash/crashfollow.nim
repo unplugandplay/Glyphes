@@ -115,19 +115,27 @@ proc main() =
   discard f.refresh()
   echo "follower head (commit id): ", f.head, ", generation: ", f.generation
 
-  ## The tail is still physically there. The follower read past it and left it
-  ## alone; a reader that truncated it would be a writer by another name, and
-  ## two writers truncating one file concurrently is how the log dies.
+  var failures = 0
+  ## The tail is still physically there, and it is the *same* tail: every
+  ## frame that was present before the follower ran is present after. Checking
+  ## only that *some* frames survive would miss a follower that truncated the
+  ## untrusted tail down to the acknowledged commits -- the file would still
+  ## hold frames, the check would pass, and the regression the comment claims
+  ## to guard would sail through. So the guard is against the count from
+  ## before the follower existed, not against zero.
   let tailSize = getFileSize(path & VhistSuffix)
-  echo ".vhist size after following: ", tailSize
+  let framesAfter = replayVhist(path, high(uint64), 0).frames.len
+  echo ".vhist size after following: ", tailSize, ", frames: ", framesAfter,
+       " (was ", allFrames.len, ")"
   if tailSize <= 0:
     echo "FAIL: the untrusted tail was removed; a follower must not write"
-    quit(1)
-  if replayVhist(path, high(uint64), 0).frames.len == 0:
-    echo "FAIL: following destroyed the frames"
-    quit(1)
+    inc failures
+  if framesAfter != allFrames.len:
+    echo "FAIL: following changed the frame count from ", allFrames.len,
+         " to ", framesAfter, " -- the follower altered the log it was"
+    echo "      only meant to read"
+    inc failures
 
-  var failures = 0
   ## Safety: the follower stops at the watermark.
   if f.generation != wm:
     echo "FAIL: follower generation ", f.generation, " != watermark ", wm

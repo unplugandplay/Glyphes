@@ -92,6 +92,22 @@ proc mapShm(path: string, readOnly: bool): Shm =
   discard posix.close(fd)
   if result.base == MAP_FAILED:
     raise newException(IOError, "cannot mmap " & path)
+  ## The release/acquire protocol this block exists for is only sound if an
+  ## 8-byte access to the mapping is a single indivisible operation. If it is
+  ## not — if the target lowers `Atomic[uint64]` to a libatomic lock or a
+  ## wider compare-and-exchange — two processes can observe a torn word, and
+  ## "a generation you see is a generation whose frames you see" is false.
+  ## Checked here, in the one mapper both opens share, because lock-freeness
+  ## is a property of the target and not of which side is opening: a reader
+  ## and a writer on a non-lock-free target are equally unsound. This is the
+  ## assert the header comment has always said exists; it did not, which is
+  ## the kind of gap that only ever shows up on a target that is not this one.
+  if not atomicIsLockFree(8, result.base):
+    discard posix.munmap(result.base, ShmSize)
+    result.base = nil
+    raise newException(IOError,
+      "shared control block: 8-byte atomic access is not lock-free on this " &
+      "target; the cross-process watermark protocol is unsound here")
 
 proc openShm*(graphPath: string): Shm =
   ## Map (creating if absent) the control block for `graphPath`. Writer-side.
