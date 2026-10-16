@@ -18,6 +18,7 @@ import unit/test_index
 import unit/test_version
 import unit/test_version_txn
 import unit/test_vhist
+import unit/test_s1_lock
 
 # Store (M1), durability (M2), transactions (M3) and the exported C
 # surface are landed here; query (M4-M6) suites are added as their

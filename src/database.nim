@@ -31,6 +31,7 @@ import ./store/store
 import ./store/prop
 import ./store/revision
 import ./store/vhist
+import ./store/dblock
 import ./index/index
 import ./cypher/expr
 import ./wal/wal
@@ -46,6 +47,17 @@ type
     mode*: int32
     readonly*: bool
     inMemory*: bool
+    ## The cross-process writer lock (PRD-SHARED S1), held for this
+    ## database's life. nil for a memory database and for a read-only open,
+    ## neither of which can write and so neither of which contends.
+    ##
+    ## Acquired at open, not per transaction: S1's model is one writer
+    ## process for the life of its `Database` (pin S4 moves it to
+    ## per-transaction when the writer role can migrate, which is not this
+    ## phase). `beginTransaction` checks it, so the refusal a second process
+    ## gets is the same `GLY_ERR_BUSY` a second thread gets — one contract,
+    ## not two.
+    writerLock*: DbLock
     closed*: bool
     store*: GraphStore
     ## The index registry (M6.1). Owned here rather than by the store: an
@@ -192,6 +204,25 @@ proc openDatabase*(path: string, mode: int32): Database =
       replayHistory(result.store, path)
     except IOError as e:
       fail(glyErrIo, fmt"{path}: {e.msg}")
+    ## PRD-SHARED S1.2: take the cross-process writer lock at open. Before
+    ## this existed, `store.claimWriter`'s `Atomic[uint32]` was the *only*
+    ## claim, it is process-local, and two processes each opening one file
+    ## each believed they were the sole writer. S1.1 confirmed on this
+    ## platform that `flock` excludes a second process and is released on
+    ## process death, so a crashed holder does not need a stale-lock
+    ## protocol and a live one cannot be raced.
+    ##
+    ## `tryAcquire`, not `acquire`: a database already being written by
+    ## another process must be *refused at open*, by name, rather than block
+    ## until that process exits. `TXN.md` §1's contract is that a second
+    ## writer raises `GLY_ERR_BUSY` rather than stalling, and a file-backed
+    ## second writer is not a new situation deserving new behaviour.
+    let (lk, got) = tryAcquire(path)
+    if not got:
+      fail(glyErrBusy,
+        "another process holds the writer lock for " & path &
+        " (" & lockPathFor(path) & "); open it read-only to observe")
+    result.writerLock = lk
 
   ## STORAGE.md / TXN.md §2: monotonic from 1. Zero is reserved so a
   ## zeroed GlyStat never reads as a valid generation. `recover` has
@@ -255,6 +286,12 @@ proc close*(db: Database) =
   ## or its last buffered bytes never land, and a reader that reopens the file
   ## while this handle is still open sees a file that is short by whatever the
   ## stdio buffer is holding.
+  if db.writerLock != nil:
+    ## Released before the store goes, and explicitly: the kernel would drop
+    ## it when the descriptor closes (S1.1 probe 1), but doing it here means
+    ## the lock is not held for the length of the vhist close.
+    db.writerLock.release()
+    db.writerLock = nil
   if db.store != nil and db.store.vhistFile != nil:
     closeVhist(db.store.vhistFile)
     db.store.vhistFile = nil
@@ -466,6 +503,14 @@ proc beginTransaction*(db: Database): WriteTransaction =
   db.assertOpen
   if db.readonly:
     fail(glyErrReadOnly, fmt"database {db.path} is read-only")
+  ## The lock is taken at open (S1.2), so this is a check on a claim this
+  ## process already holds rather than the acquisition itself. It is still
+  ## here and not only at open because open-time and begin-time are
+  ## different failures: a database opened read-only then written is a
+  ## different bug from a second process, and it deserves its own message.
+  if db.writerLock == nil and not db.inMemory and db.path.len > 0:
+    fail(glyErrBusy,
+      "no writer lock held for " & db.path & "; it was opened read-only")
   if db.wal == nil and not db.inMemory:
     ## A snapshot-only database has no log and is not scratch either: it
     ## is somebody's durable file opened for reading. Writing to it with

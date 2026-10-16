@@ -164,13 +164,40 @@ per-hop variable binding, a model layer, one transaction spanning many
 pattern clauses — not because the storage is faster. The benchmark in
 `tests/bench/bench_sqlite.rb` is the honest version of that comparison.
 
-## 6. Single-process, single-writer
+## 6. One writer, enforced across processes now — readers are still alone
 
-There is no server, no wire protocol, and no network listener. Concurrency is
-threads inside one process, and there is **one writer at a time**: a second
-writer gets `GLY_ERR_BUSY` (T5) and is expected to retry. The soak
-(`tests/soak/soak_leak.nim`) runs 20 threads in one process; it says nothing
-about two processes on two machines.
+There is no server, no wire protocol, and no network listener. That part is
+unchanged and is `PRD-GLYPHES.md` pin P1.
+
+**One writer is now enforced across processes**, not just within one. A
+second process opening a writable database takes an exclusive `flock` on a
+`-lock` file beside it, and is refused with `GLY_ERR_BUSY` if another process
+holds it (`PRD-SHARED.md` S1). Before this, the writer claim was an
+in-process atomic and two processes could each open one graph file and each
+believe they were alone — the invariant was true only in the scope the old
+version of this section named, and the rest of this file is honest about
+which scope that was.
+
+What is still **not** supported:
+
+- **A reader in another process sees nothing.** It replays the WAL at open
+  and then does not notice further commits. There is no catch-up (S3), so a
+  second process is a *snapshot* of the graph, not a live view.
+- **The writer role cannot move** between live processes. It is held for the
+  life of the writing `Database` (S1); letting it migrate is S4.
+- **A shared database grows its WAL** and cannot checkpoint, compact or
+  renumber while shared (S9). A maintenance open is what reclaims it.
+- **A second writer must still come up to date before it writes.** The lock
+  serialises writers; it does not replay the log for one. A process that
+  opens, replays at open (as `openDatabase` does) and then writes is
+  correct; one that opens raw and writes over another process's ids is not.
+- **Network filesystems are refused by name** (S10). POSIX advisory locks
+  are unreliable or absent on NFS and SMB, and a database whose correctness
+  depends on them does not run on one.
+
+The soak (`tests/soak/soak_leak.nim`) runs threads inside one process;
+`tests/soak/soak_shared.nim` (S1) is the two-process writer version. Neither
+covers a cross-process *reader*, because there is not one yet.
 
 ## 7. Not yet done
 

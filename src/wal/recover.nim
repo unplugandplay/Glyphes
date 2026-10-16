@@ -304,6 +304,12 @@ proc loadSnapshot*(buf: string, into: GraphStore): SnapshotHeader =
     at += 8
 
   into.generation = result.generation
+  ## A snapshot puts the store at the snapshot's LSN. S3's catch-up replays
+  ## from here, so it must be set on this path too, not only when a
+  ## transaction commits (txn.nim) — otherwise a store that was rebuilt from
+  ## a snapshot rather than a commit would claim to have applied nothing and
+  ## would replay the whole log on top of state it already holds.
+  into.lastLsn = result.lsn
 
 # ----------------------------------------------------------------- replay
 
@@ -573,6 +579,12 @@ proc replay*(s: GraphStore, walBytes: string,
   s.nodeIds.advancePast(maxNodeId)
   s.edgeIds.advancePast(maxEdgeId)
   result.replayedUpToLsn = lastLsn
+  ## The store now holds everything up to `lastLsn`. S3's catch-up replays
+  ## from this field, so it has to reflect the replay and not just the
+  ## snapshot — otherwise a store rebuilt by recovery would claim to be at
+  ## the snapshot's LSN and re-apply every frame since, which W9's skip rule
+  ## makes *safe* but not free.
+  s.lastLsn = lastLsn
 
 proc recover*(graphPath: string, into: GraphStore): Recovery =
   ## The whole of WAL.md §5, in order. Returns what it did so that

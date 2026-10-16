@@ -1015,6 +1015,12 @@ proc commit*(tx: WriteTransaction): bool =
       merged.inCount = 0
     s.nodes[id.int] = merged
 
+  ## The last LSN this store now holds durably. Stamped after the WAL
+  ## frames are fsynced and after the history sidecar is synced, so it names
+  ## a commit that reached the disk. S3 replays from here.
+  if tx.nextLsn > s.lastLsn:
+    s.lastLsn = tx.nextLsn
+
   # The allocators must never hand out an id a live record holds, so they
   # advance past everything this transaction issued even on rollback.
   s.nodeIds.advancePast(tx.nextNodeId - 1)

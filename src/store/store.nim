@@ -88,6 +88,15 @@ type
     ## A replay stops at the first frame above it, which is what repairs a
     ## crash between the history append and the log's COMMIT frame.
     histGeneration*: uint64
+    ## The highest LSN this store has durably applied (PRD-SHARED S1.4).
+    ##
+    ## Used by nothing yet. S3's catch-up replays from here, and it is
+    ## deliberately *not* a critical field: `WAL.md` W9 already makes replay
+    ## idempotent by LSN (`replay()` skips `f.lsn <= fromLsn`), so a value
+    ## that runs low replays frames that were already applied and costs
+    ## time, not correctness. It lands in S1 so S3 has a home for it and so
+    ## the two-process soak can assert monotonicity from the first commit.
+    lastLsn*: uint64
     nodeIds*: IdAllocator
     edgeIds*: IdAllocator
     labels*: Dictionary
@@ -220,6 +229,7 @@ proc newStore*(arenaCapacity: int = 1 shl 20): GraphStore =
   result.writerWaiting = false
   initArena(result.arena, arenaCapacity)
   result.history = initRevisions()
+  result.lastLsn = 0'u64
   initIds(result.nodeIds)
   initIds(result.edgeIds)
   initDict(result.labels)

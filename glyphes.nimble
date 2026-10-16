@@ -100,6 +100,18 @@ task soak, "T1 concurrency gate: 6 readers + 2 writers, no torn read":
   exec "nim c -d:release --mm:atomicArc --threads:on -o:tmp/soak_bin tests/soak/soak.nim"
   exec "./tmp/soak_bin 10"
 
+task soakShared, "S1 two-process write soak (PRD-SHARED gate SG1b)":
+  ## The soak that has two *processes* rather than many threads.
+  ## soakLeak.nim proves concurrency inside one process; this proves the
+  ## cross-process writer lock, which is the bug S1 fixes. A non-zero
+  ## refusal count in its output is the lock working — two processes cannot
+  ## both write, so one of them waits.
+  ##   nimble soakShared 240         # a smoke run
+  ##   nimble soakShared 43200       # 12 hours
+  exec "nim c -d:release --mm:atomicArc --threads:on --nimcache:tmp/nimcache-sh -o:tmp/soak_shared tests/soak/soak_shared.nim"
+  let secs = getEnv("GLYPHES_SHARED_SECS", "240")
+  exec "./tmp/soak_shared " & secs
+
 task soakLeak, "M11 20-node leak soak (5 days by default; --mm:orc instrumented)":
   ## The M11 gate: many nodes, long run, and a verdict on *memory* rather
   ## than on correctness. Two optional arguments, seconds and node count:
