@@ -2881,3 +2881,179 @@ both.
 ```
 382 Nim tests   214 Ruby runs / 705 assertions   C1 132/132 + 17/17 refusals
 ```
+
+## V0–V1 — version history: what a node was, durable
+
+Three commits (`067b14b`, `3b9401a`, `ee20f9b`) add what SQLite never had
+and git always had: every transaction records what it changed, and the
+record survives a crash.
+
+The structure rests on one field, `CommitRecord.changed`: the ids a commit
+touched. `diff` walks two commits' delta sets and never scans the graph —
+that is the difference between a history you can diff in microseconds on a
+10⁶-node graph and a "before" button that costs a full comparison. The
+oracle set from V0 proved the fast path equals a slow naive fold before
+anything was durable.
+
+Two wrong answers shipped in `sameValue` and were found by the oracle, not
+by reading: `vkBool` compared `true` unconditionally (a false→true change
+was invisible to `diff`), and `vkVector`/`vkList`/`vkMap` fell through to
+the `else` (an unchanged 768-dim vector reported as a diff on *every*
+comparison). NaN needed its own rule on both the scalar and vector paths —
+IEEE says NaN ≠ NaN, but `diff` asks "did this stored property change?", and
+a NaN still NaN did not.
+
+Two performance/correctness defects in the write path, both found by
+measuring: `changed` deduplicated through a linear scan, quadratic in the
+nodes one commit touched (0.4 s at 50k, 1.6 s at 100k — visible), and a
+rolled-back transaction burned its commit id and leaked revisions into every
+fold until `abortCommit` learned to erase the open commit entirely.
+
+V0.2 hooks recording to the transaction itself, so a rollback aborts the
+history with the writes. V1 makes it durable: a `.vhist` sidecar, one frame
+per commit, each stamped with the generation the graph is *about* to have,
+CRC'd, fsynced *before* the log's COMMIT frame. That ordering is deliberate
+and load-bearing: a crash that loses the COMMIT frame leaves a history frame
+above a generation the graph never reached, and replay drops it. History is
+*briefly ahead* of the graph at the cost of never being behind — the
+generation stamp is what repairs the ahead-ness.
+
+Two more defects, both the dangerous kind (a test that checks the wrong
+thing passes while data is lost). `loadGeneration` read `lsnWord` — a
+copy-paste two adjacent lines apart — so it returned the LSN. And
+`truncateVhist` opened the file with `fmWrite`, which truncates to zero on
+open: calling `ftruncate(102)` on a 102-byte file left 102 bytes of zeroes,
+erasing the trusted history while a test that only checked "the bad tail is
+gone" passed. `fmAppend` is the mode that shortens without truncating.
+
+```
+415 Nim tests   216 Ruby runs / 718 assertions   C1 132/132 + 17/17 refusals
+```
+
+## The pivot — shared mode is a follower, not a second graph
+
+The shared-mode work started as "alone vs shared" — a second process that
+wants the *live graph*. Three constraints from the user changed its shape:
+a watermark is required because `.vhist` can be ahead after a crash; the
+second-`Database`-handle writer bug gets fixed first; and the log is *node
+history only* — no edges, labels, or indexes. The discovery doc
+(`DISCOVERY-SHARED-MODE.md`) records the turn: a follower wants to witness
+commits, not hold a graph the log does not contain. S3–S5 (catch-up into the
+writer's arrays) were deleted from the plan rather than built.
+
+## F0 — one writer across processes
+
+Before this, the writer claim was an in-process atomic; two processes could
+each open one file and each believe they were alone. S1 adds an exclusive
+`flock` on a `-lock` file, refused with `GLY_ERR_BUSY`, and the same
+process's second writable handle is refused too. Four empirical probes
+(`tests/lock/lockprobe.nim`) established what the lock actually guarantees —
+released on process death, not released by an unrelated fd close, excludes a
+second process and a second thread — because the kernel's contract is the
+feature. `soakShared` runs two processes against one file.
+
+## F1 — the watermark, and the third broken harness
+
+A 16-byte mmap'd block beside the database: the last committed generation
+and its LSN. arm64 needs release/acquire (a plain "write it last" lets a
+reader observe the new generation with the old LSN, so it bounds its replay
+one commit short and never knows). SG5 exercises the interleaving ≥10⁶
+times.
+
+SG5 was red, deterministically, at exactly two violations — and the barrier
+was correct the whole time. The cause was the test's own setup: `freshShm`
+removed `<db>` but not `<db>-shm`, so the previous run's watermark survived
+and the first couple of observations read as torn. It failed at 200k
+iterations and passed at 2M, which was the clue that pointed at the setup
+and not the kernel. A dirty setup looked like a broken kernel for the third
+time in this feature.
+
+F1.3 found a second one, in the library: a read-only open mapped the
+watermark through `openShm`, which *creates* the block when absent. A
+follower attaching to a watermark-less database got one manufactured,
+zero-filled, reading generation 0 — "caught up to generation 0", watching
+nothing, confidently. `openShmReadOnly` never creates; a missing watermark
+is reported (`shmUnavailable`), not invented.
+
+## F2 — the follower, and the two-counters confusion
+
+The follower maps the watermark, replays `.vhist` up to the generation it
+names into a private `Revisions`, and never writes the directory — including
+never truncating the sidecar, the one thing `replayHistory` does that a
+reader must not. The gate that matters is SG7-shaped and cross-process: a
+forked writer, followed live.
+
+Writing it surfaced a distinction the design had carried unnamed:
+**generation and commit id are two counters.** They advance on the same
+transactions and are not the same number — after three commits the watermark
+reads 3 while the timeline holds commits 1 and 2. The first version returned
+the watermark as `head` and passed it to `commitsOnPath`; the result was a
+follower holding a complete, correct history that reported *zero* commits —
+present and unreachable at once, invisible because every individual count
+was reasonable. `Follower` now carries both, named for what they are.
+
+Two smaller bugs from the same code: `f.bytes` was never assigned (so
+polling re-read all of history every tick — O(history) per tick, falling
+behind as fast as history grows), and `refresh` never re-attached a nil shm
+(attaching before the writer existed was a permanent dead end, when it is
+the most common way to be followed at all).
+
+## F3 — the read surface, and the gate that has teeth
+
+`followState`, `followDiff`, `commitsUpTo`: history questions, no Cypher,
+and that limit is in the type rather than in a check someone could forget.
+
+The gate is not "the calls work"; it is that the follower's *folded-from-
+disk* timeline equals the writer's *accumulated-live* one, for every commit
+against every node and every pair of commits. These are different
+computations, so agreement is the thing worth proving. Comparison is
+structural (`sameNodeState`, `sameDiff`) because `NodeState` carries a
+`Value` — a case object, for which `==` will not compile.
+
+And a green oracle that has never failed proves nothing, so the gate was run
+against deliberate corruption. Dropping one commit of head is caught by 8
+tests. Forcing `live = true` on every folded revision — one bit, a deleted
+node looking alive — is caught by exactly **one**: the oracle. The
+count-based tests cannot see it, because the commit is still there and the
+right number of commits still appear. That is the argument for comparing
+against a reference instead of a count.
+
+## SG7 — the crash gate
+
+`nimble crashFollower` SIGKILLs a real writer after its `.vhist` frame is
+fsynced but before the watermark moves — the one state where the log is
+ahead of the database, which cannot be faked by damaging files afterwards.
+`GLYPHES_CRASH_AT=after-vhist-sync:5` kills on the fifth arrival, because
+"off by exactly one" is a claim about nothing unless commits landed first.
+
+Two mistakes in writing it, both recorded rather than quietly fixed. I
+opened a writer before the follower to cross-check recovery, which
+legitimately truncated the tail and destroyed the evidence the gate checks
+the follower for not destroying — test order is part of the test. And I
+compared a `histGeneration` against a commit count: the same
+generation-vs-commit-id confusion, third occurrence, caught in the test this
+time. The gate catches what it exists to catch — a follower that reads to
+EOF reports 5 commits where the database has 4, and both the exactness check
+and the recovery cross-check fail.
+
+```
+439 Nim tests   216 Ruby runs / 718 assertions   C1 132/132 + 17/17 refusals
+```
+
+## Review — what re-reading the follower found
+
+A review pass over F1–F3 (requested before building on top) found the
+follower correct and Nim-only, plus three smaller things wrong or weaker
+than their comments: `followAt`'s parameter was named `generation` while
+used as a commit id (the confusion, surviving in a parameter name); the
+`isLockFree` assert the shm header comment claimed was not asserted anywhere
+(now in `mapShm`, both opens covered); and SG7's tail check passed a
+truncating follower (now compares the frame count from before). A plan for
+the external surface — C ABI, Ruby, CLI, hardening — is written in
+`docs/FOLLOWER-SURFACE-PLAN.md`, deliberately not yet built.
+
+The honest summary of both arcs: the correctness machinery is well-tested
+and three of its gates were proved to have teeth by deliberate corruption
+before being trusted. The follower's largest gap is reachability — it is
+Nim-only, and the surface that would make it a data-sharing space is a plan,
+not code.

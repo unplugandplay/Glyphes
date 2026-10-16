@@ -79,12 +79,22 @@ db.export db.query("MATCH (p:Person) RETURN p.name AS name"), to: "people.parque
 
 ## Status
 
-**M0–M10 landed.** The store holds a graph, survives a crash, survives
-being read while it is written, answers a Cypher query, mutates in
-transactions, searches text (BM25) and vectors (HNSW) in the same
-statement as the traversal's filter, exposes a Rails-shaped model layer,
-imports and exports CSV/JSONL/Parquet, and refuses a damaged file by name
-instead of serving it.
+**M0–M11 landed**, then two more arcs on top: **durable version history**
+(V0–V1) and a **cross-process follower** (F1–F3). The store holds a graph,
+survives a crash, survives being read while it is written, answers a Cypher
+query, mutates in transactions, searches text (BM25) and vectors (HNSW) in
+the same statement as the traversal's filter, exposes a Rails-shaped model
+layer, imports and exports CSV/JSONL/Parquet, and refuses a damaged file by
+name instead of serving it.
+
+On top of that, every commit is recorded: a durable `.vhist` sidecar gives
+each transaction a revision (node liveness and properties), and a second
+process — a **follower** — can observe that history live, reading the log up
+to the watermark the writer publishes at each commit. The follower holds no
+nodes, issues no Cypher, takes no write lock; it watches commits and answers
+`what changed`, not `what is the graph now`. A writer that is SIGKILLed
+mid-commit leaves the follower off by exactly the in-flight commit, showing
+nothing the database did not acknowledge.
 
 | Milestone | State | Gate |
 |---|---|---|
@@ -99,14 +109,23 @@ instead of serving it.
 | M8 model layer | **landed** | Rails-shaped suite; R5 ≤1 crossing per verb *measured*; R9 validation door; R10 lazy associations |
 | M9 import/export | **landed** | R8: 10⁶-row CSV < 60 s (**~26 s**); Parquet within 0.1 % of a format-derived reference (**0.002 %**); R11 no silent drops |
 | M10 corruption & recovery | **landed** | W3: 10⁶ bit-flips → **999 883 named errors, 0 silent**; W2 truncate sweep green |
+| M11 benchmarks & docs | **landed** | SQLite/Neo4j comparison published; `limitations.md`; 5-day soak harness |
+| V0–V1 version history | **landed** | every transaction records a node revision; `.vhist` sidecar is durable and crash-safe; `diff` is O(changed) |
+| F0 cross-process lock | **landed** | two writers over one file refused; `soakShared` two-process soak green |
+| F1–F3 the follower | **landed** | SG5 the barrier never lies; SG6 the rebuilt timeline == the writer's; SG7 a crashed writer leaves the follower off by exactly one |
+
+The follower is **Nim-only today** — its C ABI, Ruby binding, and CLI are
+planned in [`docs/FOLLOWER-SURFACE-PLAN.md`](docs/FOLLOWER-SURFACE-PLAN.md),
+not yet built. See "What is not done" below.
 
 ### Verification state
 
 Verified **after** the M10 changes, on the full gate (`nimble gate`):
 
-- **382 Nim tests, 0 failures** — store, WAL, recovery, transactions,
-  Cypher, all three index families, the model layer's statement compiler.
-- **214 Ruby tests / 705 assertions, 0 failures** — the seam, the model
+- **439 Nim tests, 0 failures** — store, WAL, recovery, transactions,
+  Cypher, all three index families, the model layer's statement compiler,
+  version history, and the follower's watermark/timeline gates.
+- **216 Ruby tests / 718 assertions, 0 failures** — the seam, the model
   layer, import/export, status mapping.
 - `nimble tck` — the committed TCK subset: **132/132 in-contract rows
   pass, all 17 out-of-contract rows refuse by name.**
@@ -151,6 +170,16 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 - **Bulk loading through the query language costs ~3 800 edges/second.**
   Three defects made it 20x worse than that; all are fixed and the numbers
   are in [`limitations.md`](limitations.md) §2.
+- **The follower is Nim-only.** The watermark, the replay, and the read
+  APIs exist and are gated, but nothing in the C ABI, the Ruby gem, or the
+  CLI reaches them. The external surface — C ABI, Ruby binding, CLI — is
+  planned in [`docs/FOLLOWER-SURFACE-PLAN.md`](docs/FOLLOWER-SURFACE-PLAN.md)
+  and deliberately not built yet. A follower you can only reach from Nim is
+  a mechanism, not a door.
+- **Follower history is node-only.** Edges, labels, and indexes are not in
+  the log, so a follower cannot audit a relationship change. That is a
+  format change (`vhist.nim`), not a surface one, and is out of scope for
+  the surface plan.
 - **R12** (8-process worker simulation) and **W7** (fsynced/NORMAL
   commit throughput) are named in the gate tables with no harness yet.
 - Fusing a traversal into a retrieval statement (the `MATCH` after a
@@ -162,13 +191,15 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 
 ```
 nimble build        the shared library (release, ORC, threaded)
-nimble test         382 Nim tests (fast)
-nimble testGate     382 Nim tests at full churn
+nimble test         439 Nim tests (fast)
+nimble testGate     439 Nim tests at full churn
 nimble fixture      rebuild tests/fixtures/social.glyph
-nimble gemtest      214 Ruby runs / 705 assertions
+nimble gemtest      216 Ruby runs / 718 assertions
 nimble crash        W1 crash gate
+nimble crashFollower  SG7: a writer SIGKILLed mid-commit leaves the follower off by exactly one
 nimble bitflip      W3 bit-flip sweep + W2 truncate sweep (GLYPHES_BITFLIPS=N)
 nimble soak         T1 concurrency gate
+nimble soakShared   F0 two-process writer soak
 nimble bench        M1 store benchmark
 nimble benchQuery   C9 query rate / 2-hop latency
 nimble benchSort    E2/E3 sort gates
@@ -209,6 +240,8 @@ it was gated in. The gate is the budget, not a reading.
 | M7–M9 | Ruby surface, model layer, import/export | **landed** |
 | M10 | Corruption & recovery: CRC verification, bit-flip/truncate sweeps | **landed** |
 | M11 | Benchmark suite vs SQLite, docs, published `limitations.md`, soak harness | **landed** |
+| V0–V1 | Version history: revision per transaction, durable `.vhist`, O(changed) `diff` | **landed** |
+| F0–F3 | Shared mode: cross-process lock, watermark, the follower and its gates | **landed** |
 
 **[`limitations.md`](limitations.md)** is the honest list: what glyphes is
 bad at, with measurements, published *before* the release rather than after.
@@ -298,6 +331,8 @@ never a wrong answer.
 | [`docs/ABI.md`](docs/ABI.md) | the C boundary, handle lifetime, module map |
 | [`docs/TESTING.md`](docs/TESTING.md) | oracles, gates, fuzzers, reproducibility |
 | [`docs/M0-NOTES.md`](docs/M0-NOTES.md) | what the Nim→FFI seam actually does, learned the hard way |
+| [`docs/PRD-VERSIONING.md`](docs/PRD-VERSIONING.md) | version history: what a revision is, the `.vhist` format, costs |
+| [`docs/PRD-SHARED.md`](docs/PRD-SHARED.md) | shared mode: one writer, followers, the watermark, limits |
 | [`DEVLOG.md`](DEVLOG.md) | chronological: what landed, what broke, what it taught |
 | [`ENHANCEMENTS.md`](ENHANCEMENTS.md) | ranked next steps, with costs and deadlines |
 
@@ -307,8 +342,9 @@ section listing what is still undecided.
 
 ## Status honesty
 
-M0–M10 are landed and gated; that is the claim, and the gate output
-above is the evidence. What follows is what is *not* claimed:
+M0–M11, version history, and the follower are landed and gated; that is
+the claim, and the gate output above is the evidence. What follows is what
+is *not* claimed:
 
 - **R12 and W7 have no harness.** The gate tables name them; nothing
   runs them. They are the two honest gaps in the gate inventory.
