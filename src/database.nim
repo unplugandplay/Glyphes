@@ -137,7 +137,17 @@ proc replayHistory(store: GraphStore, path: string) =
     if replay.frames.len > 0: replay.frames[^1].generation else: store.generation
 
   ## Cut the untrusted tail so a discarded frame is discarded once rather than
-  ## re-examined — and declined — at every open.
+  ## re-examined — and declined — at every open. Corruption is not this case:
+  ## a structurally complete frame with a bad CRC means the bytes after it may
+  ## be perfectly good history, and cutting to `goodBytes` would destroy them
+  ## — measured, one flipped byte in the first frame of a three-frame sidecar
+  ## truncated the file to zero and the reopened history to nothing. So a
+  ## corrupt sidecar refuses the open by name and the file is left untouched.
+  if replay.corrupted:
+    closeVhist(store.vhistFile)
+    store.vhistFile = nil
+    fail(glyErrIo, fmt"{path}: history sidecar is corrupted at byte " &
+      $replay.goodBytes & "; refusing rather than truncating history after it")
   if replay.truncated:
     truncateVhist(path, replay.goodBytes)
 

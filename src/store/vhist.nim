@@ -274,30 +274,36 @@ proc closeVhist*(vf: VhistFile) =
 
 proc replayVhist*(path: string; uptoGeneration: uint64;
                   fromByte = 0): tuple[
-    frames: seq[VFrame], goodBytes: int, truncated: bool] =
+    frames: seq[VFrame], goodBytes: int, truncated: bool, corrupted: bool] =
   ## Read every complete frame whose generation the graph has reached, and
   ## report the byte length of what was trusted.
   ##
   ## `goodBytes` is what makes truncation possible and safe: it is the end of
   ## the last frame that was both structurally complete and CRC-valid, so
-  ## cutting the file back to it discards exactly the untrusted tail.
+  ## cutting the file back to it discards exactly the untrusted tail. It is
+  ## set *before* the loop to `fromByte` itself — a scan that accepts nothing
+  ## new still proved every byte up to the caller's offset, and answering 0
+  ## for "nothing new" made a follower's next poll replay the whole file into
+  ## an already-populated timeline (duplicate commits, shifted ids) and made
+  ## an open that hit a bad first frame truncate the sidecar to zero.
   ##
-  ## Three endings are distinguished and they are not the same answer:
+  ## Four endings are distinguished and they are not the same answer:
   ##
   ##  * A clean end of file. Everything was read; `truncated` is false.
   ##  * A frame past `uptoGeneration`. The graph never accepted it, so it is
   ##    dropped and `truncated` is true — this is the crash-between-append-and
   ##    -commit case the generation stamp exists for.
-  ##  * A partial or CRC-bad frame. Everything before it is still trusted, the
-  ##    rest is discarded, and `truncated` is true. A partial *trailing* frame
-  ##    is the ordinary torn tail.
-  ##
-  ## A frame that is structurally fine but carries a bad CRC in the *middle*
-  ## of the file stops the replay there like any other bad frame. This does
-  ## not distinguish "the tail was torn" from "something in the middle was
-  ## corrupted", and that is deliberate: both are answered by refusing to read
-  ## past the last thing that is provably intact, and neither is answered by
-  ## guessing what the missing bytes were.
+  ##  * A partial frame: a length that runs past EOF. Everything before it is
+  ##    still trusted, the rest is discarded, and `truncated` is true. A
+  ##    partial *trailing* frame is the ordinary torn tail.
+  ##  * A structurally complete frame whose CRC does not match, or whose kind
+  ##    this version does not write. That is corruption, not a torn tail: the
+  ##    bytes it promised are all there, so "the tail was torn" is not a
+  ##    possible reading, and `corrupted` is true. The caller must refuse —
+  ##    truncating here would delete every valid frame after the bad one, and
+  ##    a rotted byte in the *first* frame would erase the whole sidecar. The
+  ##    earlier behaviour treated both endings alike and truncated to
+  ##    `goodBytes`, which is exactly the destruction PRD G4 forbids.
   ##
   ## `fromByte` resumes a scan at an offset a previous replay proved good, and
   ## is what makes a *polling* reader cheap: a follower that re-read the whole
@@ -314,6 +320,11 @@ proc replayVhist*(path: string; uptoGeneration: uint64;
     ## Restart from the top rather than trusting an offset that no longer
     ## refers to a frame boundary we validated.
     at = 0
+  ## Accepting nothing new is still a proof: every byte up to `fromByte` was
+  ## validated by the call that produced it. Starting `goodBytes` at 0 instead
+  ## made a no-frame poll hand the caller an offset that had never been good,
+  ## and a first-frame failure cut the file to nothing.
+  result.goodBytes = at
   while at + VFrameHeaderSize + 4 <= buf.len:
     let payloadLen = int(readU32(buf, at))
     let commitId = readU64(buf, at + 4)
@@ -323,13 +334,20 @@ proc replayVhist*(path: string; uptoGeneration: uint64;
       result.truncated = true
       break                                  # torn tail, or a lie in the length
     if kind != VFrameKindCommit:
-      result.truncated = true
-      break                                  # not a frame this version writes
+      ## All the bytes the header promises are present, so this is not a torn
+      ## tail — it is a frame this reader must not interpret. Refuse rather
+      ## than cut: the frames after it may be perfectly good history.
+      result.corrupted = true
+      break
     let payload = buf[at + VFrameHeaderSize ..< at + VFrameHeaderSize + payloadLen]
     let stored = readU32(buf, at + VFrameHeaderSize + payloadLen)
     if crc32(buf[at ..< at + VFrameHeaderSize + payloadLen]) != stored:
-      result.truncated = true
-      break                                  # torn or corrupt: stop, do not guess
+      ## Same reasoning: structurally complete, CRC-bad. That is corruption.
+      ## The old answer folded this into the torn-tail case and the caller
+      ## truncated — measured, a single flipped byte in the first frame of a
+      ## three-frame sidecar erased all three.
+      result.corrupted = true
+      break                                  # refuse; do not guess, do not cut
     if generation > uptoGeneration:
       result.truncated = true
       break                                  ## the graph never accepted it
@@ -337,7 +355,11 @@ proc replayVhist*(path: string; uptoGeneration: uint64;
                              payload: payload)
     at += VFrameHeaderSize + payloadLen + 4
     result.goodBytes = at
-  if at != buf.len:
+  ## Bytes left over that no ending above explained — the while loop's own
+  ## minimum (header + CRC) does not fit — are the torn tail. A corruption
+  ## break already stopped with bytes remaining; its reason is named, and
+  ## `truncated` must not claim "torn tail" on top of it.
+  if at != buf.len and not result.corrupted:
     result.truncated = true
 
 proc truncateVhist*(path: string; goodBytes: int) =

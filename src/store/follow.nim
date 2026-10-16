@@ -44,6 +44,7 @@ type
 proc replayInto*(rv: Revisions; path: string; fromByte: int;
                  uptoGeneration: uint64): tuple[goodBytes: int,
                                                applied: int, stopped: bool,
+                                               corrupted: bool,
                                                lastCommit: uint64] =
   ## Fold `.vhist` frames `[fromByte, uptoGeneration]` into `rv`, and report
   ## how far the fold got.
@@ -81,7 +82,12 @@ proc replayInto*(rv: Revisions; path: string; fromByte: int;
     rv.sealCommit(cid)
   result.goodBytes = replay.goodBytes
   result.applied = replay.frames.len
-  result.stopped = replay.truncated
+  ## `stopped` covers both reasons a frame was declined: past the watermark or
+  ## torn (the writer's untrusted tail), and structurally complete but corrupt
+  ## (a refusal, which an open acts on and a reader only stops at). Either way
+  ## the caller must not advance past what it applied.
+  result.stopped = replay.truncated or replay.corrupted
+  result.corrupted = replay.corrupted
   ## The last commit *id*, kept separate from the generation it arrived under.
   ## These are different counters — a database's generation and its commit ids
   ## advance on the same transactions but are numbered independently — and
@@ -153,12 +159,26 @@ proc refresh*(f: Follower): bool =
   ## which is idempotent — whereas recording progress it never made would skip
   ## commits permanently, and a follower that silently skips commits is the one
   ## failure mode this whole feature exists to prevent.
-  f.bytes = res.goodBytes
+  ##
+  ## The offset only ever moves *forwards*. `replayVhist` now answers
+  ## "nothing new" with the caller's own proven offset, but a stale-followed
+  ## file that shrank under us would answer 0 after its restart-from-top —
+  ## and storing 0 would make the next poll replay the whole file into a
+  ## timeline that already holds it: duplicate commits under shifted ids,
+  ## measured. Watermark and LSN still advance (the writer did publish), so
+  ## the poll is not lost; it is just honest about having folded nothing.
+  if res.goodBytes > f.bytes:
+    f.bytes = res.goodBytes
   if res.lastCommit > f.headCommit:
     f.headCommit = res.lastCommit
   f.watermark = generation
   f.lsn = lsn
-  return true
+  ## The contract the C ABI states (`glyphes_follower_refresh`): advanced is 1
+  ## when new commits were folded in. A watermark that moved without a frame
+  ## — an empty transaction publishes one — folded nothing, and reporting it
+  ## as progress made every poll in that window a lie while the offset above
+  ## was quietly being zeroed.
+  result = res.applied > 0
 
 proc head*(f: Follower): uint64 =
   ## The newest commit **id** this follower has applied, or 0 if none. This is

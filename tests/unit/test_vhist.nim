@@ -17,6 +17,7 @@ import ../../src/wal/wal
 import ../../src/txn/txn
 import ../../src/abi
 import ../../src/database
+import ../../src/errors
 
 proc txnDir(): string =
   let d = "tmp" / "test-vhist"
@@ -172,10 +173,14 @@ suite "V1 the history sidecar (VERSIONING-PLAN V1)":
     check again.frames.len == 1
     check again.truncated == false
 
-  test "a frame whose CRC is wrong stops the replay rather than being read":
-    ## A bit flip in the payload is corruption, not a torn tail. Both stop the
-    ## replay at the same byte, which is the intended answer: the last thing
-    ## provably intact is what gets read, and nothing after it is guessed at.
+  test "a frame whose CRC is wrong is named corruption, not a torn tail":
+    ## A bit flip in the payload is corruption, not a torn tail. The frame is
+    ## structurally complete — every byte the header promises is present — so
+    ## "the tail was torn" is not a possible reading, and the two endings must
+    ## not share an answer: a torn tail is cut, a corrupt frame refuses the
+    ## open. Both stop the replay at the same byte, which is still the
+    ## intended answer: the last thing provably intact is what gets read, and
+    ## nothing after it is guessed at.
     let path = freshPath("crc.glyph")
     block:
       let vf = openVhist(path)
@@ -193,7 +198,42 @@ suite "V1 the history sidecar (VERSIONING-PLAN V1)":
     writeFile(path & ".vhist", corrupted)
     let replay = replayVhist(path, 99'u64)
     check replay.frames.len == 0
-    check replay.truncated == true
+    check replay.corrupted == true
+    check replay.truncated == false
+
+  test "a corrupt first frame refuses the open instead of erasing the sidecar":
+    ## One rotted byte used to cost the whole file. The replay answered
+    ## `goodBytes = 0` for a first-frame failure — an offset nothing had
+    ## validated — and the open truncated to it: three frames, 322 bytes,
+    ## became zero commits and an empty sidecar, with the graph itself fine
+    ## and nothing signalling the loss. Now the open refuses by name, the
+    ## file is left exactly as it was, and the replay names the corruption
+    ## rather than calling it torn.
+    let path = freshPath("corrupt-first.glyph")
+    block:
+      let db = openDatabase(path, GLY_OPEN_CREATE)
+      for i in 1 .. 3:
+        let t = db.beginTransaction()
+        discard t.createNode("N")
+        check db.commitTransaction(t)
+      close(db)
+    let sizeBefore = getFileSize(path & ".vhist")
+    check sizeBefore > 0
+    var raw = readFile(path & ".vhist")
+    ## Byte 28 sits inside the first frame's payload (the header is 24 bytes).
+    raw[28] = chr(uint8(raw[28]) xor 0x01'u8)
+    writeFile(path & ".vhist", raw)
+    expect GlyError:
+      discard openDatabase(path, 0'i32)
+    check getFileSize(path & ".vhist").int == sizeBefore.int
+    ## And the replay itself says corruption, at the offset it stopped on.
+    let replay = replayVhist(path, high(uint64))
+    check replay.corrupted == true
+    check replay.truncated == false
+    check replay.goodBytes == 0
+    ## The earlier file is still readable up to the bad frame's byte — which
+    ## is what a *repair* decision, if one is ever added, would need.
+    check replay.frames.len == 0
 
   test "a frame above the graph's generation is dropped":
     ## The crash-between-append-and-COMMIT case. The history is written inside

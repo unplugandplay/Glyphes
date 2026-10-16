@@ -72,6 +72,42 @@ suite "F2 SG6 the follower applies exactly what the watermark covers":
     check f.bytes == bytes1        ## and it did not re-read the file
     check f.followAt(0).len == 1   ## still exactly one commit, not two
 
+  test "a poll with no new frame folds nothing, even though the watermark moved":
+    ## An empty transaction publishes a watermark with no frame beside it. A
+    ## poll in that window used to be answered with byte offset 0 — an offset
+    ## nothing had validated — and the next real frame then replayed the whole
+    ## file into the timeline it already held: duplicate commits under shifted
+    ## ids, so `followState`/`followDiff` answered from commits that were not
+    ## the writer's. Measured: a two-commit writer left a follower holding
+    ## three commits, and the poll that started it reported `advanced = true`
+    ## while folding nothing, which the ABI contract also forbids.
+    let p = freshDb()
+    let w = openDatabase(p, GLY_OPEN_CREATE)
+    discard w.commitOne("A")
+    let f = openFollower(p)
+    check f.refresh()
+    check f.head == 1
+    let bytes1 = f.bytes
+    check bytes1 > 0
+
+    ## The empty transaction: the generation moves, the sidecar does not.
+    let tx = w.beginTransaction()
+    check w.commitTransaction(tx)
+
+    ## The vulnerable poll: nothing new, and nothing may change.
+    check not f.refresh()
+    check f.head == 1
+    check f.bytes == bytes1        ## the proven offset survives
+    check f.followAt(0).len == 1
+
+    ## The next real frame applies exactly once, onto an intact timeline.
+    discard w.commitOne("B")
+    check f.refresh()
+    check f.head == 2
+    check f.followAt(0).len == 2
+    close(f)
+    close(w)
+
   test "a follower stops at the watermark, not at end of file":
     ## The reason the watermark exists. `.vhist` is fsynced before the commit
     ## record, so after a crash it can hold frames the graph never accepted.
