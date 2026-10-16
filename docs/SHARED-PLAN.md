@@ -36,7 +36,7 @@ Two rules govern the ordering, both learned the hard way in the discovery:
 | **F0** | cross-process writer lock (S1, shipped) | two writers, one file |
 | **F1** | the watermark: mmap, publish, observe | can a follower trust the marker (done; barrier settled) |
 | **F2** | a follower: read-only open, replay to the watermark | is the timeline correct |
-| **F3** | the follower's read APIs | is it *usable*, not just correct |
+| **F3** | the follower's read APIs | is it *usable*, not just correct — **done** |
 
 F0 shipped in `309dc8d`; F1 is done. F2–F3 are small because they reuse V0's
 revision store and V1's frame decoder wholesale.
@@ -180,7 +180,7 @@ off by the unacknowledged one.
 
 ---
 
-## F3 — the follower's read surface
+## F3 — the follower's read surface — DONE
 
 **Goal:** the timeline is usable.
 
@@ -207,9 +207,9 @@ lock (the cheap regression guard for F0 from the other side).
 |---|---|---|
 | SG1a/SG1b | writer lock (F0, shipped) | `nimble test`, `nimble soakShared` |
 | **SG5** | a follower never sees a generation paired with a stale LSN, ≥10⁶ iterations | `nimble test` — **green**, F1.0 |
-| SG6 | follower's `stateAt`/`diff` == from-scratch replay | `nimble test` |
+| SG6 | follower's `stateAt`/`diff` == the writer's own history | `nimble test` — **green**, and proved to catch a 1-bit corruption |
 | SG7 | crash mid-commit → follower off by exactly the unacknowledged commit | `nimble crashFollower` |
-| SG8 | follower cannot write; never holds the lock | `nimble test` |
+| SG8 | follower cannot write; never holds the lock | `nimble test` — **green** |
 
 **SG5 is the gate that keeps this honest**, and it is the only one whose
 failure is invisible to every other test: a watermark that lies produces a

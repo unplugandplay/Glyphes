@@ -240,6 +240,31 @@ proved good, so polling costs O(new commits) instead of O(history) per tick;
 a follower that re-read everything every tick falls behind exactly as fast as
 history grows.
 
+### 4.4 The rebuilt timeline is checked against the writer's own, and the check was proved to have teeth
+
+A follower's history is folded from frames off disk. The writer's is
+accumulated as writes happen. These are different computations, and the only
+reason to believe they mean the same thing is to compare them: for every
+commit and every node, `stateAt`; for every pair of commits, `diff`. All of
+it must equal what the writer held — the same bar V0's oracle set, pointed at
+a history that crossed a process boundary and came back.
+
+Comparison is structural (`sameNodeState`, `sameDiff`), not `==`, because
+`NodeState` carries a `Value` — a `case` object, for which the generic
+sequence comparison does not compile. That is worth noting on its own: "are
+these two states the same" had no answer in that module at all until a test
+asked for one, which is the usual way a missing primitive shows up.
+
+**A green oracle that has never failed proves nothing**, so the gate was
+checked against deliberate corruption. Losing one commit's worth of head is
+caught by eight tests. Forcing `live = true` on every folded revision — one
+bit, which makes a deleted node look alive — is caught by exactly **one**:
+the oracle. That is the argument for keeping a test that compares against a
+reference rather than against a count: the count-based tests cannot see it,
+because the commit is still there and the right number of commits still
+appear. Only a test that asks "is this the same state the writer saw" can.
+
+
 ## 5. What a follower can and cannot do — the honest boundary
 
 This is the section that decides the product. It is a boundary, not a
