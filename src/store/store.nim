@@ -21,6 +21,7 @@ import ./edge
 import ./label
 import ./revision
 import ./vhist
+import ./shm
 
 export Value, ValueKind, GlyType, SlotInline
 export NodeRec, EdgeRec, PropSlot, PropView, newNode, newEdge
@@ -97,6 +98,11 @@ type
     ## time, not correctness. It lands in S1 so S3 has a home for it and so
     ## the two-process soak can assert monotonicity from the first commit.
     lastLsn*: uint64
+    ## The shared control block (PRD-SHARED S2), or nil for a memory
+    ## database and a read-only open. The writer publishes into it after its
+    ## frames are durable; a reader in another process loads it to learn
+    ## whether it is behind (S3 does the catching up).
+    shm*: Shm
     nodeIds*: IdAllocator
     edgeIds*: IdAllocator
     labels*: Dictionary

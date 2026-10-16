@@ -32,6 +32,7 @@ import ./store/prop
 import ./store/revision
 import ./store/vhist
 import ./store/dblock
+import ./store/shm
 import ./index/index
 import ./cypher/expr
 import ./wal/wal
@@ -223,6 +224,11 @@ proc openDatabase*(path: string, mode: int32): Database =
         "another process holds the writer lock for " & path &
         " (" & lockPathFor(path) & "); open it read-only to observe")
     result.writerLock = lk
+    ## The shared control block. Opened by the writer for now; S3 is what
+    ## makes a reader in another process *read* it, and until then a
+    ## read-only open maps none, so it cannot observe a generation it cannot
+    ## yet catch up to.
+    result.store.shm = openShm(path)
 
   ## STORAGE.md / TXN.md §2: monotonic from 1. Zero is reserved so a
   ## zeroed GlyStat never reads as a valid generation. `recover` has
@@ -292,6 +298,12 @@ proc close*(db: Database) =
     ## the lock is not held for the length of the vhist close.
     db.writerLock.release()
     db.writerLock = nil
+  if db.store != nil and db.store.shm != nil:
+    ## The mapping outlives the descriptor, so it is unmapped here rather
+    ## than left to the fd close — a stale mapping is a mapping another
+    ## thread in this process can still write through.
+    closeShm(db.store.shm)
+    db.store.shm = nil
   if db.store != nil and db.store.vhistFile != nil:
     closeVhist(db.store.vhistFile)
     db.store.vhistFile = nil

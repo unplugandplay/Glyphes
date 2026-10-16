@@ -46,6 +46,7 @@ import std/[tables, sets, algorithm]
 import ../store/prop
 import ../store/revision
 import ../store/vhist
+import ../store/shm
 import ../wal/wal
 import ../store/store
 import ../index/index
@@ -1030,6 +1031,21 @@ proc commit*(tx: WriteTransaction): bool =
   #    visible at once (TXN.md §3.1 step 8, pin X3).
   inc s.generation
   s.publish()
+  ## The cross-process visibility announcement (PRD-SHARED S2.3). Published
+  ## *here*: after the WAL is fsynced (step 2-3) and after the `.vhist`
+  ## sidecar is synced (step 2b), so "a generation is announced" means "its
+  ## frames are on the disk", and before the cross-process write lock is
+  ## released, so another writer cannot slip a generation in between.
+  ##
+  ## `s.lastLsn` rather than `tx.nextLsn`: it is the LSN this store has
+  ## durably applied, which is what a reader must replay *to* in S3, and the
+  ## two agree here because this transaction is the only thing that moved it.
+  if s.shm != nil:
+    ## Named `publishCommitted`, not `publish`: `GraphStore` already has a
+    ## `publish` (the in-process array swap, two lines up), and a same-named
+    ## proc on the shared block is the kind of collision that compiles into
+    ## the wrong call rather than an error.
+    s.shm.publishCommitted(s.generation, s.lastLsn)
   ## The revision commit was already sealed above, next to the log's COMMIT
   ## frame — it has to be, because the file write needs the sealed record to
   ## encode and the seal needs nothing from the merge. `histSeal` is a no-op

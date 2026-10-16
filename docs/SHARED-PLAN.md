@@ -3,11 +3,20 @@
 > *Close the cross-process hole first, because it is a bug. Then make a
 > second process able to read.*
 
-**Implements:** [`PRD-SHARED.md`](PRD-SHARED.md)
-**Status:** plan, pre-implementation. No code below has been written. The
-`nimble soakShared` and `nimble crashShared` tasks named in the gate tables
-do not exist either — they are built with the phase that needs them, and
-until then `nimble test` is the whole gate.
+**Implements:** the *first draft* of [`PRD-SHARED.md`](PRD-SHARED.md)
+**Status:** **SUPERSEDED IN PART.** S1 shipped (`309dc8d`). The rewritten PRD
+keeps S1 and the shm (now **F1**) but rejects this plan's S3/S4/S5 —
+`catchUp()` into the writer's arrays, migrating writers, derived-state
+catch-up — because they all assumed a follower wants the *live graph*, and
+the log does not contain one (the rewritten PRD §1.1 C3, §5).
+
+What survives below: **S1** (done), and **S2** as **F1** (the watermark,
+now red — SG5, rewritten PRD §4.2). What does not survive: S3, S4, S5. A
+follower's sequence is F1 watermark → F2 replay-to-watermark into a private
+`Revisions` → F3 history read APIs, none of which touch the writer's arrays.
+
+The prose below is kept for S1's record and S2's design; **do not schedule
+S3–S5 from it.** See the rewritten PRD §13 for what changed and why.
 
 This is the order of work, not the argument for it — the PRD carries the
 design and the reasoning. Three rules govern the ordering, and each one
