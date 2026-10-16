@@ -266,6 +266,24 @@ module Glyphes
     # engine.
     attach_function :glyphes_integrity_check, %i[uint64 pointer], :int32
 
+    # ---- follower (PRD-SHARED F2, surface plan S1) -----------------
+    #
+    # A read-only observer of a database's commit history. The handle is a
+    # GlyHandle (uintptr_t scalar, so :uint64); out-params are pointers to
+    # the scalar. `glyphes_follower_error` returns engine-owned storage with
+    # the copy-immediately rule, same as the error slot. Deliberately
+    # absent: any follower entry point that writes — there is none, and
+    # that absence is the write-defense (SS2), so no Ruby method can forget
+    # to guard a write that does not exist.
+
+    attach_function :glyphes_follower_open, %i[string pointer], :int32
+    attach_function :glyphes_follower_close, [:uint64], :int32
+    attach_function :glyphes_follower_refresh, %i[uint64 pointer], :int32
+    attach_function :glyphes_follower_head, %i[uint64 pointer], :int32
+    attach_function :glyphes_follower_generation, %i[uint64 pointer], :int32
+    attach_function :glyphes_follower_lsn, %i[uint64 pointer], :int32
+    attach_function :glyphes_follower_error, [:uint64], :pointer
+
     # ---- load-time layout assertions ------------------------------
     #
     # A cgen or FFI layout change must fail here, loudly, at require
