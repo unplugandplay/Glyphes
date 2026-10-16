@@ -911,6 +911,14 @@ proc mergeChain*(ctx: QueryCtx, pat: Pattern,
     let prev = pat.elems[i - 1]
     let far = pat.elems[i + 1]
     let r = pat.elems[i].rel
+    if r.types.len > 1:
+      ## MATCH refuses an alternation by name (CYPHER.md §5), and the other
+      ## write path (ops.nim:1056) does too. MERGE accepting it silently was
+      ## the worst of the three: `code` stayed 0 — "any type" — so the merge
+      ## matched a relationship of a type the pattern never named. Measured:
+      ## `MERGE (a {n:'x3'})-[:R1|R2]->(b)` matched an :OTHER edge instead of
+      ## refusing or creating.
+      unsupported("relationship type alternation ([:A|B])")
     var code = 0'i32
     if r.types.len == 1:
       code = ctx.store.relTypes.lookup(r.types[0])
@@ -1557,7 +1565,13 @@ proc next*(op: Operator): bool =
         op.taken = 0
         op.started = true
       if op.taken < int64(op.list.len):
-        op.current = initRow(4)
+        ## The unwound element is bound *on top of* the input row's bindings
+        ## (CYPHER.md §2.5: "the input row's bindings carried forward"). A
+        ## fresh row dropped every binding the child carried, so
+        ## `MATCH (n) UNWIND [1,2] AS x RETURN n.age` answered null for every
+        ## row — measured on four bound nodes. `copyRow` is what okVarLen
+        ## does one branch up, for exactly the same reason.
+        op.current = copyRow(op.child.current)
         op.current.set(op.endVar, op.list[op.taken.int])
         inc op.taken
         return true
@@ -1768,7 +1782,14 @@ proc valueKey(ctx: QueryCtx, v: Value): string =
   of vkBytes:
     result = "y" & $v.s.len & ":" & v.s
   of vkVector:
-    result = "e" & $v.dims.len
+    ## Every component, not just the length: this string is DISTINCT's
+    ## identity, and three different 2-dim vectors are three rows. Length
+    ## alone made `RETURN DISTINCT n.emb` answer one row per dimension
+    ## count — measured, three distinct vectors collapsed to one.
+    result = "e" & $v.dims.len & ":"
+    for d in v.dims:
+      result.add $d
+      result.add ','
   of vkList:
     result = "l" & $v.items.len
     for item in v.items:
@@ -1807,6 +1828,11 @@ proc cmpValues(ctx: QueryCtx, a, b: Value): int =
   if a.kind == vkNull: return 1
   if b.kind == vkNull: return -1
   if a.kind in {vkInt, vkFloat} and b.kind in {vkInt, vkFloat}:
+    ## Exact when both sides are integers — the ORDER BY twin of
+    ## compareValues' fast path: through a float64, ids above 2^53 sorted
+    ## as equal and large ids ordered wrong.
+    if a.kind == vkInt and b.kind == vkInt:
+      return cmp(a.i, b.i)
     let x = (if a.kind == vkInt: float64(a.i) else: a.f)
     let y = (if b.kind == vkInt: float64(b.i) else: b.f)
     return (if x < y: -1 elif x > y: 1 else: 0)

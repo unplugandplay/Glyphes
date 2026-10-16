@@ -256,6 +256,31 @@ proc flipOp(op: string): string =
   of ">=": "<="
   else: ""
 
+template attachTail() {.dirty.} =
+  ## Attach a pending ORDER BY/SKIP/LIMIT to `seed`, in query order, and
+  ## clear the pending list. A template rather than a proc because it
+  ## reassigns `seed` and `tail` in the caller's scope.
+  for part in tail:
+    case part.kind
+    of qpOrderBy:
+      var spec = part.sort
+      for i in 0 ..< spec.items.len:
+        spec.items[i].expr = sortKeyExpr(spec.items[i], columns)
+      seed = newSort(ctx, seed, spec, ctx.sortSpillRows, ctx.spillDir)
+    of qpSkip:
+      let v = evaluate(ctx, Row(), part.skipAmount)
+      if v.kind != vkInt:
+        parseFail("SKIP needs an integer")
+      seed = newSkip(ctx, seed, v.i)
+    of qpLimit:
+      let v = evaluate(ctx, Row(), part.limitAmount)
+      if v.kind != vkInt:
+        parseFail("LIMIT needs an integer")
+      seed = newLimit(ctx, seed, v.i)
+    else:
+      discard
+  tail = @[]
+
 proc seekCandidates(ctx: QueryCtx, part: QueryPart,
                     nodeVars: seq[string]): seq[SeekKey] =
   ## Every conjunct of the match's `WHERE` that a range index could answer,
@@ -359,6 +384,20 @@ proc plan*(ctx: QueryCtx, q: Query): Plan =
     if skipNext:
       skipNext = false
       continue
+    ## A WITH's ORDER BY/SKIP/LIMIT are a boundary *at the WITH*, not the end
+    ## of the query: `WITH n LIMIT 1 RETURN count(*)` counts 1, and a sort
+    ## before a later clause sorts what that clause sees. So the pending tail
+    ## is attached the moment any other clause arrives, with the same
+    ## name-scope fixup the end-of-query attach does — a retrieval's yielded
+    ## names are a sort key's scope too. Only a tail nothing follows (the
+    ## final RETURN's) reaches the end of the loop, which is the one case the
+    ## old code planned correctly: it deferred every tail to the end, so the
+    ## WITH's LIMIT truncated after the whole query had run — measured,
+    ## `WITH n LIMIT 1 RETURN count(*)` answered 4 over four rows.
+    if tail.len > 0 and part.kind notin {qpOrderBy, qpSkip, qpLimit}:
+      if columns.len == 0 and yielded.len > 0:
+        columns = yielded
+      attachTail()
     case part.kind
     of qpMatch:
       if part.optional:
@@ -411,10 +450,22 @@ proc plan*(ctx: QueryCtx, q: Query): Plan =
       ## the chain), so a stale or wrong index can lose a row but cannot
       ## invent one. That asymmetry is the point — an accelerator that could
       ## change the answer would be a second implementation of `WHERE`.
+      ##
+      ## The one variable a seek may answer is the pattern's head: the seek
+      ## anchors there, resolves the index from the head's label, and binds
+      ## the ids to the head's name. The old code collected *every* node
+      ## variable under the name `headVars`, so with `:Person(age)` indexed,
+      ## `MATCH (a)-[:KNOWS]->(b) WHERE b.age = 41` sought a.age = 41's ids,
+      ## bound them to `a`, and the filter above could not restore the rows
+      ## the seek never produced — the index changed the answer, which is
+      ## the one direction this file's own comment at seekCandidates calls
+      ## impossible. Measured: 0 rows indexed against 1 unindexed. A seek on
+      ## a non-head variable is future work (anchor the pattern there);
+      ## until then it full-scans and filters, which is slow and correct.
       var headVars: seq[string] = @[]
-      for el in pat.elems:
-        if el.isNode and el.node.varName.len > 0:
-          headVars.add el.node.varName
+      let headEl = pat.elems[0]
+      if headEl.isNode and headEl.node.varName.len > 0:
+        headVars.add headEl.node.varName
       var seeked = false
       for key in seekCandidates(ctx, part, headVars):
         if seeked:
@@ -464,6 +515,12 @@ proc plan*(ctx: QueryCtx, q: Query): Plan =
       matchSeen = true
 
     of qpWhere:
+      ## The parser accepts a leading `WHERE`, but there is no row to filter:
+      ## planning one onto a nil seed dereferenced it on the first pull and
+      ## took the process down (`WHERE true RETURN 1` segfaulted). Refused by
+      ## name, like every other construct the operator set does not have.
+      if seed == nil:
+        unsupported("WHERE with no MATCH, WITH or retrieval before it")
       seed = newFilter(ctx, seed, part.cond)
 
     of qpTextCall:
@@ -644,25 +701,9 @@ proc plan*(ctx: QueryCtx, q: Query): Plan =
   if columns.len == 0 and yielded.len > 0:
     columns = yielded
 
-  for part in tail:
-    case part.kind
-    of qpOrderBy:
-      var spec = part.sort
-      for i in 0 ..< spec.items.len:
-        spec.items[i].expr = sortKeyExpr(spec.items[i], columns)
-      seed = newSort(ctx, seed, spec, ctx.sortSpillRows, ctx.spillDir)
-    of qpSkip:
-      let v = evaluate(ctx, Row(), part.skipAmount)
-      if v.kind != vkInt:
-        parseFail("SKIP needs an integer")
-      seed = newSkip(ctx, seed, v.i)
-    of qpLimit:
-      let v = evaluate(ctx, Row(), part.limitAmount)
-      if v.kind != vkInt:
-        parseFail("LIMIT needs an integer")
-      seed = newLimit(ctx, seed, v.i)
-    else:
-      discard
+  ## Whatever remains is the final projection's tail: nothing follows it, so
+  ## sort-then-truncate runs here, at the end, as always.
+  attachTail()
 
   if seed == nil:
     parseFail("the query has no clause that produces rows")

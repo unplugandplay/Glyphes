@@ -998,3 +998,86 @@ suite "M5.6 sort with spill":
       e = err
     check e != nil
     check "corrupt" in e.msg or "empty" in e.msg
+
+suite "review regressions: answers the engine got wrong":
+  ## Each test here is a defect the review *executed* — the query ran and the
+  ## answer came back wrong, or the process came down — not one found by
+  ## reading. They are kept together so the reason each exists is one read,
+  ## and each comment names the shape whose absence let the bug land.
+
+  proc relStore(): GraphStore =
+    seedStore()
+
+  test "UNWIND carries the input row's bindings forward":
+    ## `okUnwind` built a fresh row holding only the unwound element, so
+    ## every binding the child carried was dropped: `MATCH (n) UNWIND [1,2]
+    ## AS x RETURN n.age` answered null eight times out of eight. No test
+    ## ran UNWIND after a MATCH — they were all `UNWIND [literals]`.
+    let s = relStore()
+    let rows = run(s,
+      "MATCH (n:Person) UNWIND [1, 2] AS x RETURN n.age AS age, x AS x")
+    check rows.len == 8             ## four people, two elements each
+    var ages: seq[int64] = @[]
+    for r in rows:
+      let (_, age) = r.lookup("age")
+      check age.kind == vkInt       ## the binding the fresh row dropped
+      ages.add age.i
+    ages.sort()
+    check ages == @[27'i64, 27, 34, 34, 41, 41, 55, 55]
+
+  test "a WITH's LIMIT truncates at the WITH":
+    ## The planner deferred every ORDER BY/SKIP/LIMIT to the end of the
+    ## query, so a WITH's LIMIT truncated after everything downstream had
+    ## already run over the untruncated rows.
+    let s = relStore()
+    let c = column(run(s, "MATCH (n:Person) WITH n LIMIT 1 RETURN count(*) AS c"),
+                   "c")[0]
+    check c.i == 1                  ## the deferral answered 4
+
+  test "negative float modulo truncates toward zero, like the int branch":
+    let s = relStore()
+    let m = column(run(s, "RETURN -7.0 % 3.0 AS m"), "m")[0]
+    check m.kind == vkFloat
+    check m.f == -1.0               ## floor() answered 2.0
+
+  test "IN keeps Cypher's three-valued logic":
+    ## `2 IN [1, null]` is null — an equality the engine could not answer
+    ## might have matched — and `null IN []` is false, because an empty list
+    ## is a known answer. Both were answered backwards.
+    let s = relStore()
+    check column(run(s, "RETURN 2 IN [1, null] AS r"), "r")[0].kind == vkNull
+    let e = column(run(s, "RETURN null IN [] AS r"), "r")[0]
+    check e.kind == vkBool and e.b == false
+    ## A real match is still true even with a null further along the list.
+    check column(run(s, "RETURN 1 IN [1, null] AS r"), "r")[0].b == true
+
+  test "integers compare exactly past 2^53":
+    ## Both sides were promoted to float64, which cannot represent
+    ## 9007199254740993: two ids one apart compared equal.
+    let s = relStore()
+    check column(run(s, "RETURN 9007199254740993 > 9007199254740992 AS gt"),
+                 "gt")[0].b == true
+
+  test "DISTINCT tells vectors apart":
+    ## The distinct key rendered a vector as its dimension count, so three
+    ## different 2-dim vectors were one row.
+    let s = newStore()
+    let dims = @[@[1.0'f32, 0.0'f32], @[0.0'f32, 1.0'f32], @[1.0'f32, 1.0'f32]]
+    for d in dims:
+      let n = s.createNode("V")
+      discard s.setNodeProp(n, "emb", Value(kind: vkVector, dims: d))
+    check run(s, "MATCH (n:V) RETURN DISTINCT n.emb AS e").len == 3
+    check column(run(s, "MATCH (n:V) RETURN count(DISTINCT n.emb) AS c"),
+                 "c")[0].i == 3
+
+  test "a leading WHERE is refused by name, not dereferenced":
+    ## `WHERE true RETURN 1` planned a filter over a nil seed and segfaulted
+    ## the process on the first pull.
+    let s = relStore()
+    var e: CypherError
+    try:
+      discard run(s, "WHERE true RETURN 1 AS one")
+    except CypherError as err:
+      e = err
+    check e != nil
+    check "WHERE" in e.msg

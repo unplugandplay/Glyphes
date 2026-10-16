@@ -103,6 +103,13 @@ proc compareValues(a, b: Value): (int, bool) =
   if a.kind == vkNull or b.kind == vkNull:
     return (0, false)
   if a.kind in {vkInt, vkFloat} and b.kind in {vkInt, vkFloat}:
+    ## Exact when both sides are integers. Routing every comparison through
+    ## a float64 loses the low bits above 2^53, and
+    ## `9007199254740993 > 9007199254740992` — two ids apart by one —
+    ## answered false. The promotion stays for mixed int/float, where a
+    ## common space is the only option.
+    if a.kind == vkInt and b.kind == vkInt:
+      return (cmp(a.i, b.i), true)
     var x, y: float64
     discard numOf(a, x)
     discard numOf(b, y)
@@ -293,11 +300,15 @@ proc arith(op: string, a, b: Value): Value =
   if op == "%":
     if y == 0.0:
       return Value(kind: vkNull)
-    ## Cypher's `%` is fmod, which differs from Nim's `mod` for negatives:
-    ## `-7 % 3` is -1 in Cypher and 2 in Nim.
+    ## Cypher's `%` is fmod, which truncates toward zero, not floor:
+    ## `-7 % 3` is -1 in Cypher. The int branch below follows `div` and was
+    ## already correct; the float branch used `floor`, which made
+    ## `-7.0 % 3.0` answer 2.0 — the two branches disagreed about the same
+    ## mathematical question, and the comment described the answer the code
+    ## did not give.
     if bothInts:
       return Value(kind: vkInt, i: a.i - (a.i div b.i) * b.i)
-    return Value(kind: vkFloat, f: x - floor(x / y) * y)
+    return Value(kind: vkFloat, f: x - trunc(x / y) * y)
   if op == "^":
     return Value(kind: vkFloat, f: pow(x, y))
   cypherFail(int32(glyErrSql), "unknown operator " & op)
@@ -655,13 +666,24 @@ proc eval(e: Eval, expr: Expr): Value =
     if expr.op == "IN":
       if b.kind != vkList:
         return Value(kind: vkNull)
-      ## `x IN []` is false, not null: an empty list is a known answer.
-      if a.kind == vkNull:
-        return Value(kind: vkNull)
+      ## Cypher's `IN` folds equality over the list under three-valued
+      ## logic: `2 IN [1, null]` is *null* — an equality the engine could
+      ## not answer might have matched, so `NOT (2 IN [1, null])` must not
+      ## be true — while `null IN []` is *false*, because an empty list is a
+      ## known answer. The first draft answered both backwards: it returned
+      ## null for the empty list and false for the null element, swapping
+      ## the one case that is known for the one that is not.
+      if b.items.len == 0:
+        return Value(kind: vkBool, b: false)
+      var sawNull = a.kind == vkNull
       for item in b.items:
         let r = eqValues(a, item)
         if r.kind == vkBool and r.b:
           return Value(kind: vkBool, b: true)
+        if r.kind == vkNull or item.kind == vkNull:
+          sawNull = true
+      if sawNull:
+        return Value(kind: vkNull)
       return Value(kind: vkBool, b: false)
     if expr.op == "CONTAINS" or expr.op == "STARTS WITH" or
        expr.op == "ENDS WITH":
@@ -815,10 +837,20 @@ proc valueJson*(v: Value): string =
       if i > 0: result.add ","
       result.add quoteJson(k) & ":" & valueJson(item)
     result.add "}"
-  of vkVector, vkPath:
-    ## A vector and a path have no JSON spelling the ABI offers, and the
-    ## runner never expects one: paths are refused at parse in this slice
-    ## and a vector reaches the host through `GLY_VECTOR`, not through text.
+  of vkVector:
+    ## Components, not a bare null: the aggregate DISTINCT key is this
+    ## rendering (`count(DISTINCT n.emb)` collapsed every same-length
+    ## vector to one entry), and a text host reading a vector now sees its
+    ## numbers rather than a null that reads as an absent value. The binary
+    ## `GLY_VECTOR` accessor is unchanged.
+    result = "["
+    for i, d in v.dims:
+      if i > 0: result.add ","
+      result.add $d
+    result.add "]"
+  of vkPath:
+    ## A path has no JSON spelling the ABI offers, and the runner never
+    ## expects one: paths are refused at parse in this slice.
     result = "null"
 
 proc isAggregateExpr*(e: Expr): bool {.gcsafe.} =

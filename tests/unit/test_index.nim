@@ -420,6 +420,38 @@ suite "M6.1 the planner":
       ## row count alone catches it even before the ids are compared.
       check without.len == 2
 
+  test "a seek candidate on a non-head variable is not a seek":
+    ## `seekCandidates` kept predicates on *any* node variable while the seek
+    ## anchored at the pattern's head, resolved the index from the head's
+    ## label, and bound the ids to the head's name. So with `:Person(age)`
+    ## indexed, `WHERE b.age = 41` on `(a)-[:KNOWS]->(b)` sought a.age = 41's
+    ## ids, bound them to `a`, and the filter above could not restore the
+    ## rows the seek never produced. Measured: 0 rows with the index against
+    ## the correct 1 without — the one direction the suite's founding
+    ## invariant ("an index may change speed, never the answer") cannot
+    ## survive. The differential test above only ever seeks on the head
+    ## variable, which is why it never saw this.
+    let s = newStore()
+    let ana = s.createNode("Person")
+    let bo = s.createNode("Person")
+    let cleo = s.createNode("Person")
+    let ada = s.createNode("Person")
+    discard s.setNodeProp(ana, "age", Value(kind: vkInt, i: 34))
+    discard s.setNodeProp(bo, "age", Value(kind: vkInt, i: 41))
+    discard s.setNodeProp(cleo, "age", Value(kind: vkInt, i: 27))
+    discard s.setNodeProp(ada, "age", Value(kind: vkInt, i: 55))
+    discard s.createEdge(ana, bo, "KNOWS")
+    discard s.createEdge(ana, cleo, "KNOWS")
+    discard s.createEdge(bo, ada, "KNOWS")
+    let reg = withIndex(s, "Person", "age")
+    ## The predicate names b; the answer must not depend on an index over a.
+    sameAnswer(s,
+      "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age = 41 RETURN a AS n",
+      reg)
+    sameAnswer(s,
+      "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age = 41 RETURN b AS n",
+      reg)
+
   test "an inline property seeks, and its filter is what makes the seek safe":
     ## `MATCH (n:Person {age: 30})` constrains the same property twice —
     ## once as a seek candidate, once as a filter above it. Both paths give

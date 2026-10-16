@@ -611,6 +611,35 @@ suite "M5.3 MERGE":
     discard f.tx.commit()
     check countOf(f.s, "MATCH (n:P) RETURN n") == 200
 
+  test "MERGE refuses a relationship type alternation, like MATCH":
+    ## `mergeChain` left the relationship type code at 0 — "any type" — when
+    ## the pattern named two types, so `MERGE (a)-[:R1|R2]->(b)` matched a
+    ## relationship of a type the pattern never named: measured, it matched
+    ## an :OTHER edge instead of refusing or creating. MATCH refuses the same
+    ## spelling at parse (CYPHER.md §5), and the other write path refuses it
+    ## too; MERGE was the one place the construct silently did something.
+    var f = newFixture()
+    discard f.exec("CREATE (:N {n: 'x1'})-[:R]->(:N {n: 'x2'})")
+    discard f.exec("CREATE (:N {n: 'x3'})-[:OTHER]->(:N {n: 'x9'})")
+    ## The refusal is raised while the statement is executing (the merge runs
+    ## per row), so the statement is closed on the error path: leaving it open
+    ## holds the store's reader gate, and a commit behind it waits forever.
+    var st = prepare(f.s, "MERGE (a:N {n: 'x3'})-[:R1|R2]->(b)",
+                     initTable[string, Value](), f.tx)
+    var refused = false
+    try:
+      while st.step():
+        discard
+    except CypherError:
+      refused = true
+    finally:
+      st.close()
+    check refused
+    ## The refusal happened before anything was written: commit the fixture's
+    ## transaction (the statement aborted, the transaction did not) and count.
+    check f.tx.commit()
+    check countOf(f.s, "MATCH (n:N) RETURN n") == 4
+
   test "a MERGE in a transaction sees a node created in that transaction":
     ## The seek consults the index, which cannot know about nodes this
     ## transaction has not published. If the delta were not consulted, the
