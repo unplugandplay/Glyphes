@@ -164,7 +164,7 @@ per-hop variable binding, a model layer, one transaction spanning many
 pattern clauses — not because the storage is faster. The benchmark in
 `tests/bench/bench_sqlite.rb` is the honest version of that comparison.
 
-## 6. One writer, enforced across processes now — readers are still alone
+## 6. One writer across processes, and a follower that follows
 
 There is no server, no wire protocol, and no network listener. That part is
 unchanged and is `PRD-GLYPHES.md` pin P1.
@@ -178,11 +178,32 @@ believe they were alone — the invariant was true only in the scope the old
 version of this section named, and the rest of this file is honest about
 which scope that was.
 
+**A reader in another process can now follow** (`PRD-SHARED.md` F1–F3). It
+maps a 16-byte watermark the writer publishes at each commit, reads `.vhist`
+up to the generation that watermark names, and builds a revision timeline of
+its own. `nimble crashFollower` is the gate: it SIGKILLs a real writer
+mid-commit, where `.vhist` is durable but the watermark has not moved, and
+checks the follower is short by exactly the in-flight commit, shows nothing
+the database does not have, and leaves the untrusted tail for its owner.
+
+What the follower is **not**:
+
+- **It is not a graph reader.** It holds no nodes, issues no Cypher, and
+  cannot answer `MATCH`. It answers questions about *history* — `followState`,
+  `followDiff`, `commitsUpTo` — and the distinction is in the type, not in a
+  check someone could forget. A process that wants the live graph still has to
+  open it, and a second *writable* open is refused.
+- **It follows on `refresh`, not automatically.** There is no notification;
+  a caller polls. Polling is cheap — incremental from a byte offset the last
+  replay proved good, so O(new commits), not O(history) per tick — but it is
+  still the caller's loop, and a follower nobody refreshes does not advance.
+- **It sees node history only.** No edges, labels or indexes are in the log,
+  so a follower cannot audit a relationship change at all.
+- **History is node-liveness and node-properties only**, so a follower cannot
+  answer a graph question even in principle. See §8.
+
 What is still **not** supported:
 
-- **A reader in another process sees nothing.** It replays the WAL at open
-  and then does not notice further commits. There is no catch-up (S3), so a
-  second process is a *snapshot* of the graph, not a live view.
 - **The writer role cannot move** between live processes. It is held for the
   life of the writing `Database` (S1); letting it migrate is S4.
 - **A shared database grows its WAL** and cannot checkpoint, compact or
@@ -196,8 +217,12 @@ What is still **not** supported:
   depends on them does not run on one.
 
 The soak (`tests/soak/soak_leak.nim`) runs threads inside one process;
-`tests/soak/soak_shared.nim` (S1) is the two-process writer version. Neither
-covers a cross-process *reader*, because there is not one yet.
+`tests/soak/soak_shared.nim` (S1) is the two-process writer version.
+`tests/unit/test_follow.nim` (SG7) forks a real writer and follows it, and
+`tests/crash/crashfollow.nim` does the same with the writer killed mid-commit.
+Neither of those is a long-running soak: there is no hours-long two-process
+reader soak, so the follower's behaviour over a long-lived writer and a large
+`.vhist` is covered by unit gates rather than by endurance.
 
 ## 7. Not yet done
 
@@ -216,17 +241,21 @@ Named honestly rather than left to be discovered:
   which is testable, and it is not smart.
 - **Memory growth under long reads.** The snapshot path is exercised by the
   soak, which found no leak — but the soak is one configuration of one machine.
-- **Version history cannot be queried.** §8 describes a durable, crash-safe
-  history and a `diff` that is O(changed); there is no statement, no Ruby
-  method, and no CLI that reaches it. It is infrastructure with nothing on top
-  of it yet, and §8 is the honest accounting of what that costs.
+- **Version history cannot be queried from a graph query.** §8 describes a
+  durable, crash-safe history and a `diff` that is O(changed). A follower can
+  now reach it from Nim (§6), but there is still **no Cypher statement, no
+  Ruby method and no CLI** that asks a question about history — which is the
+  part a user would actually reach for. The writer's own surface cannot read
+  its history either; only a second process observing it can.
 ## 8. Version history is durable, and it is not free
 
 Added in the same release as everything above, and every cost below is real
 and measured rather than anticipated. History is **not** on by default: a
 database gets a `.vhist` sidecar only when it is opened by path, and nothing in
-the query surface can read it yet (that is V3). It exists, it survives a
-crash, and nothing can ask for it.
+the *query* surface can read it. A follower's Nim API can (§6), which is
+enough to make the history useful for auditing and not enough to make it part
+of the product. It exists, it survives a crash, and only an out-of-band
+process can ask it anything.
 
 **A commit is now O(changed) rather than O(1), in a new place.** V0.2 records
 the property delta every transaction produced, which is what makes a revision
