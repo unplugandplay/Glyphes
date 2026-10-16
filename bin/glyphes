@@ -1,0 +1,108 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+#
+# glyphes — the command-line surface.
+#
+#   glyphes follow <db> [--watch[=SEC]]   watch a database's commit history
+#
+# The follow subcommand is the human-facing half of the follower (S3): it
+# prints what a follower sees and, with --watch, keeps printing as a writer
+# advances. It is a read-only surface by construction — it opens a
+# Glyphes::Follower, which holds no nodes, issues no Cypher, and takes no
+# write lock — so it cannot become an accidental write path; there is no
+# code here that could write, the same guarantee the Ruby class makes.
+#
+# Exit status: 0 when the follower attached (even if nothing has been
+# committed yet), 1 when the watermark is unavailable, with the reason on
+# stderr. A database nobody has written to has no watermark, and saying so
+# beats pretending generation 0 is news.
+
+require_relative "../lib/glyphes"
+
+module Glyphes
+  module CLI
+    module_function
+
+    def follow(argv)
+      watch = 0
+      path  = nil
+
+      argv.each do |arg|
+        case arg
+        when "--watch"        then watch = 1.0
+        when /\A--watch=(\d+(?:\.\d+)?)\z/ then watch = Regexp.last_match(1).to_f
+        when /\A--/ then return usage("unknown option: #{arg}")
+        else
+          return usage("follow takes exactly one database path") if path
+          path = arg
+        end
+      end
+      return usage("follow takes exactly one database path") if path.nil?
+
+      follower = Follower.open(path)
+
+      if watch.positive?
+        run_watch(follower, watch)
+      else
+        print_once(follower)
+      end
+    rescue Glyphes::Error => e
+      warn "glyphes follow: #{e.message}"
+      1
+    end
+
+    def print_once(follower)
+      follower.refresh
+      if follower.unavailable != ""
+        warn "glyphes follow: #{follower.unavailable}"
+        return 1
+      end
+      puts line(follower)
+      0
+    end
+
+    def run_watch(follower, interval)
+      # A streaming command must flush per line: when stdout is a pipe (the
+      # only reason to use --watch), Ruby's default buffering would hold
+      # every line until the buffer filled, and a consumer would see nothing
+      # until then. Line-buffered is what "watch" means.
+      $stdout.sync = true
+      last = nil
+      loop do
+        advanced = follower.refresh
+        head = follower.head
+        if follower.unavailable != ""
+          warn "glyphes follow: #{follower.unavailable}"
+          return 1
+        end
+        # Reprint only on change: --watch over a quiet database must be
+        # silent, or a human cannot tell "nothing happened" from "it broke".
+        if advanced || last.nil? || head != last
+          puts line(follower)
+          last = head
+        end
+        sleep interval
+      end
+    end
+
+    def line(follower)
+      "head: #{follower.head}  generation: #{follower.generation}  " \
+        "lsn: #{follower.lsn}  commits: #{follower.head}"
+    end
+
+    def usage(msg)
+      warn "glyphes: #{msg}"
+      warn "usage: glyphes follow <db> [--watch[=SEC]]"
+      2
+    end
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  command = ARGV.shift
+  case command
+  when "follow" then exit Glyphes::CLI.follow(ARGV)
+  when nil      then warn "usage: glyphes follow <db> [--watch[=SEC]]"; exit 2
+  else               warn "glyphes: unknown command: #{command}";        exit 2
+  end
+end
