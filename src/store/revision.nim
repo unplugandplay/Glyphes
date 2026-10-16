@@ -190,6 +190,16 @@ proc sameState(a, b: NodeState): bool =
 
 # ------------------------------------------------------------------ writing
 
+proc isBent(commit: uint64, parents: seq[uint64]): bool =
+  ## Whether the final parent list takes `commit` off the straight line
+  ## 1 → 2 → … . The genesis commit is straight only as a root; every later
+  ## commit is straight only when it points at its immediate predecessor.
+  ## The rule lives here so open and seal cannot disagree about it.
+  if commit == 1:
+    parents.len != 0
+  else:
+    parents.len != 1 or parents[0] != commit - 1'u64
+
 proc openCommit*(rv: Revisions, branch: string; parents: seq[uint64] = @[],
                   lsn: uint64 = 0'u64): uint64 =
   ## Start a commit and return its id.
@@ -216,6 +226,14 @@ proc openCommit*(rv: Revisions, branch: string; parents: seq[uint64] = @[],
   rv.commits.add CommitRecord(id: id, parents: parents, branch: branch,
                               changed: @[], lsn: lsn)
   rv.open[id] = OpenCommit(id: id, seen: initHashSet[int64]())
+  ## Judge the shape now, not only at seal. An open fork must not leave the
+  ## `<=` fast path eligible for a commit that is not on the straight line:
+  ## a reader that folds the open tip would apply revisions by id, and on a
+  ## fork that is exactly the wrong set. Empty parents are filled at seal
+  ## with the previous commit, which is straight by construction.
+  let finalParents = if parents.len == 0 and id > 1: @[id - 1'u64] else: parents
+  if isBent(id, finalParents):
+    rv.linear = false
   id
 
 proc noteRevision*(rv: Revisions, commit: uint64, nodeId: int64,
@@ -261,15 +279,9 @@ proc sealCommit*(rv: Revisions, commit: uint64) =
       rec.changed.add id
     rec.changed.sort()
     rv.open.del(commit)
-  ## Seal is the point at which the parent list is final, so this is the
-  ## first moment `linear` can be judged for this commit. The genesis commit
-  ## has no parent at all and is still straight-line; only commits after it
-  ## must point at their immediate predecessor. Anything else — a fork, or a
-  ## merge's two parents — switches the class of history.
-  let bent =
-    if commit == 1: rec.parents.len != 0
-    else: rec.parents.len != 1 or rec.parents[0] != commit - 1'u64
-  if bent:
+  ## Parents are final now, so re-judge the shape — idempotent with the
+  ## judgement at open, and the only judgement for the defaulted case.
+  if isBent(commit, rec.parents):
     rv.linear = false
 
 proc abortCommit*(rv: Revisions, commit: uint64) =
@@ -312,18 +324,13 @@ proc abortCommit*(rv: Revisions, commit: uint64) =
   else:
     rv.commits[commit.int - 1] = CommitRecord(id: commit)
   rv.open.del(commit)
-  ## `linear` is judged at seal, and the single-open guard means the commit
-  ## that bent it is already sealed before this one opened — so under the
-  ## current rules `linear` cannot be false here. The re-judgement is kept
-  ## anyway, as a guard against judgement ever moving earlier (e.g. to open):
-  ## if that happens, abort must still be able to straighten the history.
+  ## `linear` is judged at open (and re-judged at seal), so aborting the fork
+  ## that just set it false must straighten the history again — otherwise a
+  ## single rolled-back fork would cost every later read the walk path
+  ## forever. Full re-judgement is cheap and knows no exceptions.
   rv.linear = true
   for i in 0 ..< rv.commits.len:
-    let c = uint64(i + 1)
-    let rec = rv.commits[i]
-    let bent = if c == 1: rec.parents.len != 0
-               else: rec.parents.len != 1 or rec.parents[0] != c - 1'u64
-    if bent:
+    if isBent(uint64(i + 1), rv.commits[i].parents):
       rv.linear = false
       break
   ## The ancestry cache is anchored to `commits.len`; both just changed.

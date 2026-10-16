@@ -423,25 +423,35 @@ suite "V0 the revision store":
     let c1 = rv.openCommit("main")
     rv.noteRevision(c1, 1, @[(key(1), vInt(1))], true)
     rv.sealCommit(c1)
+    let c2 = rv.openCommit("main")
+    rv.noteRevision(c2, 2, @[(key(1), vInt(2))], true)
+    rv.sealCommit(c2)
 
+    ## A commit that skips the tip is a fork, and it bends the shape at
+    ## open, not at seal: while it is still open, a read at its id must
+    ## already take the walk path — the `<=` fast path applies every
+    ## revision by id, which on a fork is exactly the wrong set. The tip
+    ## here is 2, so parents [1] is the fork; an earlier draft of this test
+    ## used parents [tip], which is just a straight append and proves
+    ## nothing.
     let fork = rv.openCommit("feature", @[c1])
-    rv.noteRevision(fork, 2, @[(key(1), vInt(2))], true)
-    ## `linear` is only judged at seal, so the open fork has not bent it yet;
-    ## what matters is the state after the abort.
+    check fork == 3
+    rv.noteRevision(fork, 3, @[(key(1), vInt(3))], true)
+    check not rv.linear
 
     rv.abortCommit(fork)
-    check rv.commits.len == 1    # the commit is gone, its id un-burned
-    check rv.linear              # the history is straight
-    check rv.stateAt(2, c1).live == false   # its revision leaked nowhere
-    check 2'i64 notin rv.byNode             # not even as an empty chain
+    check rv.commits.len == 2    # the commit is gone, its id un-burned
+    check rv.linear              # and the abort straightened the history back
+    check rv.stateAt(3, c2).live == false   # its revision leaked nowhere
+    check 3'i64 notin rv.byNode             # not even as an empty chain
 
     ## The log is reusable: the next commit takes the aborted one's id.
-    let c2 = rv.openCommit("main")
-    check c2 == fork
-    rv.noteRevision(c2, 3, @[(key(1), vInt(3))], true)
-    rv.sealCommit(c2)
+    let c3 = rv.openCommit("main")
+    check c3 == fork
+    rv.noteRevision(c3, 4, @[(key(1), vInt(4))], true)
+    rv.sealCommit(c3)
     check rv.linear
-    check rv.diff(c1, c2).mapIt(it.nodeId) == @[3'i64]
+    check rv.diff(c2, c3).mapIt(it.nodeId) == @[4'i64]
 
   test "opening a second commit is an error":
     ## Ids are `commits.len + 1`, so two concurrent opens would collide
