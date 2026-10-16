@@ -169,27 +169,51 @@ one commit short and never knows it missed one. The release/acquire pair is
 not decoration; it is the difference between "caught up" and "silently
 behind".
 
-### 4.2 The gate for it is red, and that is the finding
+### 4.2 The gate was red, and it was the test that was dirty
 
 **SG5 — "a follower never observes a generation paired with a stale LSN" —
-does not pass.** A first implementation, exercised over 200 000
-publish/observe iterations with two threads on one mapping, produced **two
-observations where the follower saw an advanced generation with a stale LSN**,
-and zero in every other configuration tried (single-threaded, two independent
-mappings, cross-process).
+failed with two violations in 200 000 iterations.** It does not now, and the
+reason is worth recording precisely, because it is the third time in this
+feature that a broken test looked like a broken kernel.
 
-The suspicion is not the protocol but the *storage*: the block is reached by
-casting a raw `mmap` pointer to `ptr Atomic[uint64]`. Nim's `Atomic[T]`
-presumes it owns its storage; here it is borrowing memory it does not own, and
-the barrier it emits may not survive that. The fix (a real `__atomic_*`
-intrinsic on a `volatile` word, or a small `struct` whose address *is* the
-shared word) is not yet chosen.
+F1.0 prototyped the two plausible barriers — the shipping
+`cast[ptr Atomic[uint64]]` and a shared struct whose address is the mapping —
+and both hold: **0 torn observations over 3 000 000 publishes, repeated.** The
+`__atomic_*` intrinsic variant was built and then removed from the bench
+because its stores were not landing, which made it a probe bug rather than a
+candidate result.
 
-This is recorded as a **finding, not a schedule slip**: it is the concrete,
-measured proof that C1's watermark is subtle, and it is why §5's scope is
-honest rather than optimistic. A watermark that publishes a generation a
-follower cannot safely trust is worse than no watermark, because the follower
-stops checking.
+The actual cause was the test's own setup. `freshShm` removed `<db>` but not
+`<db>-shm`, so the watermark sidecar from the *previous run* survived; the
+reader saw yesterday's generation while the writer republished from 1, and
+the first couple of observations read as a torn pair — **deterministically 2,
+every run**. Removing the sidecar made the gate green, and it is green across
+repeated full-suite runs.
+
+The barrier was correct throughout. What this establishes is narrower than
+"the barrier is safe": cast-`Atomic` over borrowed `mmap` memory *works* on
+this compiler and target, which is a fact about the toolchain rather than a
+guarantee from Nim's `Atomic[T]` contract. `tests/lock/barrierprobe.nim` is
+kept so the claim is checkable rather than remembered.
+
+The ordering itself is unchanged and still load-bearing: LSN then generation,
+both release, observed with acquire (S6). Nothing in this section relaxes it.
+
+**F1.3's read-only open found a second one, and it was in the library.** Mapping
+the watermark for a follower meant calling `openShm`, and `openShm` *creates*
+the block when absent — which is right for the writer and wrong for the
+reader. A follower attaching to a database with no watermark got one
+manufactured, zero-filled, reading generation 0: a follower that reported
+"caught up to generation 0" and then watched nothing, with total confidence.
+The function that made this invisible was one that appeared to succeed.
+
+So the mapper is split: `openShm` (writer, creates) and `openShmReadOnly`
+(follower, `O_RDONLY`, never creates, raises if the block is absent). A
+read-only open that finds no watermark sets `shmUnavailable` and is otherwise
+a normal open — the watermark is additive, its absence costs the *history*,
+not the data — but the follower is *told*, because the alternative is a
+follower that cannot tell the difference between "generation 0" and "no
+watermark at all".
 
 ## 5. What a follower can and cannot do — the honest boundary
 
@@ -263,7 +287,7 @@ attractive future, but it is its own PRD and it is not a phase of this one.
 | phase | content | gates |
 |---|---|---|
 | **F0** (done) | cross-process writer lock (S1): `flock`, the second-handle fix (C2) | SG1a/SG1b, shipped in `309dc8d` |
-| **F1** | the watermark sidecar: mmap, publish in `commit`, release/acquire | SG5 — **currently red**, §4.2 |
+| **F1** | the watermark sidecar: mmap, publish in `commit`, release/acquire | SG5 — **green**, §4.2 |
 | **F2** | a follower: read-only open, replay `.vhist` up to the watermark into a private `Revisions` | a follower's `stateAt`/`diff` equal a from-scratch replay of the same frames |
 | **F3** | the follower's surface: `follow_at(commit, node)`, `follow_diff(a, b)` — read APIs over the history, no Cypher surface | every answer equals a from-scratch reconstruction |
 
@@ -276,7 +300,7 @@ re-proved by the oracle on every run.
 
 | # | Risk | How it is met |
 |---|---|---|
-| **R1** | The watermark publishes a generation a follower cannot safely trust | SG5 is **red** and is treated as blocking F2. §4.2 is the evidence. A watermark that lies is worse than none, because the follower stops checking |
+| **R1** | The watermark publishes a generation a follower cannot safely trust | SG5 is green over 3×10⁶ publishes (`tests/lock/barrierprobe.nim`). A watermark that lies is worse than none, because the follower stops checking, so the gate stays and the probe is kept |
 | R2 | A follower reads a commit the graph rejected (the history-ahead crash) | F2 replays strictly up to the watermark, never to EOF. The watermark *is* the answer to this |
 | R3 | A follower is mistaken for a second writer and corrupts something | F2 opens read-only and takes no write lock; C2's lock makes the wrong thing loud |
 | R4 | Someone asks the follower a Cypher question and gets a partial-graph answer | §3.2: the follower's graph is empty and answers history questions only. The refusal is structural, not a policy |
@@ -301,7 +325,8 @@ a cost.
 ## 11. Gates
 
 - **SG5** — a follower never observes a generation paired with a stale LSN.
-  **Red.** Two violations in 200 000 iterations; §4.2. Blocking F2.
+  **Green** over 3×10⁶ publishes; §4.2 records the two failures it took to
+  get there, both of which were the test's.
 - **SG6** — a follower's `stateAt` and `diff` equal a from-scratch replay of
   the same `.vhist` frames, on a randomized write workload.
 - **SG7** — a follower replaying to the watermark after a crash mid-commit

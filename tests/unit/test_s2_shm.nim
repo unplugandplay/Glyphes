@@ -35,6 +35,10 @@ import std/posix
 import std/atomics
 
 import ../../src/store/shm
+import ../../src/abi
+import ../../src/store/prop
+import ../../src/txn/txn
+import ../../src/database
 
 type
   ## Thread-argument records, at module level: a `type` declared inside a
@@ -72,7 +76,26 @@ proc shmDir(): string =
 
 proc freshShm(name: string): string =
   let p = shmDir() / name
-  removeFile(p)
+  ## Remove the `-shm` sidecar too, not just the base path. `openShm` creates
+  ## `<db>-shm` and maps it; removing only `<db>` leaves yesterday's watermark
+  ## in place, the reader sees its leftover generation, and the writer
+  ## republishes from 1 — so the first couple of observations read as a torn
+  ## pair and SG5 fails by exactly 2, deterministically, every run. This is
+  ## the third time in this feature that a dirty setup looked like a broken
+  ## kernel; the barrier was correct throughout.
+  for suf in ["", "-shm"]:
+    removeFile(p & suf)
+  result = p
+
+var dbCounter = 0
+proc lockDirPath(): string =
+  ## A fresh database path per call. The counter is process-local and this is
+  ## a test helper, so it does not need to be atomic — the suite is
+  ## single-threaded here.
+  inc dbCounter
+  let p = shmDir() / ("db" & $dbCounter & ".glyph")
+  for suf in ["", "-wal", "-lock", "-shm", "-indexes", ".vhist"]:
+    removeFile(p & suf)
   result = p
 
 suite "S2 the shared control block (PRD-SHARED S2)":
@@ -145,3 +168,84 @@ suite "S2 the shared control block (PRD-SHARED S2)":
     let s2 = openShm(p)
     check s2.loadGeneration() == uint64(Iters)
     closeShm(s2)
+
+suite "S2 F1.3 a read-only open maps the watermark":
+  test "a read-only open sees the writer's committed generation":
+    ## The follower half. `openDatabase` used to gate replay, the lock *and*
+    ## the shm behind `not readOnly`, so the follower we need was exactly the
+    ## open that got nothing. A writer publishes a generation; a read-only open
+    ## of the same file reads it.
+    let p = lockDirPath()
+    let w = openDatabase(p, GLY_OPEN_CREATE)
+    block:
+      let tx = w.beginTransaction()
+      discard tx.createNode("Person")
+      discard w.commitTransaction(tx)
+    let gen = w.store.shm.loadGeneration()
+    check gen > 0'u64
+    close(w)
+    ## Reopened read-only, in the same process, after the writer closed.
+    let r = openDatabase(p, GLY_OPEN_READONLY)
+    check r.store.shm != nil
+    check r.store.shm.loadGeneration() == gen
+    close(r)
+
+  test "a read-only open still cannot write":
+    ## Mapping the watermark must not have made a read-only open writable.
+    ## This is the C2 regression guard from the follower's side.
+    let p = lockDirPath()
+    let w = openDatabase(p, GLY_OPEN_CREATE)
+    block:
+      let tx = w.beginTransaction()
+      discard tx.createNode("Person")
+      discard w.commitTransaction(tx)
+    close(w)
+    let r = openDatabase(p, GLY_OPEN_READONLY)
+    ## Through the ABI error path (`glyErrReadOnly`), which surfaces as a
+    ## `CatchableError` via `fail`.
+    expect CatchableError:
+      let tx = r.beginTransaction()
+      discard tx
+    close(r)
+
+  test "a read-only open does not take the writer lock":
+    ## Two read-only opens must both succeed: neither holds the write lock, so
+    ## neither excludes the other. This is what makes "one writer, many
+    ## followers" possible at all.
+    let p = lockDirPath()
+    let w = openDatabase(p, GLY_OPEN_CREATE)
+    block:
+      let tx = w.beginTransaction()
+      discard tx.createNode("Person")
+      discard w.commitTransaction(tx)
+    let r1 = openDatabase(p, GLY_OPEN_READONLY)
+    let r2 = openDatabase(p, GLY_OPEN_READONLY)
+    check r1.store.shm.loadGeneration() == r2.store.shm.loadGeneration()
+    close(r1); close(r2)
+    close(w)
+
+  test "a read-only open of a watermark-less database says so":
+    ## The watermark is additive: absence costs the history, not the data. The
+    ## open must succeed and must *say* the watermark is gone, because a
+    ## follower with no watermark must not look caught-up.
+    let p = lockDirPath()
+    let w = openDatabase(p, GLY_OPEN_CREATE)
+    block:
+      let tx = w.beginTransaction()
+      discard tx.createNode("Person")
+      discard w.commitTransaction(tx)
+    close(w)
+    ## Remove only the watermark, leaving the graph and its `.vhist` intact.
+    removeFile(p & "-shm")
+    let r = openDatabase(p, GLY_OPEN_READONLY)
+    check r.shmUnavailable != ""
+    check r.store.shm == nil
+    close(r)
+    ## And with the watermark back, the open is clean again — the failure was
+    ## about this file, not about this database being follower-shaped.
+    let w2 = openDatabase(p, GLY_OPEN_CREATE)
+    close(w2)
+    let r2 = openDatabase(p, GLY_OPEN_READONLY)
+    check r2.shmUnavailable == ""
+    check r2.store.shm != nil
+    close(r2)

@@ -78,8 +78,23 @@ proc shmPathFor*(graphPath: string): string =
   ## `<db>` -> `<db>-shm`.
   graphPath & ShmSuffix
 
+proc mapShm(path: string, readOnly: bool): Shm =
+  ## Map an existing control block. The fd is mapped and then closed: the
+  ## mapping, not the descriptor, is what two processes share, and holding an
+  ## fd open on a `-shm` another process is about to unlink is a way to end up
+  ## mapping an unlinked inode.
+  result = Shm(path: path)
+  let fd = posix.open(path, if readOnly: O_RDONLY else: O_RDWR)
+  if fd < 0:
+    raise newException(IOError, "cannot open " & path)
+  let prot = if readOnly: PROT_READ else: PROT_READ or PROT_WRITE
+  result.base = posix.mmap(nil, ShmSize, prot, MAP_SHARED, fd, 0)
+  discard posix.close(fd)
+  if result.base == MAP_FAILED:
+    raise newException(IOError, "cannot mmap " & path)
+
 proc openShm*(graphPath: string): Shm =
-  ## Map (creating if absent) the control block for `graphPath`.
+  ## Map (creating if absent) the control block for `graphPath`. Writer-side.
   ##
   ## `MAP_SHARED` and zero-fill on create are both load-bearing:
   ##
@@ -90,27 +105,29 @@ proc openShm*(graphPath: string): Shm =
   ##  * zero-fill on create, because an uninitialised file must not read as
   ##    a generation the reader will try to catch up *from*.
   when not defined(posix):
-    {.error: "the shared control block is POSIX-only (mmap)".}
-  result = Shm(path: shmPathFor(graphPath))
-  let exists = fileExists(result.path)
-  if not exists:
+    {.error: "the shared control block is POSIX-only (mmap)."}
+  let path = shmPathFor(graphPath)
+  if not fileExists(path):
     ## Create it as a file of zeroes. `writeFile` truncating is fine here:
     ## this file holds no state that survives an open (everything is rebuilt
     ## from the WAL), so a torn create is indistinguishable from a fresh one
     ## and the open continues with generation 0.
-    writeFile(result.path, newString(ShmSize) )  # newString zero-fills
-  ## Open read-write. The fd is mapped and then closed: the mapping, not the
-  ## descriptor, is what two processes share, and holding an fd open on a
-  ## `-shm` that another process is about to unlink is a way to end up
-  ## mapping an unlinked inode.
-  let fd = posix.open(result.path, O_RDWR)
-  if fd < 0:
-    raise newException(IOError, "cannot open " & result.path)
-  result.base = posix.mmap(nil, ShmSize, PROT_READ or PROT_WRITE,
-                            MAP_SHARED, fd, 0)
-  discard posix.close(fd)
-  if result.base == MAP_FAILED:
-    raise newException(IOError, "cannot mmap " & result.path)
+    writeFile(path, newString(ShmSize))  # newString zero-fills
+  mapShm(path, readOnly = false)
+
+proc openShmReadOnly*(graphPath: string): Shm =
+  ## Map the control block for a follower. **Never creates it.**
+  ##
+  ## This exists because `openShm` was the wrong function for a reader, and
+  ## wrong in a way that looks like success: opening a watermark-less
+  ## database created one, zero-filled, and returned a block reading
+  ## generation 0 — so a follower attached to a database whose writer had not
+  ## published yet would report "caught up to generation 0" and watch nothing,
+  ## confidently. A missing watermark is a fact about the database, so the
+  ## reader is told rather than made to invent one.
+  when not defined(posix):
+    {.error: "the shared control block is POSIX-only (mmap)."}
+  mapShm(shmPathFor(graphPath), readOnly = true)
 
 proc closeShm*(s: Shm) =
   if s != nil and s.base != nil:

@@ -138,27 +138,35 @@ cover.
 
 ---
 
-## 5. What is still open, and why it is the open thing
+## 5. The red gate was the third broken harness, and what it taught
 
-The watermark's own gate, SG5 — "a follower never observes a generation
-paired with a stale LSN" — is **red**: two violations in 200 000
-publish/observe iterations. The suspicion is not the protocol but the storage:
-the block is reached by casting an `mmap` pointer to `ptr Atomic[uint64]`, and
-Nim's `Atomic[T]` presumes it owns the memory it sits in. Two fixes are on
-the table — a real `__atomic_*` intrinsic on a `volatile` word, or a shared
-struct whose address *is* the word — and neither has been prototyped.
+SG5 — "a follower never observes a generation paired with a stale LSN" — was
+**red**, deterministically, at exactly two violations per run. It was not the
+barrier.
 
-This is recorded as a finding rather than a schedule slip, for a reason: the
-watermark is the entire mechanism (PRD §4), and a watermark that publishes a
-generation a follower cannot trust is *worse than no watermark*, because the
-follower stops checking. Followers (F2) do not start until this gate is green.
+My first theory was that the binary predated the `loadGeneration` fix (that
+accessor had briefly read `lsnWord` instead of `genWord`). I rebuilt, and it
+still failed with exactly 2 — so that theory was wrong, and I dropped it. The
+actual cause was the test's own setup: `freshShm` removed `<db>` but not the
+`<db>-shm` sidecar, so the previous run's watermark survived. The reader saw
+yesterday's generation while the writer republished from 1, and the first
+couple of observations read as torn — **2, every run, at 200 000 iterations
+and not at 2 000 000**, which is what finally pointed away from the barrier
+and at the setup.
 
-The red gate is also the most direct evidence for constraint C1 in the user's
-notes — the watermark is not a formality that can be waved through; it is the
-one part of the feature where getting the memory ordering wrong produces a
-follower that is confidently, silently behind.
+F1.0 had already settled the barrier before that, by prototyping the two
+plausible forms — cast-`Atomic` (shipping) and a shared struct — and
+measuring **0 torn over 3 000 000 publishes, repeated**. Both are correct.
 
----
+So the mechanism the whole feature rests on was correct throughout, and the
+thing that was broken was the machinery *around* the gate. That is the third
+time in this feature a dirty setup looked like a broken kernel; the first was
+S1.1's cross-process probe. The gate did its job — it refused to go green —
+but the claim it was making was about the test, not the system.
+
+The lesson is the same as §6's, learned three times: a red gate is a claim
+about the *system*, and the first question is whether the *gate* is the
+thing that is broken. F1.0 exists so the answer is evidence, not a hunch.
 
 ## 6. Method, as a finding in its own way
 

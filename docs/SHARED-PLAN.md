@@ -9,10 +9,11 @@
 catch-up into the writer's arrays. Those phases assumed a follower wants the
 live graph; the log does not contain one, so they are gone. See PRD §13.
 
-**Status:** plan. F0 is shipped. **F1 is red** — SG5 fails, 2 violations in
-200 000 iterations — and F2 does not start until it is green. The
-`nimble crashFollower` task named in the gate table does not exist yet; it is
-built with F2, and until then `nimble test` is the whole gate.
+**Status:** plan. F0 and F1 are done; **F1.0 settled the barrier question**
+(the gate was red for a while and the barrier turned out to have been correct
+— see below). F2 is next. The `nimble crashFollower` task named in the gate
+table does not exist yet; it is built with F2, and until then `nimble test` is
+the whole gate.
 
 Two rules govern the ordering, both learned the hard way in the discovery:
 
@@ -33,13 +34,12 @@ Two rules govern the ordering, both learned the hard way in the discovery:
 | step | lands | risk it retires |
 |---|---|---|
 | **F0** | cross-process writer lock (S1, shipped) | two writers, one file |
-| **F1** | the watermark: mmap, publish, observe | can a follower trust the marker |
+| **F1** | the watermark: mmap, publish, observe | can a follower trust the marker (done; barrier settled) |
 | **F2** | a follower: read-only open, replay to the watermark | is the timeline correct |
 | **F3** | the follower's read APIs | is it *usable*, not just correct |
 
-F0 shipped in `309dc8d`. F1 is one mechanism and is currently **red**.
-F2–F3 are small because they reuse V0's revision store and V1's frame
-decoder wholesale.
+F0 shipped in `309dc8d`; F1 is done. F2–F3 are small because they reuse V0's
+revision store and V1's frame decoder wholesale.
 
 Roughly: F1 ~200 lines, F2 ~250, F3 ~200. Shape estimates, not commitments.
 
@@ -206,16 +206,16 @@ lock (the cheap regression guard for F0 from the other side).
 | gate | asserts | runs as |
 |---|---|---|
 | SG1a/SG1b | writer lock (F0, shipped) | `nimble test`, `nimble soakShared` |
-| **SG5** | a follower never sees a generation paired with a stale LSN, ≥10⁶ iterations | `nimble test` — **red**, F1.0 |
+| **SG5** | a follower never sees a generation paired with a stale LSN, ≥10⁶ iterations | `nimble test` — **green**, F1.0 |
 | SG6 | follower's `stateAt`/`diff` == from-scratch replay | `nimble test` |
 | SG7 | crash mid-commit → follower off by exactly the unacknowledged commit | `nimble crashFollower` |
 | SG8 | follower cannot write; never holds the lock | `nimble test` |
 
-**SG5 is the gate that keeps this honest**, and it is the one that is
-currently red. It is the smallest gate here and the only one whose failure
-is invisible to every other test: a watermark that lies produces a follower
-that is confidently, silently behind, which is the exact failure this whole
-feature exists to avoid.
+**SG5 is the gate that keeps this honest**, and it is the only one whose
+failure is invisible to every other test: a watermark that lies produces a
+follower that is confidently, silently behind, which is the exact failure
+this whole feature exists to avoid. It was red for two failures — both of them
+the test's setup — and it stays in the suite for that reason.
 
 ## What is deliberately absent
 

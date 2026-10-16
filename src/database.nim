@@ -59,6 +59,16 @@ type
     ## gets is the same `GLY_ERR_BUSY` a second thread gets — one contract,
     ## not two.
     writerLock*: DbLock
+    ## Set when a read-only open could not map the watermark. Non-fatal: the
+    ## graph still opens, the follower just has no history to follow. Empty
+    ## string means the watermark mapped fine (or was not needed).
+    ##
+    ## A follower reads this to refuse honestly. `shm.loadGeneration` on a
+    ## nil `shm` is a nil deref, and a follower that silently read 0 there
+    ## would report "caught up to generation 0" — a follower that watches
+    ## nothing and claims to be current. Naming the failure is the whole
+    ## reason this is a field and not a silently-nil `shm`.
+    shmUnavailable*: string
     closed*: bool
     store*: GraphStore
     ## The index registry (M6.1). Owned here rather than by the store: an
@@ -224,11 +234,31 @@ proc openDatabase*(path: string, mode: int32): Database =
         "another process holds the writer lock for " & path &
         " (" & lockPathFor(path) & "); open it read-only to observe")
     result.writerLock = lk
-    ## The shared control block. Opened by the writer for now; S3 is what
-    ## makes a reader in another process *read* it, and until then a
-    ## read-only open maps none, so it cannot observe a generation it cannot
-    ## yet catch up to.
+    ## The shared control block, for the writer to publish into. F1.3 gives a
+    ## read-only open one too, so it can *read* the watermark; until then only
+    ## the writer maps it.
     result.store.shm = openShm(path)
+  elif not memory and readOnly:
+    ## A read-only open maps the watermark (F1.3) so it can learn the last
+    ## committed generation. It takes **no** write lock — this is the follower
+    ## half of PRD §3.1, and it is what makes "open read-only to observe"
+    ## (the S1.2 error message above) actually mean something.
+    ##
+    ## No `replayHistory` here on purpose: the watermark says how far it is
+    ## safe to read, and F2 is what replays up to it. Until F2 lands, a
+    ## read-only open maps the block and reads the counter but does not build
+    ## a timeline from it — which is a smaller capability than it looks like,
+    ## and the gate for it (F2/SG6) is what makes it one.
+    try:
+      result.store.shm = openShmReadOnly(path)
+    except IOError as e:
+      ## A read-only open against a database whose watermark is missing or
+      ## unmappable is still a valid open of the graph: the watermark is
+      ## additive and its absence costs the *history*, not the data (the same
+      ## reasoning replayHistory gives for an absent `.vhist`). So this is
+      ## reported, not fatal — a follower that cannot see the watermark
+      ## follows nothing rather than failing to open.
+      result.shmUnavailable = fmt"watermark unavailable: {e.msg}"
 
   ## STORAGE.md / TXN.md §2: monotonic from 1. Zero is reserved so a
   ## zeroed GlyStat never reads as a valid generation. `recover` has
