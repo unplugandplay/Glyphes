@@ -523,6 +523,17 @@ proc ensureCapacity(a: var Arena, pv: var PropView, needed: int32) {.gcsafe.} =
   ## Amortized doubling (STORAGE.md §10, settled at M1). The old array
   ## is left to `vacuum` like any other arena garbage; writes stay O(1)
   ## amortized and never pay an allocation per property set.
+  ##
+  ## `prop_count` is an `int16` in both record types, so the 32 768th
+  ## property wrapped it negative — in release, silently; in a
+  ## range-checked build, a RangeDefect on a perfectly legal statement
+  ## ("set 32 768 keys on one node"). The check is *before* the capacity
+  ## early-return: the array can already be large enough while the count
+  ## field cannot represent the next value. The txn op budget (10M) is two
+  ## orders of magnitude above this, which is why nothing tested it.
+  if needed > high(int16).int32:
+    raise newException(ValueError,
+      "glyphes: a record carries at most " & $high(int16) & " properties")
   if needed <= pv.capacity:
     return
   var newCap = pv.capacity

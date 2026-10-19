@@ -228,8 +228,12 @@ proc decodeFrame*(buf: string; at: int; limit: int): DecodeResult =
 
   # A payload length that runs past the end of the file is the torn-tail
   # case. Reject before allocating: a corrupt 4 GB length field must not
-  # become a 4 GB allocation on the recovery path.
-  if payloadLen > uint32(limit - at - FrameHeaderSize):
+  # become a 4 GB allocation on the recovery path. The comparison is in
+  # `int`, not `uint32`: casting the remaining length wrapped above 4 GiB,
+  # so a fully present frame in a log that size was rejected as an
+  # overrun — and `logContinuesPast` then sees valid frames behind it, so
+  # the whole database is refused as damaged.
+  if int64(payloadLen) > int64(limit - at - FrameHeaderSize):
     result.reason = "payload length " & $payloadLen & " runs past end of log"
     result.overrun = true
     return

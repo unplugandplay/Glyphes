@@ -866,3 +866,28 @@ when defined(glyphesCheck):
         check "the write-path pass did not fire on a corrupted chain" == ""
       else:
         check "S2" in e.msg
+
+  test "a record refuses the property count that wraps its count field":
+    ## `prop_count` is an `int16` in both record types. Setting the 32 769th
+    ## key wrapped it negative, and the next read allocated a negative
+    ## length — a RangeDefect on a legal statement. The txn budget (10M
+    ## ops) is two orders of magnitude above the wrap, which is why no
+    ## test reached it. One property per iteration keeps this a fraction
+    ## of a second.
+    let s = newStore()
+    let id = s.createNode("Wide")
+    ## The count field holds at most 32767, so 32767 keys must fit and
+    ## the 32768th must be refused. The earlier draft of this test set
+    ## 32 768 and let the loop itself die — of the field's range check.
+    for k in 0 ..< 32767:
+      discard s.setNodeProp(id, "k" & $k, Value(kind: vkInt, i: int64(k)))
+    var tooMany = false
+    try:
+      discard s.setNodeProp(id, "k32767", Value(kind: vkInt, i: 32767))
+    except ValueError as e:
+      tooMany = "properties" in e.msg
+    check tooMany
+    ## The record is intact at the limit, not corrupted by the refusal.
+    var v: Value
+    check s.getNodeProp(id, "k0", v)
+    check v.i == 0

@@ -573,9 +573,20 @@ proc revisionAt*(rv: Revisions, nodeId: int64, commit: uint64): Revision =
   ## commit carries one revision per node. This merges rather than assuming
   ## that, because a caller that calls `noteRevision` twice for one commit
   ## would otherwise get two rows and a format that cannot describe two.
+  ## `noteRevision` appends, so a chain is in commit order and the entries
+  ## belonging to `commit` sit at its tail. Walking from the head meant a
+  ## node rewritten in every commit of an N-commit history paid O(N) per
+  ## commit to *write* its next revision — the same complexity class the
+  ## PRD forbids for `diff`, on the hot write path. Scanned from the tail
+  ## with an early exit at the first older commit, it is O(this commit's
+  ## revisions) and cannot miss: a commit id is stamped once, so nothing
+  ## newer than `commit` belongs to it.
   result.live = false
   var any = false
-  for rev in rv.byNode.getOrDefault(nodeId, @[]):
+  let chain = rv.byNode.getOrDefault(nodeId, @[])
+  var i = chain.len - 1
+  while i >= 0 and chain[i].commit >= commit:
+    let rev = chain[i]
     if rev.commit == commit:
       any = true
       result.live = rev.live
@@ -583,6 +594,7 @@ proc revisionAt*(rv: Revisions, nodeId: int64, commit: uint64): Revision =
         result.props.add (k, v)
       for k in rev.removed:
         result.removed.add k
+    dec i
   if not any:
     result.props = @[]
     result.removed = @[]

@@ -115,6 +115,14 @@ proc readU64(b: string; at: int): uint64 {.inline.} =
     result = result or (uint64(uint8(b[at + i])) shl (8 * uint(i)))
 
 proc buildFrame(commitId, generation: uint64; payload: string): string =
+  ## The header's length field is a u32, so a payload at or above 4 GiB
+  ## would be written as `len mod 2^32` and the frame would CRC-fail on
+  ## replay and take the whole remaining history with it. Refused at the
+  ## boundary where the field would lie.
+  if int64(payload.len) > int64(uint32.high):
+    raise newException(ValueError,
+      "vhist: a commit payload of " & $payload.len & " bytes exceeds the " &
+      "format's 4 GiB frame limit")
   var head = newStringOfCap(VFrameHeaderSize)
   putU32(head, uint32(payload.len))
   putU64(head, commitId)
