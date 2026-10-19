@@ -3191,3 +3191,116 @@ documents' status lines predated the arcs they described.
 G2 GREEN (1.53x nodes, 1.09x depth)   W1/W2/W3 GREEN   SS1–SS5 · SG5–SG7 GREEN
 ```
 
+
+---
+
+## 2026-10-19 — finishing the review: the bounds, then the sidecar's own words
+
+Two commits left the review's list. Both are the same shape of work: a
+boundary where the format was already making a promise it could not keep,
+found by asking what a count field can hold rather than by watching a
+failure.
+
+**The count that wrapped silently.** `prop_count` is an `int16` in both
+record types, so the 32 768th property on one node wrapped it negative —
+and nothing above it noticed, because the next *read* allocated with it.
+In release that is a garbage length; in a range-checked build the cast
+itself is a `RangeDefect` on a perfectly legal statement. The txn op budget
+is 10M, two orders of magnitude above the wrap, which is exactly why nothing
+in the test suite reached it: the suite was not wrong, the boundary was just
+never near anything anyone tried.
+
+The first attempt at the guard was in the wrong place, and the test is what
+said so. `ensureCapacity` returns early when the array is already big
+enough, and the guard sat after that return — so at 32 768 properties the
+array *was* big enough (it had doubled to exactly 32 768), the guard never
+ran, and the debug build died in the range check instead. A count field
+holds 0…32767, so the refusal belongs before the early return, where the
+question is "can the count field represent the next value" rather than "is
+there room". The first draft of the test set 32 768 keys and let the loop
+itself die of the field's range check: an oracle pointed at the wrong input,
+which is the failure mode this review kept running into. The test now sets
+32 767 and asserts the next one is refused *and* that the record still
+reads.
+
+Two more in the same commit, both found by looking at what a field can
+represent rather than at a symptom:
+
+* The WAL decoder compared a payload length against the file's remaining
+  bytes in `uint32`. Above 4 GiB the cast wraps, so a *fully present* frame
+  was reported as an overrun — and `logContinuesPast`, which walks past an
+  overrun to see whether the log continues, then finds the valid frames
+  behind it and refuses the whole database as damaged. A large database
+  would have refused to open, with an error message blaming the file.
+* `buildFrame` wrote `uint32(payload.len)` for a payload that could not fit
+  in a u32: the frame would CRC-fail on replay, and since replay stops at
+  the first bad frame, one oversized commit would take the entire remaining
+  history with it. Refused at the boundary instead.
+
+And the one that is a complexity claim rather than a bug: `revisionAt`
+walked each node's revision chain from the head, so a node rewritten in
+every commit paid O(history) per commit to *write* its next revision. The
+chain is append-ordered, so a tail-first scan with an early exit at the
+first older commit is exact and O(this commit's revisions).
+
+Measured honestly: it is not measurable on this box. The probe that shows
+the effect has to go through the encoder (`histWriteAndSync` is what calls
+`revisionAt`; `noteRevision` does not), and at 40k commits on one hot node
+both variants spend ~50 s here — the machine's load has been 13–28 for the
+whole session, and a one-row `Table.getOrDefault` measures 280 µs per call
+on it. So the commit says the complexity term is structural and quotes no
+number, rather than quoting one the machine cannot produce.
+
+**The sidecar's own words.** The `.vhist` payload did not carry the
+commit's branch, and both replay sites compensated by opening every
+replayed commit on `""`. The visible consequence: a database reported
+branch `"main"` while running and `""` after a reopen, and a follower
+reported `""` for commits its writer had written as `"main"` — against
+follow.nim's own stated promise that the two timelines are identical in
+shape, "or a diff that meant different things on the two sides would be
+worse than no diff". The field is now in the payload, behind a version byte
+of its own rather than a digit of the magic, so a sidecar written by an
+older binary still replays (V0 carries no branch and reads back as the empty
+branch — which is what the replay sites passed by hand anyway). A payload
+version from the future is refused by name: reading on would turn a future
+file into wrong history rather than an error.
+
+Two more decoder facts, both the same shape. Counts are read *before* the
+items they promise, and `newSeq[n]` runs on the count — so a payload
+declaring 2^60 revisions asked for 2^60 of them on its way to being told it
+was short, and being told it was short arrived as a Defect rather than a
+refusal. Every count is now bounded against the bytes that remain before
+anything is allocated, which bounds every allocation in the decoder by the
+payload's own length. And the generation a frame carries must strictly
+increase: one commit advances the generation by one and appends exactly one
+frame, so a frame that repeats or reverses one was *written* in an order
+this format does not produce — a duplicate, a concatenated sidecar, a
+splice. Those frames are CRC-valid, so "the tail was torn" is not a
+possible reading; they are refused like a bad CRC. The check needs the
+reader's own high-water mark to cover a resume, because a duplicate lands
+exactly on the seam between two scans where neither can see it — the
+follower hands `replayVhist` the generation it has applied.
+
+And the last one, in the follower rather than the file: a sidecar that
+shrank below the follower's offset was answered by restarting the replay
+from the top. That is right for an open (`fromByte` is 0 anyway) and wrong
+for a follower, whose timeline already holds those commits — it folds the
+whole file in again, every commit twice under shifted ids. That is the
+duplication this review measured and closed on the offset side; this is the
+same damage arriving from the other end, and it was still reachable. The
+follower now refuses, names the reason, and leaves its timeline alone.
+
+The teeth check for all four was run as one build with all four behaviours
+reverted: exactly the four new tests fail, and the name-by-name diff against
+the fixed run shows nothing else moved. (The two extra lines that differ are
+the `-d:glyphesCheck`-gated tests, absent from the unflagged teeth build.)
+
+```
+480 Nim tests   228 Ruby runs / 769 assertions   C1 132/132 + 17/17 refusals
+G2 GREEN   W1/W2/W3 GREEN (28 clean / 27 named at 55 boundaries)   SG7 GREEN
+```
+
+`ENHANCEMENTS.md` item 1 keeps the two parts that are not done, with the
+reason each is not an edit: the database-identity word wants the snapshot
+header, and streaming the replay is a hot-path change with no user-visible
+defect behind it.

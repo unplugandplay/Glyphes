@@ -73,6 +73,22 @@ const
   ## frames and opens as "no history" without a special case.
   VhistMagic* = "GLYVHI01"
 
+  ## The byte after the magic is the payload's own version, separate from
+  ## the magic's digit: a field is added here rather than in the magic so a
+  ## payload written by an older binary still replays, which is the whole
+  ## point of a history sidecar.
+  VhistPayloadV0* = 0'u8
+  ## [magic][version][branchLen u32][branch][changed…] — the branch the commit
+  ## was made on. V0 carried no branch and replays as the empty branch, which
+  ## is exactly what the two replay sites passed by hand before the field
+  ## existed (database.nim, follow.nim), so old files keep their old meaning.
+  VhistPayloadV1* = 1'u8
+  VhistPayloadVersion* = 1'u8
+  ## A branch name is a label, not a payload. 255 bytes is past any name a
+  ## caller would write and small enough to keep a corrupt length from
+  ## naming a slice the decoder then has to hold.
+  VhistMaxBranchLen* = 255
+
   VFrameHeaderSize* = 24
   ## [payloadLen u32][commitId u64][generation u64][kind u32]
   VFrameKindCommit* = 1'u32
@@ -153,9 +169,27 @@ proc encodeCommitPayload(rv: Revisions; rec: CommitRecord): string =
   ## did to arrive there. Values go through prop.nim's codec, the same one
   ## the WAL uses, so there is one value vocabulary rather than two that have
   ## to agree.
+  ##
+  ## The branch travels with the commit. It did not used to, and both replay
+  ## sites compensated by opening every replayed commit on `""` — so a
+  ## database reported branch `""` for every commit in its history, and a
+  ## follower reported the same `""` its writer had written as `"main"`.
+  ## follow.nim's own comment says the two timelines must be identical in
+  ## shape, "or a diff that meant different things on the two sides would be
+  ## worse than no diff". The engine names one branch (`"main"`), so the
+  ## field nearly always holds that; it is written anyway, because a format
+  ## that cannot record a branch cannot be forked — and because the day a
+  ## second branch appears, a sidecar that dropped the field would replay
+  ## both into one lineage.
+  if rec.branch.len > VhistMaxBranchLen:
+    raise newException(ValueError,
+      "vhist: branch name of " & $rec.branch.len & " bytes exceeds the " &
+      "format's " & $VhistMaxBranchLen & "-byte limit")
   var b = newStringOfCap(512)
   b.add VhistMagic
-  b.add '\x00'
+  b.add char(VhistPayloadVersion)
+  putU32(b, uint32(rec.branch.len))
+  b.add rec.branch
   putU64(b, uint64(rec.changed.len))
   for id in rec.changed:
     putU64(b, uint64(id))
@@ -185,6 +219,9 @@ type DecodedCommit* = object
   changed*: seq[int64]
   parents*: seq[uint64]
   lsn*: uint64
+  ## The branch the commit was made on, empty for a V0 payload — which is
+  ## what the replay sites used to pass by hand for every commit, V0 or not.
+  branch*: string
   ## nodeId -> its revision at the commit.
   revisions*: Table[int64, Revision]
 
@@ -196,6 +233,14 @@ proc decodeCommitPayload*(payload: string): DecodedCommit =
     raise newException(ValueError, "vhist payload is too short to carry the magic")
   if payload[0 ..< VhistMagic.len] != VhistMagic:
     raise newException(ValueError, "vhist payload does not start with " & VhistMagic)
+  let version = uint8(payload[VhistMagic.len])
+  if version > VhistPayloadVersion:
+    ## Forward-incompatible by name, not by guessing: a newer payload may
+    ## mean fields this reader would read past, and reading on is how a
+    ## reader turns a future file into wrong history rather than an error.
+    raise newException(ValueError,
+      "vhist payload version " & $int(version) & " is newer than this reader's (" &
+      $int(VhistPayloadVersion) & ")")
   var at = VhistMagic.len + 1
 
   proc need(n: int) =
@@ -204,23 +249,47 @@ proc decodeCommitPayload*(payload: string): DecodedCommit =
         "vhist payload is truncated: needs " & $n & " bytes at offset " &
         $at & " of " & $payload.len)
 
-  need(8); let nChanged = int(readU64(payload, at)); at += 8
+  proc count(n: uint64; each: int; what: string): int =
+    ## A count is read *before* the items it promises, so it is unbounded
+    ## input: `newSeq[n]` runs on the count, and the loop's own bounds check
+    ## only gets to run after the allocation. A payload that declares 2^60
+    ## nodes therefore tried to allocate 2^60 revisions on the way to being
+    ## told it was short. Each item costs at least `each` bytes, so a count
+    ## that cannot fit in what remains is refused first — which bounds every
+    ## allocation in this proc by the payload's own length.
+    if n > uint64((payload.len - at) div max(each, 1)):
+      raise newException(ValueError,
+        "vhist payload declares " & $n & " " & what & " but only " &
+        $(payload.len - at) & " bytes are left for them")
+    result = int(n)
+
+  if version >= VhistPayloadV1:
+    need(4); let blen = int(readU32(payload, at)); at += 4
+    if blen > VhistMaxBranchLen:
+      raise newException(ValueError,
+        "vhist payload declares a " & $blen & "-byte branch name, past the " &
+        "format's " & $VhistMaxBranchLen & "-byte limit")
+    need(blen)
+    result.branch = payload[at ..< at + blen]
+    at += blen
+
+  need(8); let nChanged = count(readU64(payload, at), 8, "changed ids"); at += 8
   result.changed = newSeq[int64](nChanged)
   for i in 0 ..< nChanged:
     need(8); result.changed[i] = int64(readU64(payload, at)); at += 8
-  need(8); let nParents = int(readU64(payload, at)); at += 8
+  need(8); let nParents = count(readU64(payload, at), 8, "parent ids"); at += 8
   result.parents = newSeq[uint64](nParents)
   for i in 0 ..< nParents:
     need(8); result.parents[i] = readU64(payload, at); at += 8
   need(8); result.lsn = readU64(payload, at); at += 8
-  need(8); let nNodes = int(readU64(payload, at)); at += 8
+  need(8); let nNodes = count(readU64(payload, at), 9, "revisions"); at += 8
   result.revisions = initTable[int64, Revision]()
   for i in 0 ..< nNodes:
     need(9)
     let id = int64(readU64(payload, at)); at += 8
     let liveByte = uint8(payload[at]); at += 1
     var rev = Revision(commit: 0'u64, live: liveByte != 0'u8)
-    need(8); let nProps = int(readU64(payload, at)); at += 8
+    need(8); let nProps = count(readU64(payload, at), 12, "properties"); at += 8
     rev.props = newSeq[(int32, Value)](nProps)
     for j in 0 ..< nProps:
       need(4); let key = cast[int32](readU32(payload, at)); at += 4
@@ -228,7 +297,7 @@ proc decodeCommitPayload*(payload: string): DecodedCommit =
       need(vlen)
       rev.props[j] = (key, decodeValue(payload[at ..< at + vlen]))
       at += vlen
-    need(8); let nRemoved = int(readU64(payload, at)); at += 8
+    need(8); let nRemoved = count(readU64(payload, at), 4, "removed keys"); at += 8
     rev.removed = newSeq[int32](nRemoved)
     for j in 0 ..< nRemoved:
       need(4); rev.removed[j] = cast[int32](readU32(payload, at)); at += 4
@@ -282,8 +351,8 @@ proc closeVhist*(vf: VhistFile) =
 
 # ------------------------------------------------------------------- reading
 
-proc replayVhist*(path: string; uptoGeneration: uint64;
-                  fromByte = 0): tuple[
+proc replayVhist*(path: string; uptoGeneration: uint64; fromByte = 0;
+                  afterGeneration = 0'u64): tuple[
     frames: seq[VFrame], goodBytes: int, truncated: bool, corrupted: bool] =
   ## Read every complete frame whose generation the graph has reached, and
   ## report the byte length of what was trusted.
@@ -320,6 +389,13 @@ proc replayVhist*(path: string; uptoGeneration: uint64;
   ## sidecar on every tick would pay O(history) per tick forever, which is the
   ## difference between "follows" and "keeps up". The offset is never a guess
   ## -- callers pass back a `goodBytes` from an earlier call.
+  ##
+  ## `afterGeneration` is the caller's last applied generation, and it is what
+  ## makes the contiguity check below work across a resume: without it a scan
+  ## that starts at `fromByte` cannot compare the first frame it sees with the
+  ## last one before it, which is precisely the boundary a duplicated or
+  ## spliced frame lands on. A follower passes the generation it has applied
+  ## (database.nim passes 0, scanning the whole file).
   let file = path & VhistSuffix
   if not fileExists(file):
     return
@@ -335,6 +411,10 @@ proc replayVhist*(path: string; uptoGeneration: uint64;
   ## made a no-frame poll hand the caller an offset that had never been good,
   ## and a first-frame failure cut the file to nothing.
   result.goodBytes = at
+  ## The highest generation trusted so far, seeded from the caller's claim
+  ## about what it already applied so the first frame in a resumed scan is
+  ## checked against it.
+  var lastAccepted = afterGeneration
   while at + VFrameHeaderSize + 4 <= buf.len:
     let payloadLen = int(readU32(buf, at))
     let commitId = readU64(buf, at + 4)
@@ -361,6 +441,21 @@ proc replayVhist*(path: string; uptoGeneration: uint64;
     if generation > uptoGeneration:
       result.truncated = true
       break                                  ## the graph never accepted it
+    ## One commit advances the generation by one and appends exactly one
+    ## frame, so a sidecar's generations are strictly increasing — and a
+    ## frame that goes backwards, or repeats one, cannot have been written
+    ## that way by this engine. Each frame here is CRC-valid, so the bytes
+    ## are not rotted: they were *written* in an order this format does not
+    ## produce. That is the signature of a duplicated frame (the follower
+    ## bug this review found: three commits applied for two), of two
+    ## sidecars concatenated, or of a frame spliced in from elsewhere —
+    ## and replaying it would put the same commit in the timeline twice
+    ## under ids that then no longer line up with the graph. Same rule as
+    ## the CRC and kind refusals above: name it, refuse, leave the file.
+    if generation <= lastAccepted:
+      result.corrupted = true
+      break
+    lastAccepted = generation
     result.frames.add VFrame(commitId: commitId, generation: generation,
                              payload: payload)
     at += VFrameHeaderSize + payloadLen + 4

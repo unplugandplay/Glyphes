@@ -117,12 +117,29 @@ The naming precedent is `src/index/index.nim`'s `IndexSidecarSuffix`
 shape.
 
 Append-only, framed exactly like the WAL — same idea, different file
-(PRD §4.1). A frame is `[len][type][commit-header][revisions…][crc]`.
-`type` is `commit` or `revision`.
+(PRD §4.1). The frame is
+`[payloadLen u32][commitId u64][generation u64][kind u32][payload][crc32 u32]`,
+and `kind` is `commit`. One frame per commit: a frame either validates as a
+whole or it does not, so there is no partial commit for a reader to
+reconstruct.
+
+The payload opens `[magic][version][branchLen u32][branch]`, then the
+changed ids, the parents, the LSN and one row per revision. The version
+byte is a field of its own rather than a digit of the magic so a payload
+written by an older binary still replays: V0 carries no branch and reads
+back as the empty branch, which is exactly what the replay sites used to
+pass by hand. A version from the future is refused by name — reading on
+would turn a future file into wrong history rather than an error.
 
 Reusing the WAL's framing rather than inventing one means the CRC argument,
 the length-in-header argument, and the recovery argument are all already
 argued in `WAL.md`.
+
+**Still open in the frame:** no database-identity word, so a sidecar
+copied from another database is adopted silently. It is listed first in
+[`ENHANCEMENTS.md`](../ENHANCEMENTS.md) rather than done here, because the
+identity it should carry belongs in the *snapshot* header, and that is a
+storage-format change with its own evidence to gather.
 
 ### V1.2 — load and recovery (hook: `src/database.nim`)
 
@@ -130,6 +147,14 @@ On open, replay `.vhist` to the last complete frame. A partial trailing
 frame is **truncated and the open continues** — the commit it belonged to
 was never acknowledged, so discarding it is correct. Anything that is not a
 clean boundary is a refusal, not a guess (PRD G4).
+
+One commit advances the generation by one and appends exactly one frame, so
+a sidecar's generations strictly increase. A frame that repeats or reverses
+one is CRC-valid and still impossible: it was *written* in an order this
+format does not produce — a duplicate, a concatenated sidecar, a splice —
+and replaying it would put the same commit in the timeline twice. It is
+refused like a bad CRC, and a resuming reader passes the generation it has
+already applied so the check spans the seam a duplicate lands on.
 
 The sidecar carries the snapshot's `generation`; a mismatch refuses by name
 (PRD R2).

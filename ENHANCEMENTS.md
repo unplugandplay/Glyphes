@@ -16,26 +16,42 @@ priority list below is what the review left open, in order.
 
 **Blocking — these gate the next milestone**
 
-### 1. The `.vhist` format pass, while the format is young
+### 1. The `.vhist` format pass, while the format is young — **PARTLY LANDED**
 
-**Why.** Four findings land on one young file: `branch` is dropped by the
-encoder (V2 branches will force a breaking change), frames carry no
-database identity and no generation-contiguity check (a copied sidecar is
-silently adopted; two frames can share a generation — the exact signature
-of the phantom commit this session closed), and every replay reads the
-whole sidecar into one string. All four are cheaper now than after V2 or
-the ABI structured reads freeze the format.
+**Landed:** the payload carries the commit's `branch` (versioned, V0
+payloads still replay, so no breaking change for V2 — both replay sites had
+been passing `""` by hand and a follower disagreed with its writer about
+every commit it held); counts are bounded before they allocate, so a
+payload cannot ask for 2^60 revisions on its way to being told it was
+short; and replay refuses a frame whose generation repeats or reverses one,
+with the resuming reader's high-water mark as the seam's other side.
 
-**Cost.** ~1 day, one commit, with G4-style crash and bit-flip evidence
-after it.
+**Still open, and why it is not just an edit:** frames carry no
+**database-identity word**, so a sidecar copied from another database is
+adopted silently. The identity it should carry belongs in the *snapshot*
+header — a database's own creation stamp — and that is a storage-format
+change wanting its own evidence (bit-flip, crash, reopen) before it lands.
 
-### 2. The minor bounds items
+Also open, and a performance question rather than a correctness one: every
+replay reads the whole sidecar into one string, so a follower resuming at a
+large offset still pays for the bytes before it. Streaming the scan is a
+real change to a hot path with no user-visible defect behind it.
 
-`propCount: int16` wraps at 32 768 properties on one record; the WAL
-decoder's `uint32` payload-length compare wraps above 4 GiB; commit-time
-`revisionAt` scans each node's chain from the head (O(history) per hot
-node, on the write path). Each is a refusal at the boundary rather than a
-behaviour change. **Cost:** ~3 hours, three guards.
+### 2. ~~The minor bounds items~~ — **LANDED**
+
+`propCount: int16` wrapped at 32 768 properties on one record (release read
+garbage lengths; a range-checked build died on a legal statement) — the
+refusal now sits before the capacity early-return, because the array can be
+large enough while the count field cannot hold the next value. The WAL
+decoder's `uint32` payload-length compare wrapped above 4 GiB and rejected
+*valid* frames in a log that size, after which `logContinuesPast` found good
+frames behind the "overrun" and refused the whole database — compared in
+`int64` now. The `.vhist` encoder refuses a payload at or above 4 GiB
+rather than writing `len mod 2^32` and CRC-failing the frame on replay.
+Commit-time `revisionAt` scanned each node's chain from the head; the chain
+is append-ordered, so it now scans from the tail with an early exit at the
+first older commit — the complexity term is structural, and this machine's
+load made the wall-clock delta unmeasurable, so no number is claimed.
 
 ---
 

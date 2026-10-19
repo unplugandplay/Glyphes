@@ -335,3 +335,133 @@ suite "V1 the history sidecar (VERSIONING-PLAN V1)":
     let db2 = openDatabase(path, 0'i32)
     check db2.store.history.commits.len == commitsBefore
     close(db2)
+
+suite "the sidecar says what it means":
+
+  test "a replayed commit carries the branch the writer recorded":
+    ## The payload did not carry a branch at all, and both replay sites
+    ## compensated by opening every replayed commit on `""`. So a running
+    ## database reported branch `"main"` and the same database after a
+    ## reopen reported `""`, and a follower disagreed with its own writer
+    ## about every commit it had — against follow.nim's stated promise that
+    ## the two timelines are identical in shape. The field is written; this
+    ## reads it back the way both replay sites do.
+    let path = freshPath("branch.glyph")
+    block:
+      let db = openDatabase(path, GLY_OPEN_CREATE)
+      let t = db.beginTransaction()
+      discard t.createNode("A")
+      check db.commitTransaction(t)
+      check db.store.history.commits.len == 1
+      check db.store.history.commits[0].branch == "main"
+      close(db)
+    let db2 = openDatabase(path, 0'i32)
+    check db2.store.history.commits.len == 1
+    check db2.store.history.commits[0].branch == "main"
+    close(db2)
+    ## And the raw round trip, without a database in the way.
+    let rv = initRevisions()
+    let c = rv.openCommit("main")
+    rv.noteRevision(c, 7, @[], true)
+    rv.sealCommit(c)
+    check decodeCommitPayload(encodeCommitPayload(rv, rv.commits[0])).branch == "main"
+
+  test "a payload written before the branch field still replays":
+    ## The version byte is a field of its own rather than a digit of the
+    ## magic, precisely so a sidecar written by an older binary keeps its
+    ## meaning. A V0 payload carries no branch and replays as the empty
+    ## branch — which is exactly what the replay sites passed by hand.
+    var b = VhistMagic
+    b.add char(VhistPayloadV0)
+    for v in [1'u64, 7'u64, 0'u64, 0'u64, 0'u64]: ## one changed id, no parents,
+      for i in 0 ..< 8:                          ## no lsn, no revisions
+        b.add char(uint8((v shr (8 * uint(i))) and 0xFF'u64))
+    let dec = decodeCommitPayload(b)
+    check dec.changed == @[7'i64]
+    check dec.parents.len == 0
+    check dec.branch == ""
+    ## And a version from the future is refused by name rather than read past.
+    var future = VhistMagic
+    future.add char(VhistPayloadVersion + 1'u8)
+    var refused = false
+    try:
+      discard decodeCommitPayload(future)
+    except ValueError as e:
+      refused = "newer" in e.msg
+    check refused
+
+  test "a payload that declares more items than it holds is refused before allocating":
+    ## Counts are read before the items they promise, so a count is unbounded
+    ## input: `newSeq[n]` runs on the count itself, and the loop's own bounds
+    ## check only gets to run *after* the allocation. A payload claiming 2^60
+    ## revisions therefore asked for 2^60 of them on the way to being told it
+    ## was short — and being told it was short arrived as a Defect, not a
+    ## refusal. Each item has a minimum size, so a count that cannot fit in
+    ## the bytes that remain is refused up front, which bounds every
+    ## allocation in the decoder by the payload's own length.
+    var b = VhistMagic
+    b.add char(VhistPayloadVersion)
+    b.add "\x00\x00\x00\x00"                      ## branch length 0
+    b.add "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"      ## changed count: 2^64 - 1
+    var refused = ""
+    try:
+      discard decodeCommitPayload(b)
+    except ValueError as e:
+      refused = e.msg
+    except CatchableError:
+      refused = "not a refusal: an exception escaped that is not a ValueError"
+    check "declares" in refused
+    check "changed ids" in refused
+    ## The same bound, one level in: a node count.
+    var c = VhistMagic
+    c.add char(VhistPayloadVersion)
+    c.add "\x00\x00\x00\x00"
+    for v in [0'u64, 0'u64, 0'u64]:               ## no changed, no parents, no lsn
+      for i in 0 ..< 8:
+        c.add char(uint8((v shr (8 * uint(i))) and 0xFF'u64))
+    c.add "\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"      ## revisions: 2^64 - 1
+    var refused2 = ""
+    try:
+      discard decodeCommitPayload(c)
+    except ValueError as e:
+      refused2 = e.msg
+    check "declares" in refused2
+    check "revisions" in refused2
+
+  test "a repeated generation is corruption, and a resume cannot hide it":
+    ## One commit advances the generation by one and appends exactly one
+    ## frame, so a sidecar's generations strictly increase. Every frame here
+    ## is CRC-valid — the bytes are not rotted, they were *written* in an
+    ## order this format does not produce. That is the signature of the
+    ## duplication this review measured on the follower (three commits
+    ## applied for two), of two sidecars concatenated, or of a frame spliced
+    ## in from elsewhere. Replaying it would put the same commit in the
+    ## timeline twice under ids that no longer line up with the graph.
+    ##
+    ## The second half is the point: `fromByte` resumes mid-file, where the
+    ## offending frame usually lands, so the check needs the caller's own
+    ## high-water mark to compare the first new frame against. Without it the
+    ## duplicate would sit exactly on the seam no scan can see.
+    let path = freshPath("dup.glyph")
+    let rv = initRevisions()
+    let c = rv.openCommit("main")
+    rv.noteRevision(c, 3, @[], true)
+    rv.sealCommit(c)
+    let payload = encodeCommitPayload(rv, rv.commits[0])
+    block:
+      let vf = openVhist(path)
+      appendCommit(vf, 1, 1, payload)
+      appendCommit(vf, 2, 2, payload)
+      appendCommit(vf, 2, 2, payload)             ## the same frame, twice
+      syncVhist(vf)
+      closeVhist(vf)
+    let whole = replayVhist(path, 99'u64)
+    check whole.frames.len == 2                   ## the two before the repeat
+    check whole.corrupted == true
+    check whole.truncated == false                ## and it is not a torn tail
+    ## Resuming after the second frame's boundary finds the repeat anyway.
+    let resumed = replayVhist(path, 99'u64, whole.goodBytes, 2'u64)
+    check resumed.frames.len == 0
+    check resumed.corrupted == true
+    ## The intact prefix is untouched: this refuses, it does not cut.
+    check replayVhist(path, 99'u64).frames.len == 2

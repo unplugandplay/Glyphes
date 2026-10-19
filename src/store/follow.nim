@@ -42,7 +42,8 @@ type
     unavailable*: string
 
 proc replayInto*(rv: Revisions; path: string; fromByte: int;
-                 uptoGeneration: uint64): tuple[goodBytes: int,
+                 uptoGeneration: uint64;
+                 afterGeneration = 0'u64): tuple[goodBytes: int,
                                                applied: int, stopped: bool,
                                                corrupted: bool,
                                                lastCommit: uint64] =
@@ -57,7 +58,16 @@ proc replayInto*(rv: Revisions; path: string; fromByte: int;
   ## Replayed in the same open/seal sequence a live writer uses, so a
   ## follower's timeline is identical in shape to the writer's own — a diff
   ## that meant different things on the two sides would be worse than no diff.
-  let replay = replayVhist(path, uptoGeneration, fromByte)
+  ## The commit's branch comes out of the frame for the same reason: it used
+  ## to be passed as `""` here, which is what made that promise false for
+  ## every commit in a follower's history.
+  ##
+  ## `afterGeneration` is what this timeline already holds, and it is handed to
+  ## `replayVhist` so the contiguity check spans the resume boundary: a frame
+  ## that repeats a generation this follower has already applied is a
+  ## duplication, and refusing it is the only answer that does not put the
+  ## same commit into the timeline twice.
+  let replay = replayVhist(path, uptoGeneration, fromByte, afterGeneration)
   ## A note on interruption, because the word "idempotent" gets used loosely
   ## below. `replayVhist` validates a frame's CRC *before* this loop sees it,
   ## so a torn or corrupt frame never reaches `openCommit` — the realistic
@@ -72,7 +82,7 @@ proc replayInto*(rv: Revisions; path: string; fromByte: int;
   ## here so no one assumes "idempotent" covers a hostile or buggy writer.
   for fr in replay.frames:
     let dec = decodeCommitPayload(fr.payload)
-    let cid = rv.openCommit("", dec.parents, dec.lsn)
+    let cid = rv.openCommit(dec.branch, dec.parents, dec.lsn)
     ## `changed` is authoritative (vhist.nim), so a node named by the commit
     ## with no row records an empty live revision — the same state a commit
     ## that touched a node and left it identical would have.
@@ -153,7 +163,25 @@ proc refresh*(f: Follower): bool =
   ## after the frames are folded — so a follower interrupted mid-refresh
   ## resumes from the older generation and re-applies, which is idempotent,
   ## rather than recording progress it never made.
-  let res = replayInto(f.revisions, f.path, f.bytes, generation)
+  ## A sidecar that is now *shorter* than what this follower has already
+  ## replayed is not history arriving out of order: it is a different (or
+  ## replaced) file, a restore from backup, or a truncation below our own
+  ## offset. `replayVhist` answers that case by restarting from the top —
+  ## correct for an open, whose `fromByte` is 0 anyway, and wrong here,
+  ## because a restart folds the entire file into a timeline that already
+  ## holds it: every commit twice, under shifted ids. That duplication was
+  ## measured (three commits applied for two) and fixed on the offset side;
+  ## this is the same damage from the other direction, refused by name
+  ## instead. The timeline is left exactly as it was: nothing is folded, the
+  ## follower says why, and a follower that pointed at a fresh database
+  ## attaches again from scratch.
+  let sidecar = f.path & VhistSuffix
+  if fileExists(sidecar) and getFileSize(sidecar) < f.bytes.int64:
+    f.unavailable = "history sidecar shrank below the follower's offset (" &
+      $getFileSize(sidecar) & " < " & $f.bytes & "): the timeline this " &
+      "follower holds is not a prefix of that file"
+    return false
+  let res = replayInto(f.revisions, f.path, f.bytes, generation, f.watermark)
   ## Advance all three counters only after the frames are folded. A follower
   ## interrupted mid-refresh resumes from the older offset and re-applies,
   ## which is idempotent — whereas recording progress it never made would skip

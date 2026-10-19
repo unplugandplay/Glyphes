@@ -124,7 +124,7 @@ proc replayHistory(store: GraphStore, path: string) =
 
   for fr in replay.frames:
     let dec = decodeCommitPayload(fr.payload)
-    let cid = store.history.openCommit("", dec.parents, dec.lsn)
+    let cid = store.history.openCommit(dec.branch, dec.parents, dec.lsn)
     ## Every node the commit's `changed` names gets a revision folded from the
     ## frame's per-node rows. `changed` is authoritative (vhist.nim), so a
     ## node with no row records an empty live revision — the same state a

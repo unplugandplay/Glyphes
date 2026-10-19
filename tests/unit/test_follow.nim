@@ -382,3 +382,48 @@ suite "review regression: recovery republishes the watermark":
     check f.followAt(0).len == 1
     close(f)
     close(w2)
+
+suite "a follower that cannot trust its offset says so":
+
+  test "a sidecar that shrank below the follower's offset is refused, not replayed":
+    ## `replayVhist` answers "the file is shorter than your offset" by
+    ## restarting from the top, which is right for an open (whose offset is 0
+    ## anyway) and wrong here: a restart folds the whole file into a timeline
+    ## that already holds it, so every commit lands twice under shifted ids.
+    ## That duplication was measured — three commits applied for two — and was
+    ## fixed on the offset side; this is the same damage arriving from the
+    ## other end, and it was left reachable: a restore, a replacement file or
+    ## any truncation below the follower's own offset restarted the replay.
+    ##
+    ## The writer must also publish a new generation, because a poll with
+    ## nothing new returns before the file is looked at — the case is not
+    ## reachable with a still watermark, and a test that hit it anyway would be
+    ## testing a different thing.
+    let p = freshDb()
+    let w = openDatabase(p, GLY_OPEN_CREATE)
+    for label in ["A", "B", "C"]:
+      discard w.commitOne(label)
+    let f = openFollower(p)
+    check f.refresh()
+    check f.followAt(0).len == 3
+    let offset = f.bytes
+    let sidecar = p & ".vhist"
+    check getFileSize(sidecar).int == offset
+
+    ## The sidecar is replaced by a shorter one — the shape a restore or a
+    ## truncation leaves under a live writer. Emptied rather than halved,
+    ## because the writer appends its next frame to whatever is there: at half
+    ## length, whether that frame reaches back past the follower's offset is a
+    ## coin toss, and a test that only sometimes reaches the case tests
+    ## nothing.
+    writeFile(sidecar, "")
+    check getFileSize(sidecar).int < offset
+    discard w.commitOne("D")                     ## the watermark moves again
+    check getFileSize(sidecar).int < offset       ## and still below it
+
+    check not f.refresh()                        ## nothing folded
+    check "shrank" in f.unavailable
+    check f.followAt(0).len == 3                 ## the timeline is intact, not doubled
+    check f.bytes == offset
+    close(f)
+    close(w)
