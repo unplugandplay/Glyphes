@@ -20,10 +20,11 @@ import ../../src/store/prop
 import ../../src/wal/crc32
 import ../../src/wal/wal
 import ../../src/errors
-from ../../src/abi import glyErrCorrupt
+from ../../src/abi import glyErrCorrupt, GLY_OPEN_CREATE
 import ../../src/wal/snapshot
 import ../../src/wal/recover
 import ../../src/txn/txn
+import ../../src/database
 
 proc walDir(): string =
   ## Scratch under the repo's own tmp/, per the build layout, wiped per
@@ -658,3 +659,32 @@ suite "checkpoint safety (WAL.md §7 W6)":
     check rec.transactionsCommitted == 3
     check lastMarker(s2) == 6
     checkClean(s2)
+
+suite "review regressions: maintenance refuses a live writer (W11)":
+  test "checkpoint is refused while a transaction is open, and works after":
+    ## The committer appends and fsyncs its log BEFORE taking the merge
+    ## gate, so the gate checkpoint holds cannot close the race: without
+    ## the refusal, a checkpoint in the window snapshots pre-merge arrays
+    ## stamped at the log's tip, truncates the frames the commit just made
+    ## durable, and loses an acknowledged commit with no error at open.
+    ## The fence reads the store's writer claim — the ground truth — so it
+    ## catches transactions opened below the ABI (Database.beginTransaction,
+    ## which is what this test does) as well as attached ones.
+    let path = freshPath("w11-fence.glyph")
+    let db = openDatabase(path, GLY_OPEN_CREATE)
+    block:
+      let t = db.beginTransaction()
+      discard t.createNode("A")
+      check db.commitTransaction(t)
+    let tx = db.beginTransaction()
+    discard tx.setNodeProp(1, "x", Value(kind: vkInt, i: 1))
+    expect GlyError:
+      db.checkpoint()
+    expect GlyError:
+      db.vacuum()
+    check db.rollbackTransaction(tx)
+    ## Idle again: both maintenance verbs run, and the checkpoint stamp
+    ## matches the applied position.
+    db.checkpoint(truncate = true)
+    check getFileSize(path & "-wal") == 0
+    close(db)

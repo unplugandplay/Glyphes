@@ -634,3 +634,32 @@ suite "V0 the revision store":
         echo "  diff(", pair[0], ",", pair[1], ") = ", got,
              " but branch-aware oracle says ", want
       check want == got
+suite "review regressions: aborting a sealed commit":
+  test "the sealed tip unwinds; an older sealed commit cannot":
+    ## The commit path's failure window seals the history commit and syncs
+    ## the sidecar *before* the log's COMMIT frame. When the append is then
+    ## refused, the commit to erase is sealed, not open — `histAbort` is a
+    ## no-op by then. Only the tip is legal: an older sealed commit has
+    ## descendants that reference it, and erasing it would orphan them.
+    let rv = initRevisions()
+    let c1 = rv.openCommit("main")
+    rv.noteRevision(c1, 1, @[(key(1), vInt(1))], true)
+    rv.sealCommit(c1)
+    let c2 = rv.openCommit("main")
+    rv.noteRevision(c2, 2, @[(key(1), vInt(2))], true)
+    rv.sealCommit(c2)
+    expect ValueError:
+      rv.abortCommit(c1)          ## not the tip; c2 references it
+    rv.abortCommit(c2)            ## the sealed tip unwinds
+    check rv.commits.len == 1
+    check rv.linear
+    check 2'i64 notin rv.byNode
+    check rv.stateAt(2, c1).live == false
+    check rv.diff(c1, c1).len == 0
+    ## And the log is reusable: the next commit takes the unwound id.
+    let c3 = rv.openCommit("main")
+    check c3 == c2
+    rv.noteRevision(c3, 3, @[(key(1), vInt(3))], true)
+    rv.sealCommit(c3)
+    check rv.linear
+    check rv.diff(c1, c3).mapIt(it.nodeId) == @[3'i64]

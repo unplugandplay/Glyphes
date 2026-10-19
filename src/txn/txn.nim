@@ -970,15 +970,34 @@ proc commit*(tx: WriteTransaction): bool =
   #       by the generation stamp on replay, which is a better failure than
   #       an omission nobody notices.
   let sealedHistory = tx.histSeal()
-  tx.histWriteAndSync(sealedHistory)
-  if tx.wal != nil:
-    var batch = tx.frames
-    batch.add Frame(lsn: tx.nextLsn, txnId: tx.id, op: opNoop,
-                   txnFlags: TxnCommit, payload: "")
-    discard tx.wal.appendFrames(batch)
-    if tx.sync:
-      tx.wal.sync()
-    tx.wal.nextLsn = tx.nextLsn + 1
+  ## The sidecar append below is durable before the log's COMMIT frame, so a
+  ## failure anywhere from here until that frame lands must erase the history
+  ## commit just written — in memory and on disk. Otherwise the sidecar
+  ## holds a commit the graph refused, and one successful retry bumps the
+  ## generation past the frame's stamp, at which point replay accepts the
+  ## phantom as real and every diff spanning it reports rolled-back work.
+  ## `histAbort` cannot do this: sealing cleared `tx.histCommit`, so the
+  ## sealed commit is reachable only through `abortCommit`'s tip case. The
+  ## log prefix the transaction already wrote stays; the ROLLBACK marker
+  ## the caller's error path appends is what tells recovery to discard it.
+  let vhistSyncedBefore =
+    if tx.store.vhistFile != nil: tx.store.vhistFile.synced else: 0
+  try:
+    tx.histWriteAndSync(sealedHistory)
+    if tx.wal != nil:
+      var batch = tx.frames
+      batch.add Frame(lsn: tx.nextLsn, txnId: tx.id, op: opNoop,
+                     txnFlags: TxnCommit, payload: "")
+      discard tx.wal.appendFrames(batch)
+      if tx.sync:
+        tx.wal.sync()
+      tx.wal.nextLsn = tx.nextLsn + 1
+  except CatchableError:
+    if sealedHistory != 0:
+      if tx.store.vhistFile != nil:
+        truncateVhist(tx.store.vhistPath, vhistSyncedBefore)
+      tx.store.history.abortCommit(sealedHistory)
+    raise
 
   # 4. Merge. Past this point the frames are durable, so a crash here is
   #    recoverable rather than lost.

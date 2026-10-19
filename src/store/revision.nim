@@ -296,10 +296,22 @@ proc abortCommit*(rv: Revisions, commit: uint64) =
   ##
   ## Aborts are rare (a failed transaction), so the full cleanup pass is
   ## acceptable; the hot path never pays for it.
-  if commit notin rv.open:
-    raise newException(ValueError,
-      "revision store: commit " & $commit & " is not open; only an open " &
-      "commit can be aborted")
+  ##
+  ## A commit that is not open can still be aborted when it is the sealed
+  ## tip. That case exists for the commit path's failure window: the
+  ## history commit is sealed and the sidecar synced *before* the log's
+  ## COMMIT frame, and a refused append must erase the commit it just
+  ## wrote — in memory as well as on disk. Anything older than the tip has
+  ## descendants that reference it; erasing it would orphan them, so only
+  ## the tip is legal. The single-writer claim makes "the tip"
+  ## unambiguous.
+  let wasOpen = commit in rv.open
+  if not wasOpen:
+    if commit == 0 or commit != rv.commits.len.uint64:
+      raise newException(ValueError,
+        "revision store: commit " & $commit & " is not open and is not the " &
+        "sealed tip; only an open commit, or the most recent sealed " &
+        "commit, can be aborted")
   ## Walk the aborted commit's revisions back out of every node chain.
   ## `noteRevision` appends, so the aborted commit's revisions are at the
   ## tails; filtering the whole chain is simpler than tracking positions and
@@ -319,11 +331,15 @@ proc abortCommit*(rv: Revisions, commit: uint64) =
   ## guard means no commit was opened after it — so truncating restores the
   ## id. The mid-log case (concurrent opens) is guarded against at open, but
   ## blanking rather than dropping keeps the log dense even if it ever fires.
-  if commit == rv.commits.len.uint64:
-    rv.commits.setLen(rv.commits.len - 1)
+  if wasOpen:
+    if commit == rv.commits.len.uint64:
+      rv.commits.setLen(rv.commits.len - 1)
+    else:
+      rv.commits[commit.int - 1] = CommitRecord(id: commit)
+    rv.open.del(commit)
   else:
-    rv.commits[commit.int - 1] = CommitRecord(id: commit)
-  rv.open.del(commit)
+    ## The sealed tip: the guard above made it the last element.
+    rv.commits.setLen(rv.commits.len - 1)
   ## `linear` is judged at open (and re-judged at seal), so aborting the fork
   ## that just set it false must straighten the history again — otherwise a
   ## single rolled-back fork would cost every later read the walk path

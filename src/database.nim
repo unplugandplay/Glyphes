@@ -20,6 +20,7 @@ elif defined(windows):
   import winlean
 import std/os
 import std/posix
+import std/atomics
 
 import std/tables
 import std/strformat
@@ -380,12 +381,27 @@ proc checkpoint*(db: Database, truncate = false, fsync = true) =
   ## other order loses every commit after the truncation point with nothing
   ## to replay them from, which is the one outcome a WAL exists to prevent.
   ##
-  ## The writer gate is taken for the duration: a checkpoint that raced a
-  ## commit could write a snapshot older than the log position it then
-  ## truncates to, and that window is a silent loss of the commits in
-  ## between.
+  ## The writer gate is taken for the duration, and the open-transaction
+  ## refusal above is what the gate alone cannot do: a commit appends and
+  ## fsyncs its log *before* taking the gate at merge, so a checkpoint that
+  ## merely held the gate could still race that window — snapshot the
+  ## pre-merge arrays, truncate frames the concurrent commit had already
+  ## made durable, and lose an acknowledged commit silently.
   if db.wal == nil or db.inMemory:
     return
+  ## W11: refuse while any transaction is open. The committer holds the
+  ## store's writer claim from begin until its last frame, and it appends
+  ## and fsyncs the log *before* taking the merge gate — so the gate this
+  ## function holds does not close the race. A checkpoint that ran in the
+  ## window would snapshot the pre-merge arrays stamped at the log's tip,
+  ## truncate the frames a concurrent commit had just made durable, and the
+  ## fsynced commit would be unrecoverable with no corruption signal at
+  ## open. The claim load is the ground truth: it catches transactions
+  ## opened below the ABI (Database.beginTransaction) as well as attached
+  ## ones. An idle store is the only checkpoint-able store.
+  if db.store.writerClaim.load() != 0'u32:
+    fail(glyErrBusy,
+         "checkpoint: a transaction is open; commit or roll it back first")
   db.store.beginWrite()
   try:
     db.wal.sync()
@@ -396,7 +412,12 @@ proc checkpoint*(db: Database, truncate = false, fsync = true) =
     ## a full pass over the store is already happening.
     for name in db.indices.indexesNeedingRebuild():
       db.indices.rebuild(db.store, name)
-    writeSnapshot(db.store, db.path, db.wal.highestLsn)
+    ## Stamped at the LSN the snapshot's state actually includes, not the
+    ## log's tip: after a rollback the tip names a marker beyond the last
+    ## applied position. The frames between the two replay as no-ops, so
+    ## stamping the tip would be harmless — but the stamp is a claim about
+    ## what the snapshot contains, and it should say exactly that.
+    writeSnapshot(db.store, db.path, db.store.lastLsn)
     writeIndexDefs(db.indices, db.path)
     if fsync:
       ## The rename in writeSnapshot is atomic; the fsync is what makes the
@@ -462,11 +483,17 @@ proc vacuum*(db: Database) =
   ## not write a full snapshot; see `close`).
   if db.wal == nil or db.inMemory:
     return
+  ## Same W11 fence as `checkpoint`: vacuum writes a snapshot, and a
+  ## snapshot taken over a store mid-transaction would make the
+  ## transaction's uncommitted state durable at an LSN below its frames.
+  if db.store.writerClaim.load() != 0'u32:
+    fail(glyErrBusy,
+         "vacuum: a transaction is open; commit or roll it back first")
   db.store.beginWrite()
   try:
     db.wal.sync()
     db.indices.rebuild(db.store)
-    writeSnapshot(db.store, db.path, db.wal.highestLsn)
+    writeSnapshot(db.store, db.path, db.store.lastLsn)
     writeIndexDefs(db.indices, db.path)
   finally:
     db.store.endWrite()

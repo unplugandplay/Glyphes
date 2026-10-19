@@ -298,3 +298,40 @@ suite "V1 the history sidecar (VERSIONING-PLAN V1)":
     let replay = replayVhist(path, 99'u64)
     check replay.frames.len == 0
     check replay.truncated == false
+  test "a refused log append after the history sync leaves no phantom commit":
+    ## The commit path seals the history commit and syncs the sidecar before
+    ## the log's COMMIT frame. When the append is refused — here the log is
+    ## flipped read-only, the same IOError a full disk raises — the commit
+    ## must be erased in memory and on disk. Otherwise the frame survives
+    ## stamped `generation + 1`, one successful retry passes the stamp on
+    ## replay, and the rolled-back work becomes permanent history that every
+    ## diff spanning it reports.
+    let path = freshPath("phantom.glyph")
+    var commitsBefore = 0
+    block:
+      let db = openDatabase(path, GLY_OPEN_CREATE)
+      block:
+        let t = db.beginTransaction()
+        discard t.createNode("A")
+        check db.commitTransaction(t)
+      let syncedBefore = db.store.vhistFile.synced
+      let framesBefore = replayVhist(path, high(uint64)).frames.len
+      commitsBefore = db.store.history.commits.len
+      let tx = db.beginTransaction()
+      discard tx.createNode("B")
+      db.wal.readOnly = true
+      expect IOError:
+        discard db.commitTransaction(tx)
+      db.wal.readOnly = false
+      check db.rollbackTransaction(tx)
+      ## Neither the in-memory history nor the sidecar remembers B:
+      check db.store.history.commits.len == commitsBefore
+      let replay = replayVhist(path, high(uint64))
+      check replay.frames.len == framesBefore
+      check replay.corrupted == false
+      check getFileSize(path & ".vhist") == syncedBefore
+      close(db)
+    ## And a reopen agrees: the phantom did not become real.
+    let db2 = openDatabase(path, 0'i32)
+    check db2.store.history.commits.len == commitsBefore
+    close(db2)
