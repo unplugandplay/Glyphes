@@ -114,6 +114,7 @@ nothing the database did not acknowledge.
 | F0 cross-process lock | **landed** | two writers over one file refused; `soakShared` two-process soak green |
 | F1–F3 the follower | **landed** | SG5 the barrier never lies; SG6 the rebuilt timeline == the writer's; SG7 a crashed writer leaves the follower off by exactly one |
 | S1–S4 the surface | **landed** | C ABI, Ruby `Glyphes::Follower`, `glyphes follow` CLI; the crash guarantee holds across the ABI; no write symbol exists anywhere in the surface |
+| Review (whole product) | **landed** | ~30 findings, 11 confirmed by execution, all fixed with the test whose absence let them land; `-d:glyphesCheck`, `ss2`, `benchVersion`, `crashFollower` wired into the gate |
 
 The follower is reachable from **C, Ruby, and the CLI**. Its surface —
 attach, poll, `head`/`generation`/`lsn`, and the reason when the watermark
@@ -124,11 +125,14 @@ the planned next increment, not yet built.
 
 ### Verification state
 
-Verified **after** the M10 changes, on the full gate (`nimble gate`):
+Verified **after the whole-product adversarial review**, on the full gate
+(`nimble gate`):
 
-- **474 Nim tests, 0 failures** — store, WAL, recovery, transactions,
+- **480 Nim tests, 0 failures** — store, WAL, recovery, transactions,
   Cypher, all three index families, the model layer's statement compiler,
-  version history, and the follower's watermark/timeline gates.
+  version history, and the follower's watermark/timeline gates. The same
+  480 also pass under `-d:glyphesCheck`, which walks the S1/S2/S3/S4/S8
+  invariants over every record each transaction touched.
 - **228 Ruby tests / 769 assertions, 0 failures** — the seam, the model
   layer, import/export, status mapping.
 - `nimble tck` — the committed TCK subset: **132/132 in-contract rows
@@ -136,11 +140,17 @@ Verified **after** the M10 changes, on the full gate (`nimble gate`):
 - `nimble crash` — W1: SIGKILL over a 100-transaction import; every
   recovery matches a same-seed clean run, property values included.
 - `nimble bitflip` — W3 (10⁶ bit-flips) and W2 (truncate at every 4 KB
-  boundary): every outcome a clean open or a named error, never a crash
-  or silent corruption.
+  boundary: 28 clean opens, 27 named errors at 55 boundaries): every
+  outcome a clean open or a named error, never a crash or silent
+  corruption.
+- `nimble crashFollower` — SG7: a writer SIGKILLed mid-commit leaves the
+  follower off by exactly the in-flight commit.
+- `nimble ss2` — SS2: no exported follower symbol can write (63 symbols
+  checked clean).
 - `nimble soak` — T1: 6 readers + 2 writers, no torn read.
-- `nimble benchSort` / `benchIndex` / `benchVector` / `benchImport` — E2/E3,
-  I5, I-vec (recall + determinism), R8 gates green.
+- `nimble benchSort` / `benchIndex` / `benchVector` / `benchImport` /
+  `benchVersion` — E2/E3, I5, I-vec (recall + determinism), R8, G2
+  (`diff` is O(changed), not O(graph)) gates green.
 - `nimble asan` — both suites under AddressSanitizer.
 
 Two of the timing gates (M1 traversal, C9 query rate) are absolute
@@ -152,6 +162,38 @@ load, which is how the two were told apart. I5 gates on a ratio under
 load for exactly this reason, and the other budgets are either
 deterministic (recall, GC drift) or ratio-shaped. Treat a timing red as a
 question about the machine first: re-run it quiet.
+
+### The whole-product review
+
+The last arc was not a milestone. It was four reviewers reading the
+subsystems (versioning, follower, storage/WAL/transactions, Cypher)
+adversarially, and then the finding being *executed* before anyone believed
+it: ~30 findings, 11 of them confirmed by a run, every confirmed one fixed
+with the regression test whose absence had let it land, and every unfixed
+one written down instead.
+
+Eleven of them were defects the gate could not see. A rollback that did not
+undo property overwrites (dirty reads included). An index seek that
+changed an answer — `WHERE b.age` returned 0 rows where the scan returned
+1. `UNWIND` dropping bindings, `WHERE true RETURN 1` segfaulting, `MERGE`
+matching *any* label on `[:A|B]`, `IN` answering its null cases backwards,
+int64 above 2⁵³ losing precision through float64, `DISTINCT` collapsing
+vectors, float `%` flooring. A follower that applied three commits for a
+two-commit writer, and a `goodBytes` bug whose second face truncated a
+sidecar to 0 bytes. A backup that left the history behind. A phantom commit
+that survived a refused append, a checkpoint that raced the writer, a
+post-commit second commit frame, seven discarded `fdatasync`/`ftruncate`
+results, a crafted frame that reached a `Defect`, a handle leak, a
+maintenance fence, a sealed-tip abort.
+
+The finding that mattered most was not a bug but a *pattern*: every gate
+that would have caught one of these was too kind. T3 rolled back only new
+keys; the index differential only ever sought on the head variable; the
+vhist corruption test flipped only the last frame; the M7 `Busy` assertion
+was passing *because* of the wedge beside it. The oracles were right and
+their blind spots were the defects — so each fix ships with the test that
+closes the hole, and several were written after the defect, pointed at the
+input the defect actually needed.
 
 ### What a decade of milestones taught
 
@@ -167,6 +209,12 @@ first* or by *sweeping*, never by reading:
   not a `CatchableError` and took the host process down. The WAL.md gate
   table had recorded W3 as "the sweep is not implemented" for months;
   running it is what found them.
+- The adversarial review added a third: **a claim is not a measurement.**
+  Of ~30 findings, 11 survived being executed, and some of those 11 had
+  been "green" the whole time — an index differential that only ever
+  sought on the head variable, a `Busy` assertion that passed because of
+  the wedge next to it. Executing the claim is what separated the defect
+  from the plausible sentence about a defect.
 
 The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 
@@ -189,6 +237,24 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
   the log, so a follower cannot audit a relationship change. That is a
   format change (`vhist.nim`), not a surface one, and is out of scope for
   the surface plan.
+- **The `.vhist` format is nearly, but not fully, self-defending.** It now
+  carries the commit's branch, refuses counts it cannot hold, and refuses
+  a frame whose generation repeats — so a copied tail, a spliced frame or a
+  duplicated commit is caught. What it does *not* carry is a
+  **database-identity word**, so a sidecar copied whole from another
+  database is still adopted silently. The identity belongs in the snapshot
+  header, which makes it a storage-format change wanting its own
+  bit-flip/crash evidence rather than an edit. Separately, every replay
+  reads the whole sidecar into one string, so a follower resuming at a
+  large offset pays for the bytes before it; streaming the scan is a
+  hot-path change with no user-visible defect behind it. Both are written
+  up in [`ENHANCEMENTS.md`](ENHANCEMENTS.md) §1.
+- **A record holds at most 32 767 properties.** `prop_count` is an `int16`
+  in both record types, so the 32 768th property is refused by name rather
+  than wrapping the count negative (release builds read garbage lengths;
+  range-checked builds died with a `RangeDefect` on a legal statement).
+  The txn op budget is 10M, two orders of magnitude above the wrap, so no
+  ordinary query reaches it — a real ceiling, and a loud one.
 - **R12** (8-process worker simulation) and **W7** (fsynced/NORMAL
   commit throughput) are named in the gate tables with no harness yet.
 - Fusing a traversal into a retrieval statement (the `MATCH` after a
@@ -200,8 +266,8 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 
 ```
 nimble build        the shared library (release, ORC, threaded)
-nimble test         474 Nim tests (fast)
-nimble testGate     474 Nim tests at full churn
+nimble test         480 Nim tests (fast)
+nimble testGate     480 Nim tests at full churn
 nimble fixture      rebuild tests/fixtures/social.glyph
 nimble gemtest      228 Ruby runs / 769 assertions
 nimble crash        W1 crash gate
@@ -254,6 +320,7 @@ it was gated in. The gate is the budget, not a reading.
 | V0–V1 | Version history: revision per transaction, durable `.vhist`, O(changed) `diff` | **landed** |
 | F0–F3 | Shared mode: cross-process lock, watermark, the follower and its gates | **landed** |
 | S1–S4 | The follower's surface: C ABI, Ruby binding, CLI | **landed** |
+| Review | Whole-product adversarial review: every confirmed defect fixed with its regression test | **landed** |
 
 **[`limitations.md`](limitations.md)** is the honest list: what glyphes is
 bad at, with measurements, published *before* the release rather than after.
@@ -360,6 +427,13 @@ is *not* claimed:
 
 - **R12 and W7 have no harness.** The gate tables name them; nothing
   runs them. They are the two honest gaps in the gate inventory.
+- **The gate does not cover the 5-day soak**, and the review added a
+  measured reason to want it: a 100-second instrumented run shows the
+  process RSS climbing at ~3.8 KiB/s while the ORC figure is flat at
+  ~0.0014 KiB/s. Flat heap with rising RSS is what "a leak in the thing
+  ORC does not own" looks like, and five days is the only thing that will
+  settle it. It is a separate arc because it cannot be watched inside one
+  session, and its verdict today is RED-by-suspicion, not green.
 - **R6's letter is unmet.** The model suite is 58 tests where the gate
   says "60 unit + 12 integration" — close in spirit, short of the letter,
   recorded as such in `docs/ROADMAP.md`.
@@ -387,6 +461,17 @@ lists with a size written beside them and never added up. And **put the
 number in a fixture or a sweep** — 320 MB of padding was invisible to 91
 passing tests, and the CRC holes were invisible to every unit test,
 because none of them flipped a bit the checks were not watching.
+
+The whole-product review added the third, and it is the one that survived
+contact with a defect: **execute the claim.** A reviewer's sentence about a
+defect is a hypothesis, and ~19 of 30 were. Some of the 11 that were real
+had been green for months, because the test that should have covered them
+was pointed at a slightly different input. So: the claim is not the defect,
+the run is. And the follow-on: **when a test finally catches a defect,
+check what input it was aimed at** — the first version of the
+`propCount`-wrap test set 32 768 keys and died in the field's own range
+check, which would have passed for "the wrap is caught" while catching a
+different bug than the one being fixed.
 
 ## License
 

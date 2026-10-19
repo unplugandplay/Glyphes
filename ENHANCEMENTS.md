@@ -156,7 +156,7 @@ detection in the planner and shows up as bad plans months later.
 transaction touched, at the end of the merge, raising a catchable
 `StoreInvariantError` that the ABI maps to a status rather than letting a
 Defect unwind into the host. The collection and the walk are both behind
-the flag, the flag build runs the whole suite with the pass live (474/0,
+the flag, the flag build runs the whole suite with the pass live (480/0,
 no false fire), and the test that proves it fires corrupts an edge's
 source by hand first. The historical notes below are kept because the
 "why" is why the write-path half exists at all.

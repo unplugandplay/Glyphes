@@ -2,11 +2,13 @@
 
 > **Status:** **M0–M11 landed**, plus two arcs on top: durable version
 > history (V0–V1 — the `.vhist` sidecar and `diff`) and a cross-process
-> follower (F0–F3, S1–S4 — C ABI, Ruby, CLI). Phase A (the whole thesis —
-> one file, crash-safe) is green end to end, and M4 is the first milestone
-> that answers a question rather than only storing an answer.
+> follower (F0–F3, S1–S4 — C ABI, Ruby, CLI), plus a whole-product
+> adversarial review whose 11 execution-confirmed defects are all fixed and
+> gated. Phase A (the whole thesis — one file, crash-safe) is green end to
+> end, and M4 is the first milestone that answers a question rather than
+> only storing an answer.
 >
-> `nimble gate` runs **474 Nim tests, 228 Ruby tests** and the TCK subset,
+> `nimble gate` runs **480 Nim tests, 228 Ruby tests** and the TCK subset,
 > all passing, both halves clean under AddressSanitizer, TSan clean over the
 > soak, and every budget green:
 >

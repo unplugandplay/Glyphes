@@ -247,6 +247,15 @@ Named honestly rather than left to be discovered:
   Ruby method and no CLI** that asks a question about history — which is the
   part a user would actually reach for. The writer's own surface cannot read
   its history either; only a second process observing it can.
+- **A record holds at most 32 767 properties.** `prop_count` is an `int16`
+  in both record types. The 32 768th property is refused by name
+  (`glyphes: a record carries at most 32767 properties`) rather than
+  wrapping the count negative, which is what it used to do: release builds
+  read garbage lengths from the count and range-checked builds raised a
+  `RangeDefect` on a legal statement. The per-transaction op budget is 10M,
+  two orders of magnitude above the wrap, so no ordinary query reaches the
+  ceiling — but a bulk loader that stamps one wide record per node will, and
+  the right fix is a wider count field rather than a louder error.
 ## 8. Version history is durable, and it is not free
 
 Added in the same release as everything above, and every cost below is real
@@ -335,6 +344,42 @@ Both were found by the benchmark asserting that two engines returned the same
 rows — the assertion that caught this benchmark's *own* first draft, which
 compared internal ids against property ids. The full account is in
 `DEVLOG.md`, "the literal gate".
+
+## 10. What the whole-product review changed about the engine
+
+A later pass read all four subsystems adversarially — versioning, follower,
+storage/WAL/transactions, Cypher — and then *ran* each finding before
+believing it. Roughly thirty came back; eleven were confirmed by execution,
+and every confirmed one is fixed and gated. Three of them belong in this file
+rather than only in `DEVLOG.md`, because a user can hit them:
+
+| defect | effect, as a user would describe it |
+|---|---|
+| a rolled-back transaction kept its property overwrites | `SET x = 9` then `rollback()` still read 9 in the committed state — and a concurrent reader could see the half-written slot |
+| a seek could lose every row the head variable did not match | with `:Person(age)` indexed, `WHERE b.age = 41` returned **0 rows** where the same query unindexed returned 1 |
+| `WHERE true RETURN 1` | segfaulted the host process |
+
+The rest were the same species at lower altitudes: seven `fdatasync`/
+`ftruncate` results discarded, a durable phantom commit surviving a refused
+append, a checkpoint that could lose an acknowledged commit, a handle the
+registry never released, a follower applying three commits for a two-commit
+writer, a `backup` that left the history behind.
+
+**What the review changed about the gates, which is the lasting part.** Every
+gate that would have caught one of these was present, running, and green —
+pointed at a slightly different input. The rollback test only set *new*
+keys; the index differential only ever sought on the head variable; the
+sidecar corruption test flipped only the last frame; a `Busy` assertion was
+passing *because* of a deadlock wedge beside it. So the rule this project
+ended on is about oracles, not about bugs:
+
+> A passing test says the thing it was aimed at is fine. It says nothing
+> about anything else — and an oracle's *inputs* decide its power, not its
+> existence.
+
+Each fix here ships with the test that closes the hole rather than the test
+that was extended, and the counts, the arithmetic and the claims behind them
+are in `DEVLOG.md`, under the review's own sections.
 
 *Measurements in this file were taken on the development machine. They are
 reproducible with `make bench`, and they will differ on yours — the ratios are

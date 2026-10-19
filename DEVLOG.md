@@ -6,26 +6,33 @@ contract), [`docs/M0-NOTES.md`](docs/M0-NOTES.md) (the Nim→FFI seam in
 detail), and [`ENHANCEMENTS.md`](ENHANCEMENTS.md) (what comes next).
 Everything here is reproducible from the working tree + `nimble gate`.
 
-**Where it is now:** **M0–M4 landed.** `nimble gate` = 217 Nim tests + 64
-Ruby tests + the TCK subset + four benchmark/stress gates, 0 failures;
-`nimble asan` runs both suites under AddressSanitizer clean and TSan is
-clean over the soak. The store holds a graph (dense ids, threaded adjacency
-both ways, property slots over a length-prefixed arena, O(1) label
-removal), the WAL survives `kill -9`, transactions commit or roll back from
-Ruby, and `db.query` answers a Cypher read:
+**Where it is now:** **M0–M11, V0–V1 (version history), F0–F3 (shared
+mode) and S1–S4 (the follower's surface) are landed, and so is a
+whole-product adversarial review** — ~30 findings, 11 of them confirmed by
+executing the claim rather than by reading it, every confirmed one fixed
+together with the regression test whose absence had let it land.
+`nimble gate` = 480 Nim tests + 228 Ruby runs + the TCK subset + the
+benchmark/stress gates, 0 failures; `nimble asan` runs both suites under
+AddressSanitizer clean.
 
 ```
-M1 store bench    create 1360 <= 8000   traversal 167 <= 400   heap 619 <= 680 MB
-C1 TCK subset     71/71 in-contract (gate 95%), 18/18 refusals name their construct
-C9 query bench    96 977 queries/s (gate 50 000), 2-hop 0.066 ms (gate 3 ms)
-W1 / T1           crash recovery and reader/writer soak both green
+480 Nim tests (480 again under -d:glyphesCheck)   228 Ruby runs / 769 assertions
+C1 TCK subset     132/132 in-contract, 17/17 out-of-contract refusals name their construct
+W1 / W2 / W3      crash recovery byte-identical to an oracle; 28 clean / 27 named at 55 boundaries; 10^6 flips, 0 silent
+SG7 / SS2         a SIGKILLed writer leaves the follower off by exactly one; no follower symbol can write
+G2                diff is O(nodes changed): 0.73x on nodes, 8.51x on depth for a 50 000x history
 ```
 
-Nothing survives a crash yet, and nothing can write a graph from Ruby yet.
-Both are M2 and M4.
+What is *not* claimed is in [`ENHANCEMENTS.md`](ENHANCEMENTS.md) and in the
+README's "What is not done": the 5-day soak has not been run (a 100-second
+instrumented run shows ORC flat at ~0.0014 KiB/s and RSS climbing at
+~3.8 KiB/s, which is a leak in something ORC does not own and is the
+strongest reason to run it), the `.vhist` frames carry no database-identity
+word, and R12/W7 still have no harness.
 
 | § | Milestone | The one thing it taught |
 |---|---|---|
+| review (2) | the whole product, read adversarially | a claim about a defect is a hypothesis: ~30 findings, 11 confirmed by execution, and the gates that should have caught them were pointed at a slightly different input |
 | review | specs before code | four of my own claims were wrong — a memory gate below its own computed cost, a struct 8 bytes smaller than stated, two colliding pin namespaces |
 | M0 | ABI spine | `{.dynlib.}` is mandatory and `--app:lib` never calls `NimMain`; both fail silently, one as "symbol not found" and one as a segfault in the host process |
 | M0 | handle registry | under ORC a raw `pointer` in a table is use-after-free on the very next call — type the API `ref T` so the refcount cannot be forgotten |
@@ -3191,6 +3198,9 @@ documents' status lines predated the arcs they described.
 G2 GREEN (1.53x nodes, 1.09x depth)   W1/W2/W3 GREEN   SS1–SS5 · SG5–SG7 GREEN
 ```
 
+(The count is 480 today; this section is the state at the review's
+main pass, and the two commits after it added six tests.)
+
 
 ---
 
@@ -3304,3 +3314,54 @@ G2 GREEN   W1/W2/W3 GREEN (28 clean / 27 named at 55 boundaries)   SG7 GREEN
 reason each is not an edit: the database-identity word wants the snapshot
 header, and streaming the replay is a hot-path change with no user-visible
 defect behind it.
+
+### The three lessons, taken as three
+
+**An oracle's inputs decide its power, not its existence.** Every gate that
+would have caught a defect in this review was in the suite, running, and
+green — pointed at a slightly different input. T3 rolled back only *new*
+keys, so a rollback that failed to undo an *overwrite* passed. The index
+differential sought only on the head variable, so a seek that lost every
+row the head did not match passed. The vhist corruption test flipped the
+last frame, so a corrupt first frame (which truncated the whole sidecar to
+zero) passed. The first draft of this session's `propCount` test set 32 768
+keys and died in the field's own range check — which would have read as
+"the wrap is caught" while catching a different bug. When a test finally
+fires, the next question is what it was aimed at.
+
+**Nothing enters a fix report un-run.** Of ~30 findings, 11 were confirmed
+by execution; the executed ones were mostly silent wrong answers in shapes
+the oracle habit had never been pointed at. Two fixes needed probes before
+they were believed (the `GC_unref` crash, the checkpoint fence's race), and
+one needed a benchmark to be honest about *not* claiming a number it could
+not measure on a box at load 13–28.
+
+**The name of a thing outlives its shape; the shape outlives the name.**
+`prop_count` was `int16` because the arena was written before anyone asked
+what a property count would reach. `payloadLen` was `u32` and the WAL's
+comparison was `uint32` because 4 GB was far away. The `.vhist` frame had no
+identity word because the format was new. Every one of these is a field
+with no stated bound — and the fix for all of them is the same sentence:
+**state the bound at the field, and refuse at the boundary.**
+
+### Where the arc closed
+
+Thirteen commits, `dc208c1`…`59e3267`, all on `main`, all with
+`Assisted-by: GLM 5.3` and no history rewritten. The tree ships with the
+gate green and the open list written down rather than implied:
+
+- **Run, separately, and outside one session:** the five-day soak. The
+  100-second instrumented run reads ORC flat at ~0.0014 KiB/s and RSS
+  climbing at ~3.8 KiB/s — a flat heap under a rising RSS is a leak in
+  something ORC does not own, and only five days settles it. Verdict
+  today: RED by suspicion, not green.
+- **Needs the snapshot header, not an edit:** the `.vhist` database-identity
+  word (`ENHANCEMENTS.md` §1).
+- **A hot-path change with no defect behind it:** streaming the sidecar
+  scan, so a follower resuming at a large offset stops paying for the bytes
+  before it.
+- **Still no harness:** R12 (8-process worker simulation), W7 (fsynced/NORMAL
+  commit throughput).
+- **Next increments, per plan:** the V3 read surface (`node_at`, Ruby
+  `diff`), then the follower's structured timeline reads across the ABI
+  (`docs/FOLLOWER-SURFACE-PLAN.md`).
