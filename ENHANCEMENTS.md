@@ -8,12 +8,45 @@
 > by being done or killed. Nothing enters the build because it was
 > convenient.
 
-**Status:** M0–M3 landed. M2 (crash-safe commit) is gated — W1 green,
-W4–W6 green, W2/W3 unit-tested pending their sweeps. M3 landed at its ABI:
-the engine is behind the exported `glyphes_tx_*` surface and behind
-`db.transaction`, so from Ruby the durability and the concurrency contract
-are finally reachable — but not the mutation, which is Cypher (M4/M5) under
-ABI.md pin B6. #6 was rejected at M1 by measurement rather than argument.
+**Status:** M0–M11 landed, plus two arcs on top: durable version history
+(V0–V1) and a cross-process follower (F0–F3, S1–S4). The whole product
+has been reviewed adversarially and the findings are fixed — the ledger,
+with what each cost, is the last section of [`DEVLOG.md`](DEVLOG.md). The
+priority list below is what the review left open, in order.
+
+**Blocking — these gate the next milestone**
+
+### 1. The `.vhist` format pass, while the format is young
+
+**Why.** Four findings land on one young file: `branch` is dropped by the
+encoder (V2 branches will force a breaking change), frames carry no
+database identity and no generation-contiguity check (a copied sidecar is
+silently adopted; two frames can share a generation — the exact signature
+of the phantom commit this session closed), and every replay reads the
+whole sidecar into one string. All four are cheaper now than after V2 or
+the ABI structured reads freeze the format.
+
+**Cost.** ~1 day, one commit, with G4-style crash and bit-flip evidence
+after it.
+
+### 2. The minor bounds items
+
+`propCount: int16` wraps at 32 768 properties on one record; the WAL
+decoder's `uint32` payload-length compare wraps above 4 GiB; commit-time
+`revisionAt` scans each node's chain from the head (O(history) per hot
+node, on the write path). Each is a refusal at the boundary rather than a
+behaviour change. **Cost:** ~3 hours, three guards.
+
+---
+
+## Correctness — the ones that quietly corrupt
+
+### 3. ~~Invariant checking in the build~~ — **LANDED (M11 review)**
+
+`-d:glyphesCheck` now exists: `store.checkTouched` walks the S1/S2/S3/S4/S8
+rules over every record a transaction touched, at the end of the merge,
+and the test that proves it fires corrupts an edge by hand first. The
+release build compiles the whole pass out.
 
 The original failure mode for this project was scope growth without a
 record — the thing that made the first attempt too big. `ENHANCEMENTS.md`
@@ -96,11 +129,21 @@ properties — and the first real workload that needs `(:A:B)` on one node
 is the evidence worth acting on. If it comes, pay the 8 bytes; it is not
 a design crisis, it is a migration.
 
-### 4. Invariant checking in the build — half done
+### 4. ~~Invariant checking in the build — half done~~ — **LANDED (M11 review)**
 
 **Why.** `STORAGE.md` §8 lists S1–S10. S4 (degree bookkeeping exact) is
 the one that fails *silently* — a drift in `out_count` corrupts hub
 detection in the planner and shows up as bad plans months later.
+
+**Landed.** `-d:glyphesCheck` is no longer a flag with nothing behind it:
+`store.checkTouched` walks the S1/S2/S3/S4/S8 rules over every record a
+transaction touched, at the end of the merge, raising a catchable
+`StoreInvariantError` that the ABI maps to a status rather than letting a
+Defect unwind into the host. The collection and the walk are both behind
+the flag, the flag build runs the whole suite with the pass live (474/0,
+no false fire), and the test that proves it fires corrupts an edge's
+source by hand first. The historical notes below are kept because the
+"why" is why the write-path half exists at all.
 
 **Done at M1.** `check()` reports all ten with a code and a count, and
 the degree-recount gate compares 10⁶ churned records against a

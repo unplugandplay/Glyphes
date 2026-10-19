@@ -187,7 +187,7 @@ benchmark is what makes that visible rather than anecdotal.
 **On a contended box, a timing red is a question about the machine
 first.** The M1 and C9 budgets are absolute numbers with no load-aware
 suspension, and load moves them by multiples: measured the same morning,
-C9 read 96 977 queries/s on a quiet box and 22 000–27 000/s with the load
+C9 read 89 227 queries/s on a quiet box and 21 500–27 000/s with the load
 average at 13–28 — while the *previous* commit measured no better on the
 same load. That is also how a real regression and a busy machine get
 told apart: build both, run both, compare under one load.

@@ -146,7 +146,7 @@ Verified **after** the M10 changes, on the full gate (`nimble gate`):
 Two of the timing gates (M1 traversal, C9 query rate) are absolute
 budgets with no load-aware suspension, and on a contended box they fail
 by *multiples*, not percentages: measured the same morning, C9 read
-96 977 queries/s quiet and 22 000–27 000/s with the machine's load average
+89 227 queries/s quiet and 21 500–27 000/s with the machine's load average
 at 13–28 — and the *pre-review* commit measured no better on that same
 load, which is how the two were told apart. I5 gates on a ratio under
 load for exactly this reason, and the other budgets are either

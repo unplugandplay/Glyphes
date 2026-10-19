@@ -3108,5 +3108,86 @@ next increment. An external follower today reports how far it has seen,
 not what changed — counters, not content.
 
 ```
-447 Nim tests   228 Ruby runs / 769 assertions   C1 132/132 + 17/17 refusals
+
+---
+
+## Review — the whole product, read adversarially and then measured
+
+Four reviewers walked the four subsystems (versioning, follower, storage/
+WAL/txn, Cypher) with the instruction to find defects and prove them by
+line, and every claim came back a measurement or a citation rather than a
+hunch. The rule that survived the whole pass: **nothing enters a fix
+report un-run.** Of roughly thirty findings, eleven were confirmed by
+execution, and the executed ones were mostly silent wrong answers in
+shapes the oracle habit had never been pointed at.
+
+What the review found, by the order it bit:
+
+**The transaction was the worst of it.** A rolled-back transaction kept
+its property overwrites: `SET x = 9` + `rollback()` left `x` reading 9
+in the committed state, because the write went through the record's own
+arena block and rollback drops only the deltas. The T3 gate never saw it
+because it only ever set *new* keys. The staging map the read path
+already consulted (`nodeProps`/`edgeProps`) was the fix's home; what was
+missing was that the views in it addressed the shared block. Nine
+commits' worth of engine work followed, and the dirty-read half of the
+same defect went with it — a reader could decode half-written slots
+because the transaction rewrote the bytes underneath it.
+
+**The indexes changed answers.** With `:Person(age)` indexed,
+`WHERE b.age = 41` sought `a.age`'s nodes, bound them to `a`, and lost
+every row where only `b` matched: 0 rows indexed against 1 unindexed. The
+differential test that exists to prove indexes change speed and never
+answers only ever sought on the head variable. The lesson is the
+project's own, learned twice now: an oracle's *inputs* decide its power.
+
+**Cypher had seven silent wrong answers in one sitting**: `UNWIND` dropped
+every input binding, a `WITH … LIMIT` truncated after the whole query had
+run, float `%` floored where Cypher says fmod, `IN` had both null cases
+backwards, integers compared through float64 above 2⁵³, `DISTINCT`
+collapsed vectors by length, `MERGE` matched a relationship type the
+pattern never named, and `WHERE true RETURN 1` **segfaulted the host**.
+
+**The failure surfaces lied, in the same way.** Seven `fdatasync`/
+`ftruncate` results were discarded; a crafted CRC-valid frame could
+reach replay's unchecked indexing and raise Defects past the ABI's
+guarded boundary; a failed WAL append after the history sync left a
+*durable phantom commit* the graph refused; checkpoint could race a
+commit's durable-but-unmerged window and lose an acknowledged commit;
+the handle registry never `GC_unref`'d. Two of the fixes needed probes
+before they were believed: the naive `GC_unref` crashes (its dynamic
+dispatch reads a type-info word the objects do not carry — a 30-line
+probe said so before the suite did), and the checkpoint fence reads the
+store's writer *claim*, not the ABI's transaction slot, because the claim
+is what actually serialises.
+
+**The follower had one bug with two faces.** `goodBytes` was assigned
+only inside the parse loop, so "nothing new" answered an offset nothing
+had validated: a follower's next poll replayed the whole file into its own
+timeline (3 commits for a 2-commit writer), and an open that hit a bad
+first frame truncated the sidecar to zero (322 bytes → 0). One
+initialisation fixed both, and the second one is why PRD G4's "refuse
+rather than guess" needed the corruption/torn-tail distinction spelled
+out.
+
+And the pattern under all of it: **every gate that would have caught one
+of these was too kind.** T3 rolled back new keys only. The index
+differential sought on the head only. The vhist corruption test flipped
+the last frame only. The follower's empty-commit test never refreshed in
+the no-frame window. The M7 Ruby Busy assertion was passing *because* of
+the wedge it sat next to. Oracles are the project's best instrument and
+their blind spots are the defects.
+
+The last commit made the verification story true, which the review found
+it was not: `-d:glyphesCheck` named a pass that did not exist (it is now
+`store.checkTouched`, proven to fire), G2/SG7/SS2 ran nowhere but the
+docs (they are gate members; SS2 is new, and it was proven with teeth
+against a library exporting the forbidden symbol), the committed TCK
+report carried a timing row that dirtied the tree every run, and four
+documents' status lines predated the arcs they described.
+
 ```
+474 Nim tests   228 Ruby runs / 769 assertions   C1 132/132 + 17/17 refusals
+G2 GREEN (1.53x nodes, 1.09x depth)   W1/W2/W3 GREEN   SS1–SS5 · SG5–SG7 GREEN
+```
+
