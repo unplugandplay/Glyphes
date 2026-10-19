@@ -414,3 +414,95 @@ suite "review regressions: a finished transaction has exactly one ending":
       discard tx.createNode("P")
     let tx2 = begin(s, nil, 2'u32, doSync = false)
     check tx2.commit()
+
+suite "review regressions: a rolled-back property write leaves no trace":
+  test "rollback undoes an overwrite of an existing inline property":
+    ## The executed corruption: `setPropCommon` took the committed record's
+    ## own slot block and `arena.setProp` rewrote the used slots in place, so
+    ## rollback — which drops only the deltas — left the uncommitted value in
+    ## the committed state. Staging routes the write through a private copy.
+    let s = newStore()
+    let id = s.createNode("P")
+    discard s.setNodeProp(id, "x", Value(kind: vkInt, i: 1))
+    let tx = begin(s, nil, 1'u32, doSync = false)
+    discard tx.setNodeProp(id, "x", Value(kind: vkInt, i: 9))
+    check tx.rollback()
+    var v: Value
+    check s.getNodeProp(id, "x", v)
+    check v.i == 1
+
+  test "rollback undoes an overwrite of an existing overflow property":
+    ## The blob path had the same in-place rewrite after `putBlob` — the
+    ## arena garbage from the uncommitted blob is the documented S9 trade,
+    ## but the slot rewrite is not.
+    let s = newStore()
+    let id = s.createNode("P")
+    discard s.setNodeProp(id, "blob", Value(kind: vkString, s: "committed"))
+    let tx = begin(s, nil, 1'u32, doSync = false)
+    discard tx.setNodeProp(id, "blob", Value(kind: vkString, s: "uncommitted"))
+    check tx.rollback()
+    var v: Value
+    check s.getNodeProp(id, "blob", v)
+    check v.s == "committed"
+
+  test "rollback undoes a REMOVE of a middle key":
+    ## `removeProp` compacts the array in place. Removing the *first* of two
+    ## keys rewrote the committed first slot with the second key's bytes; the
+    ## last-key remove only looked safe because the tail survived the shift.
+    let s = newStore()
+    let id = s.createNode("P")
+    discard s.setNodeProp(id, "a", Value(kind: vkInt, i: 1))
+    discard s.setNodeProp(id, "b", Value(kind: vkInt, i: 2))
+    let tx = begin(s, nil, 1'u32, doSync = false)
+    check tx.removeNodeProp(id, "a")
+    check tx.rollback()
+    var v: Value
+    check s.getNodeProp(id, "a", v)
+    check v.i == 1
+    check s.getNodeProp(id, "b", v)
+    check v.i == 2
+
+  test "rollback undoes an edge property overwrite":
+    let s = newStore()
+    let a = s.createNode("P")
+    let b = s.createNode("P")
+    let e = s.createEdge(a, b, "KNOWS")
+    discard s.setEdgeProp(e, "w", Value(kind: vkInt, i: 1))
+    let tx = begin(s, nil, 1'u32, doSync = false)
+    discard tx.setEdgeProp(e, "w", Value(kind: vkInt, i: 2))
+    check tx.rollback()
+    var v: Value
+    check s.getEdgeProp(e, "w", v)
+    check v.i == 1
+
+  test "committed bytes are untouched while the transaction is open":
+    ## The dirty-read half of the same defect: a reader outside the
+    ## transaction resolves the record's committed view, which the old code
+    ## rewrote underneath it.
+    let s = newStore()
+    let id = s.createNode("P")
+    discard s.setNodeProp(id, "x", Value(kind: vkInt, i: 1))
+    let tx = begin(s, nil, 1'u32, doSync = false)
+    discard tx.setNodeProp(id, "x", Value(kind: vkInt, i: 9))
+    var v: Value
+    check s.getNodeProp(id, "x", v)
+    check v.i == 1              ## the committed value, not the staged one
+    check tx.commit()
+    check s.getNodeProp(id, "x", v)
+    check v.i == 9              ## the merge published the staged block
+
+  test "commit publishes staged values across every shape":
+    ## Inline replace, blob replace, and a new key on a staged record all
+    ## land through the same staged view.
+    let s = newStore()
+    let id = s.createNode("P")
+    discard s.setNodeProp(id, "x", Value(kind: vkInt, i: 1))
+    let tx = begin(s, nil, 1'u32, doSync = false)
+    discard tx.setNodeProp(id, "x", Value(kind: vkInt, i: 9))
+    discard tx.setNodeProp(id, "y", Value(kind: vkString, s: "new"))
+    check tx.commit()
+    var v: Value
+    check s.getNodeProp(id, "x", v)
+    check v.i == 9
+    check s.getNodeProp(id, "y", v)
+    check v.s == "new"

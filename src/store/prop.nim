@@ -495,6 +495,24 @@ proc writeSlots(a: var Arena, pv: PropView, slots: openArray[PropSlot],
     let off = slotOffset(pv, start + int32(i))
     copyMem(a.ptrAt(off, sizeof(PropSlot)), unsafeAddr slot, sizeof(PropSlot))
 
+proc copySlots*(a: var Arena, pv: PropView): PropView {.gcsafe.} =
+  ## A private copy of the slot array `pv` addresses: same count and
+  ## capacity, new block. A transaction stages a record's properties through
+  ## the copy so its writes never touch the array committed readers are
+  ## decoding — rollback then drops the delta and the base block is
+  ## untouched (TXN.md §3's argument, which an in-place rewrite silently
+  ## broke), and no reader can resolve the new block until the commit merge
+  ## installs its view. The old block is arena garbage, the documented S9
+  ## trade.
+  result = pv
+  if pv.slotsOff <= 0 or pv.count <= 0:
+    return
+  let off = a.alloc(pv.capacity * int32(sizeof(PropSlot)))
+  if off <= 0:
+    raise newException(ValueError, "glyphes: arena exhausted staging property slots")
+  result.slotsOff = off
+  writeSlots(a, result, a.readSlots(pv))
+
 proc decodeInlineValue*(slot: PropSlot): Value {.gcsafe.} =
   ## Replay's entry point for an inline value: the log carries the raw
   ## 8-byte word, and this turns it back into a Value. Public because

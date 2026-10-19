@@ -212,10 +212,16 @@ proc readNodeProp*(ctx: QueryCtx, id: int64, key: string, v: var Value): bool =
 
 proc readEdgePropFrom*(ctx: QueryCtx, rec: EdgeRec, key: string,
                        v: var Value): bool =
-  ## The edge-side twin of `readNodePropFrom`.
+  ## The edge-side twin of `readNodePropFrom`. The staged-view consult is
+  ## not optional: without it, a property this transaction wrote would read
+  ## back as the committed value — the old "write through the shared block"
+  ## accidentally made the same-txn read work, and staging removes that
+  ## accident along with the corruption.
   let code = ctx.store.propKeys.lookup(key)
   if code == 0:
     return false
+  if ctx.writer != nil and ctx.writer.edgeProps.hasKey(rec.id):
+    return ctx.store.arena.getProp(ctx.writer.edgeProps[rec.id], code, v)
   ctx.store.arena.getProp(rec.propView, code, v)
 
 proc readEdgeProp*(ctx: QueryCtx, id: int64, key: string, v: var Value): bool =

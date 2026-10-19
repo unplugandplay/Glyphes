@@ -688,6 +688,32 @@ proc noteSeekKey(tx: WriteTransaction, nodeId: int64, prop: string, v: Value) =
   let h = keyHash(v)
   tx.deltaSeekIdx.mgetOrPut((rec.label, prop, h), @[]).add((k, nodeId))
 
+proc stagedNodeView(tx: WriteTransaction, id: int64): PropView =
+  ## The view this transaction's property writes for `id` go through: a
+  ## previously staged view if there is one, otherwise a private copy
+  ## (`copySlots`) of the record's current array. The copy is what makes
+  ## rollback free and dirty reads impossible: an existing-key set or a
+  ## remove rewrites the *used* slots of whatever block the view addresses,
+  ## and the address used to be the record's own block — the committed bytes
+  ## a concurrent reader decodes, and bytes rollback could not restore.
+  ## Costs one arena allocation per record per transaction; a record the
+  ## transaction never writes to pays nothing.
+  if tx.nodeProps.hasKey(id):
+    return tx.nodeProps[id]
+  result = tx.peekNode(id).propView
+  if result.slotsOff > 0 and result.count > 0:
+    result = tx.store.arena.copySlots(result)
+  tx.nodeProps[id] = result
+
+proc stagedEdgeView(tx: WriteTransaction, id: int64): PropView =
+  ## The edge-side twin of `stagedNodeView`.
+  if tx.edgeProps.hasKey(id):
+    return tx.edgeProps[id]
+  result = tx.peekEdge(id).propView
+  if result.slotsOff > 0 and result.count > 0:
+    result = tx.store.arena.copySlots(result)
+  tx.edgeProps[id] = result
+
 proc setPropCommon(tx: WriteTransaction; target: char; id: int64;
                    key: string; v: Value; isNode: bool): bool  {.gcsafe.} =
   tx.assertOpen
@@ -695,13 +721,7 @@ proc setPropCommon(tx: WriteTransaction; target: char; id: int64;
   if not isNode and not tx.edgeExistsTx(id): return false
 
   let code = tx.propKeyCode(key)
-  var pv =
-    if isNode:
-      if tx.nodeProps.hasKey(id): tx.nodeProps[id]
-      else: tx.peekNode(id).propView
-    else:
-      if tx.edgeProps.hasKey(id): tx.edgeProps[id]
-      else: tx.peekEdge(id).propView
+  var pv = if isNode: tx.stagedNodeView(id) else: tx.stagedEdgeView(id)
   discard tx.store.arena.setProp(pv, code, v)
 
   ## target is the first byte, then the id: a SetProp frame addresses a
@@ -754,13 +774,7 @@ proc removePropCommon(tx: WriteTransaction, target: char, id: int64, key: string
   if code == 0:
     ## Never written under this key: nothing to remove, and nothing to log.
     return true
-  var pv =
-    if isNode:
-      if tx.nodeProps.hasKey(id): tx.nodeProps[id]
-      else: tx.peekNode(id).propView
-    else:
-      if tx.edgeProps.hasKey(id): tx.edgeProps[id]
-      else: tx.peekEdge(id).propView
+  var pv = if isNode: tx.stagedNodeView(id) else: tx.stagedEdgeView(id)
   if not tx.store.arena.removeProp(pv, code):
     return true        ## absent already; removing it again is a no-op
 
@@ -1133,6 +1147,11 @@ proc rollback*(tx: WriteTransaction): bool =
   tx.deltaOutIdx.clear()
   tx.deltaInIdx.clear()
   tx.deltaSeekIdx.clear()
+  ## The staged property views point at arena blocks only this transaction
+  ## ever resolved; dropping the references is what leaves the base store —
+  ## arrays and arena both — exactly as it was.
+  tx.nodeProps.clear()
+  tx.edgeProps.clear()
   ## The rollback marker is what tells recovery the transaction ended
   ## rather than died; a memory database has no log to write it to.
   if tx.wal != nil:
