@@ -525,8 +525,12 @@ narrow `PropSlot` by moving `aux` into the low bits of `payload` (see
 ## 8. Invariants
 
 Checked by `check()` (`src/store/store.nim`), which returns one
-`Invariant { code, ok, detail }` per rule, and by a debug-build assertion
-pass (compile-time `-d:glyphesCheck`) as each write is made.
+`Invariant { code, ok, detail }` per rule, and by a write-path assertion
+pass compiled in with `-d:glyphesCheck`, which walks the same S1/S2/S3/S4/S8
+rules over the records *one transaction touched* at the end of its merge
+(`store.checkTouched`, called from `txn.commit`). The flag used to name a
+build that did not exist; it is now the write-path half of this section, and
+the release build compiles the whole thing out.
 
 **Not all ten are machine-checked at M1, and the gaps are deliberate:**
 

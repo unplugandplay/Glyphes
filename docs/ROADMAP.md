@@ -1,17 +1,20 @@
 # glyphes — Roadmap
 
-> **Status:** M0–M4 landed; M5.1–M5.3 landed. Phase A (the whole thesis — one file,
-> crash-safe) is green end to end, and M4 is the first milestone that
-> answers a question rather than only storing an answer.
+> **Status:** **M0–M11 landed**, plus two arcs on top: durable version
+> history (V0–V1 — the `.vhist` sidecar and `diff`) and a cross-process
+> follower (F0–F3, S1–S4 — C ABI, Ruby, CLI). Phase A (the whole thesis —
+> one file, crash-safe) is green end to end, and M4 is the first milestone
+> that answers a question rather than only storing an answer.
 >
-> **M0–M11 landed.** `nimble gate` runs 376 Nim tests, 211 Ruby tests and
-> the TCK subset, all passing, both halves clean under AddressSanitizer,
-> TSan clean over the soak, and every budget green:
+> `nimble gate` runs **474 Nim tests, 228 Ruby tests** and the TCK subset,
+> all passing, both halves clean under AddressSanitizer, TSan clean over the
+> soak, and every budget green:
 >
 > ```
 > M1 store bench    create 1360 ms <= 8000   traversal 167 ms <= 400   heap 619 <= 680 MB
 > C1 TCK subset     132/132 in-contract (gate 95%), 17/17 refusals name their construct
 > C9 query bench    96 977 single-hop queries/s (gate 50 000), 2-hop 0.066 ms (gate 3 ms)
+> G2 version bench  diff flat on 10^6 nodes (1.14x), 13.3x on depth for a 50 000x history
 > ```
 >
 > Twelve Nim→FFI and process findings are in
@@ -21,22 +24,15 @@
 > benchmark caught and the tests could not — are in
 > [`../DEVLOG.md`](../DEVLOG.md).
 >
-> **Next:** M5.4 — aggregates, which turn `WITH` into a grouping boundary and
-> so change the operator set rather than adding a clause to it. M5.1 landed
-> `CREATE`, M5.2 the clauses that change an existing graph, M5.3 `MERGE`.
-> M4 landed at its ABI: nine new
-> `glyphes_*` symbols (`prepare`, `stmt_step`, `stmt_columns`,
-> `stmt_close`, `stmt_reset`, `cell_text`, `cell_id`, `cell_len`,
-> `stmt_columns_count`), a `Statement`/`Cell`/`Result` layer in Ruby, and
-> `db.query`/`db.prepare`. Reads are Cypher; writes are refused by name
-> with `GLY_ERR_UNSUPPORTED`. The gates are C1 (TCK subset) and C9 (query
-> rate), both in `nimble gate`.
->
-> M4's own findings are in [`../DEVLOG.md`](../DEVLOG.md): a `seq`
-> accessor that copied the entire node array on every row (130x on the
-> query path), `ORDER BY` needing the projection to carry its source
-> bindings through, `XOR` taking the process down with a `FieldDefect`, and
-> pin C5 (`int` and `float` are never `=`) not being enforced.
+> **Next, in the plans' own order:** the versioning read surface
+> (`VERSIONING-PLAN.md` V3 — `node_at`, Ruby `diff`, then branches and
+> prune), the follower's structured timeline reads across the ABI, and the
+> `.vhist` format pass — branch field, database identity, frame-generation
+> contiguity — while the format is still young. The coding plan and the
+> measured ledger of what each arc cost are both in
+> [`../DEVLOG.md`](../DEVLOG.md), whose last section is a whole-product
+> review: every finding it raised is either fixed there with the test that
+> would have caught it, or listed as open in the same paragraph.
 
 Phases are strictly ordered. Every milestone ships with tests and updated
 docs. Gates are merge conditions and they fail the build

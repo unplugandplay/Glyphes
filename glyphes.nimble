@@ -246,21 +246,65 @@ task benchQuery, "M4 query benchmark (CYPHER.md C9)":
       discard
   exec "./tmp/bench_query " & n
 
+task ss2, "F2 SS2: no exported follower symbol can write":
+  ## The feature's central guarantee is structural: there is no
+  ## `glyphes_follower_commit` to forget to guard, because there is no such
+  ## function. A Nim test cannot check that — it cannot reference a symbol
+  ## that must not exist — so the check belongs on the built library's
+  ## symbol table, which is also the artifact Ruby and the CLI actually
+  ## load. Until this task existed the docs claimed the gate was green and
+  ## nothing implemented it.
+  let libPath = getEnv("GLYPHES_LIB", "lib/libglyphes.so")
+  if not fileExists(libPath):
+    quit(libPath & " is not built; run `nimble build` first", QuitFailure)
+  # NimScript has no pipes: nm's output goes to a file, and the file is
+  # read back. `exec` propagates nm's exit code, so a missing `nm` fails
+  # the task rather than passing it vacuously on an empty table.
+  if not dirExists("tmp"):
+    mkdir "tmp"
+  let dump = "tmp/ss2-symbols.txt"
+  exec "nm -gU " & libPath & " > " & dump
+  let table = readFile(dump)
+  let forbidden = ["glyphes_follower_commit", "glyphes_follower_write",
+                   "glyphes_follower_apply", "glyphes_follower_truncate",
+                   "glyphes_follower_exec", "glyphes_follower_create"]
+  var leaked: seq[string] = @[]
+  for name in forbidden:
+    if table.contains("_" & name):
+      leaked.add name
+  if leaked.len > 0:
+    quit("SS2 FAILED: the follower surface exports " & leaked.join(", ") &
+         " — a follower must have no write to call", QuitFailure)
+  let exported = splitLines(table, false).len
+  echo "SS2: clean — " & $exported &
+       " exported symbols, none of them a follower write"
+
 task gate, "Everything CI runs":
   ## Chained with plain `nimble` calls, not exec-of-nimble: exec runs a
   ## shell command, and `nimble gate` re-entering nimble from inside a
   ## nimscript deadlocks on the package lock. These run in order and
   ## stop at the first failure.
+  ##
+  ## The gate is "everything under a couple of minutes", not "everything":
+  ## `soakShared` at its default 240 s, `soakLeak` (five days), and
+  ## `benchSqlite` (~3 min) are a nightly tier, documented in TESTING.md
+  ## §3.1 with the reason each is long. The three flagship gates of the
+  ## newest arcs — G2 (`benchVersion`), SG7 (`crashFollower`), and SS2 —
+  ## cost seconds each and belong here; they were the three a reviewer
+  ## found running nowhere.
   exec "nim c -d:release --mm:atomicArc --threads:on --app:lib --noMain:on -o:lib/libglyphes.so src/glyphes.nim"
   exec "nim c -r --mm:atomicArc --threads:on -d:glyphesCheck -o:tmp/run_all tests/run_all.nim"
   exec "nimble fixture"
   exec "ruby -Ilib tests/e2e/run.rb"
   exec "nimble crash"
+  exec "nimble crashFollower"
   exec "nimble bitflip"
   exec "nimble soak"
+  exec "nimble ss2"
   exec "nimble bench"
   exec "nimble benchQuery"
   exec "nimble benchSort"
+  exec "nimble benchVersion"
   exec "nimble benchIndex"
   exec "nimble benchVector"
   exec "nimble benchImport"

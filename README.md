@@ -126,7 +126,7 @@ the planned next increment, not yet built.
 
 Verified **after** the M10 changes, on the full gate (`nimble gate`):
 
-- **447 Nim tests, 0 failures** — store, WAL, recovery, transactions,
+- **474 Nim tests, 0 failures** — store, WAL, recovery, transactions,
   Cypher, all three index families, the model layer's statement compiler,
   version history, and the follower's watermark/timeline gates.
 - **228 Ruby tests / 769 assertions, 0 failures** — the seam, the model
@@ -144,9 +144,14 @@ Verified **after** the M10 changes, on the full gate (`nimble gate`):
 - `nimble asan` — both suites under AddressSanitizer.
 
 Two of the timing gates (M1 traversal, C9 query rate) are absolute
-budgets with no load-aware suspension; on a contended machine they can
-miss by a few percent. Re-run on a quiet machine — the code is not the
-variable. I5 already gates on a ratio under load for exactly this reason.
+budgets with no load-aware suspension, and on a contended box they fail
+by *multiples*, not percentages: measured the same morning, C9 read
+96 977 queries/s quiet and 22 000–27 000/s with the machine's load average
+at 13–28 — and the *pre-review* commit measured no better on that same
+load, which is how the two were told apart. I5 gates on a ratio under
+load for exactly this reason, and the other budgets are either
+deterministic (recall, GC drift) or ratio-shaped. Treat a timing red as a
+question about the machine first: re-run it quiet.
 
 ### What a decade of milestones taught
 
@@ -195,23 +200,25 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 
 ```
 nimble build        the shared library (release, ORC, threaded)
-nimble test         447 Nim tests (fast)
-nimble testGate     447 Nim tests at full churn
+nimble test         474 Nim tests (fast)
+nimble testGate     474 Nim tests at full churn
 nimble fixture      rebuild tests/fixtures/social.glyph
 nimble gemtest      228 Ruby runs / 769 assertions
 nimble crash        W1 crash gate
 nimble crashFollower  SG7: a writer SIGKILLed mid-commit leaves the follower off by exactly one
 nimble bitflip      W3 bit-flip sweep + W2 truncate sweep (GLYPHES_BITFLIPS=N)
 nimble soak         T1 concurrency gate
-nimble soakShared   F0 two-process writer soak
+nimble soakShared   F0 two-process writer soak (nightly at 240 s+)
 nimble bench        M1 store benchmark
 nimble benchQuery   C9 query rate / 2-hop latency
 nimble benchSort    E2/E3 sort gates
+nimble benchVersion G2: diff is O(nodes changed), not O(graph)
 nimble benchIndex   I5 range-index gate
 nimble benchVector  I-vec recall + determinism
 nimble benchImport  R8 import/export gate
+nimble ss2          SS2: no exported follower symbol can write
 nimble tck          C1: the TCK subset
-nimble gate         everything, in order, stops at the first red
+nimble gate         everything short, in order, stops at the first red
 nimble asan         both suites under AddressSanitizer
 ```
 

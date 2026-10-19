@@ -109,7 +109,7 @@ operations to 2·10⁴.
 | `nimble bench` | — | ~3 s | the three §7 budgets, non-zero on a miss |
 | `nimble benchQuery` | — | ~2 s | C9 at 10⁶ nodes, non-zero on a miss |
 | `nimble tck` | — | ~0.1 s | C1 over the committed subset, writes the report |
-| `nimble gate` | 10⁶ | ~90 s | everything, in order, including crash, soak and both C gates |
+| `nimble gate` | 10⁶ | ~6 min | everything short, in order, including crash, bitflip, both follower gates, SS2, and both C gates |
 | `nimble soak` | 10 s | ~15 s | T1; pass a budget in seconds for longer |
 | `nimble asan` | 10⁶ | ~90 s | both suites under AddressSanitizer |
 
@@ -184,6 +184,14 @@ These are *gates*, not aspirations — `nimble bench` exits non-zero. A
 regression over 10 % is a failure to investigate before merge, and the
 benchmark is what makes that visible rather than anecdotal.
 
+**On a contended box, a timing red is a question about the machine
+first.** The M1 and C9 budgets are absolute numbers with no load-aware
+suspension, and load moves them by multiples: measured the same morning,
+C9 read 96 977 queries/s on a quiet box and 22 000–27 000/s with the load
+average at 13–28 — while the *previous* commit measured no better on the
+same load. That is also how a real regression and a busy machine get
+told apart: build both, run both, compare under one load.
+
 **The memory gate had 320 MB of slack removed by the benchmark, and was
 later found to be measuring the wrong thing.** 91 tests
 passed while a record with a *single* property allocated 64 bytes of slot
@@ -222,20 +230,35 @@ wrapper for the same `nimble` task, so the two entry points cannot drift.
 nimble test                              382 Nim tests, churn shrunk        ~2 s
 nimble testGate                          382 Nim tests, full 10^6 churn   ~25 s
 nimble fixture                           rebuilds social.glyph from Nim     ~2 s
-nimble gemtest                           214 Ruby runs / 705 assertions     ~1 s
+nimble gemtest                           228 Ruby runs / 769 assertions     ~2 s
 nimble bench [n]                         M1 budgets, non-zero on a miss     ~3 s
 nimble benchQuery [n]                    C9 query budgets, 10^6 nodes      ~2 s
+nimble benchSort [n]                     E2/E3 sort gates, spilled        ~90 s
+nimble benchVersion                      G2: diff is O(nodes changed)     ~20 s
 nimble benchIndex                        I5 index budgets                  ~30 s
 nimble benchVector                       I-vec recall + determinism        ~60 s
 nimble benchImport                       R8 CSV/Parquet drift              ~30 s
 nimble benchSqlite [n] [fanout]          M11 vs SQLite edge-tables       ~3 min
 nimble tck                               C1 over the committed subset      ~0.1 s
 nimble crash                             W1 crash gate, 25 kills           ~40 s
+nimble crashFollower                     SG7: follower off by one          ~5 s
+nimble ss2                               no follower write symbol (nm)     ~1 s
 nimble soak [seconds]                    T1 concurrency, 10 s default      ~15 s
+nimble soakShared [seconds]              F0 two-process writer soak       240 s
 nimble soakLeak [s] [nodes]              M11 20-node leak soak, 5 days   long
-nimble gate                              all of the above, in order       ~90 s
+nimble gate                              everything short, in order       ~6 min
 nimble asan                              both suites under ASan           ~90 s
 ```
+
+**The gate is "everything short", not "everything".** Three tasks are a
+nightly tier rather than gate members, and the reason is duration, not
+doubt: `soakShared` at its 240 s default, `soakLeak` (five days, M11's
+zero-leak gate), and `benchSqlite` (~3 min, and a comparison rather than a
+budget — `limitations.md` §4 reads its number, nothing gates on it). The
+flags of the two newest arcs — G2 `benchVersion`, SG7 `crashFollower`,
+and SS2 — cost seconds each and *are* gate members; a reviewer found all
+three running nowhere but in the docs, which is the state this table
+corrects.
 
 Or, through make:
 

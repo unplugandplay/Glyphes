@@ -941,6 +941,74 @@ type
     ok*: bool
     detail*: string
 
+  StoreInvariantError* = ref object of CatchableError
+    ## A write-path invariant violation (`-d:glyphesCheck`). Catchable so
+    ## the ABI turns it into a status rather than letting it unwind into
+    ## the host, and so a test can prove the check fires. See
+    ## `checkTouched`.
+
+proc checkTouched*(s: GraphStore; ids: seq[int64]) =
+  ## The write-path half of `-d:glyphesCheck` (STORAGE.md §8). `check()` is
+  ## the whole-store oracle and runs at the end of a suite; this is the
+  ## same S1/S2/S3/S4/S8 walk restricted to the records one transaction
+  ## touched, asserted *where the write is made* — a violation caught
+  ## inside the merge names the record id, while the same violation caught
+  ## by `check()` two hundred operations later names a count. The logic is
+  ## deliberately the same walk the oracle walks, not a stricter variant:
+  ## a second notion of the invariant would be a second implementation to
+  ## drift. The body is compiled out unless the flag is set, so the release
+  ## build pays nothing and the call site stays unconditional.
+  when defined(glyphesCheck):
+    proc fail(code: string; detail: string) {.noreturn.} =
+      ## Catchable on purpose. An `AssertionDefect` cannot be caught by a
+      ## test and unwinds past the ABI's `guarded` boundary into the host
+      ## process — which is the right loudness for a Rust panic and the
+      ## wrong failure mode for a database whose host is somebody else's
+      ## application. A named error at the boundary is louder in the places
+      ## that matter: the stack trace names the invariant and the record.
+      ## Constructed by hand, like `txn.failTxCode`: `newException` cannot
+      ## build a `ref object of CatchableError`.
+      var err: StoreInvariantError
+      new(err)
+      err.msg = "glyphesCheck " & code & ": " & detail
+      raise err
+    for id in ids:
+      if id <= 0 or id.int >= s.nodes.len:
+        continue
+      let n = s.nodes[id.int]
+      if n.id != id:
+        fail("S1", "slot " & $id & " holds node " & $n.id)
+      if not n.live:
+        continue
+      var cur = n.outHead
+      var walked = 0
+      while cur != 0:
+        if cur.int >= s.edges.len or walked > s.edges.len:
+          fail("S8", "node " & $id & " out-chain is broken or cyclic")
+        let e = s.edges[cur.int]
+        if e.src != id:
+          fail("S2", "node " & $id & " out-chain reaches edge " & $cur &
+               " whose source is " & $e.src)
+        inc walked
+        cur = e.nextOut
+      if walked != n.outCount.int:
+        fail("S4", "node " & $id & " out-degree " & $n.outCount &
+             " does not match the chain's " & $walked)
+      cur = n.inHead
+      walked = 0
+      while cur != 0:
+        if cur.int >= s.edges.len or walked > s.edges.len:
+          fail("S8", "node " & $id & " in-chain is broken or cyclic")
+        let e = s.edges[cur.int]
+        if e.dst != id:
+          fail("S3", "node " & $id & " in-chain reaches edge " & $cur &
+               " whose destination is " & $e.dst)
+        inc walked
+        cur = e.nextIn
+      if walked != n.inCount.int:
+        fail("S4", "node " & $id & " in-degree " & $n.inCount &
+             " does not match the chain's " & $walked)
+
 proc check*(s: GraphStore): seq[Invariant] =
   ## STORAGE.md §8. S1-S10. Runs in a debug build or on demand; not on
   ## any hot path, because it is O(V + E) and the whole point of the

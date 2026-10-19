@@ -19,6 +19,7 @@ import std/sequtils
 import std/os
 import ../../src/store/arena
 import ../../src/store/ids
+import ../../src/txn/txn
 import ../../src/store/dict
 import ../../src/store/prop
 import ../../src/store/node
@@ -830,3 +831,38 @@ suite "store — traversal shape":
     check s.inEdges(a).len == 0
     check s.node(a).id == 0
     check s.edge(999).id == 0
+
+when defined(glyphesCheck):
+  suite "review regression: the write-path invariant pass has teeth":
+    test "a corrupted adjacency is caught at the next write to that record":
+      ## `-d:glyphesCheck` used to name a build that did nothing — STORAGE.md
+      ## §8 and TESTING.md §3.2 both claimed a debug assertion pass and no
+      ## `when defined(glyphesCheck)` existed in `src/`. The pass now walks
+      ## S1/S2/S3/S4/S8 over the touched records at the end of a merge; this
+      ## is the test that proves it fires rather than passing vacuously.
+      ## Flag-guarded: in a release build there is no check to fire, and a
+      ## test asserting one would have to be conditional anyway.
+      let s = newStore()
+      let a = s.createNode("P")
+      let b = s.createNode("P")
+      discard s.createEdge(a, b, "R")
+      ## Corrupt the edge's source by hand: the chain from `a` now reaches
+      ## an edge that claims to be someone else's — exactly what S2 names
+      ## and what only `check()` could see, at the end of the suite.
+      let eid = s.outHeadOf(a)
+      check eid != 0
+      s.edges[eid.int].src = 999
+      let tx = begin(s, nil, 1'u32, doSync = false)
+      discard tx.setNodeProp(a, "x", Value(kind: vkInt, i: 1))
+      var e: StoreInvariantError
+      try:
+        discard tx.commit()
+      except StoreInvariantError as err:
+        e = err
+      ## `check` does not abort the test, so the second assertion reads
+      ## `e.msg` through a nil when the first fails — which crashed the
+      ## whole runner the first time this test existed. One branch instead.
+      if e == nil:
+        check "the write-path pass did not fire on a corrupted chain" == ""
+      else:
+        check "S2" in e.msg

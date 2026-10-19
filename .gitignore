@@ -20,3 +20,11 @@ nimcache/
 # NOTE: do not ignore lib/glyphes/ — that is the Ruby source directory,
 # not a build artifact. An early .gitignore did, and `rm -rf lib/glyphes`
 # to clean a stale build then deleted the gem.
+
+# History and watermark sidecars of a fixture database. The .vhist is a
+# durable history, but these files are build outputs of `nimble fixture`,
+# not source: the fixture generator writes them, and a checkout's first
+# gate run regenerates them. Left untracked they dirtied the tree after
+# every gate.
+*.glyph-shm
+*.glyph.vhist

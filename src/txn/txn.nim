@@ -1148,6 +1148,33 @@ proc commit*(tx: WriteTransaction): bool =
   discard tx.histSeal()
   if tx.indicesToUpdate != nil:
     applyDelta(tx.indicesToUpdate, s, tx.nodeDelta, tx.edgeDelta)
+  ## The write-path invariant pass (STORAGE.md §8), over exactly the
+  ## records this transaction touched — every delta node and both endpoints
+  ## of every delta edge, deleted ones included, because unlinking a
+  ## tombstone moved their chains. The collection is behind the flag too:
+  ## walking the deltas and sorting a sequence to hand to a no-op is not a
+  ## cost the release build should carry.
+  when defined(glyphesCheck):
+    ## From `nodeDelta` itself, not `deltaNodesIdx`: the latter lists only
+    ## records *created* here, and a property-only write is exactly the case
+    ## this pass exists for.
+    var invariantIds: seq[int64] = @[]
+    for id in tx.nodeDelta.keys:
+      invariantIds.add id
+    for _, e in tx.edgeDelta:
+      invariantIds.add e.src
+      invariantIds.add e.dst
+    if invariantIds.len > 0:
+      invariantIds.sort()
+      ## Unique by hand: `dedup` lives in sequtils, and importing it for a
+      ## flag-only block would warn in every release build.
+      var compact: seq[int64] = @[]
+      var last = 0'i64
+      for id in invariantIds:
+        if id != last:
+          compact.add id
+          last = id
+      s.checkTouched(compact)
   s.releaseWriter()
   ## The transaction is finished. `commit` checked `closed` but never set it,
   ## so a post-commit `rollback` was a real rollback: a ROLLBACK marker whose
