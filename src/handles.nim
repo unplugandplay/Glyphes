@@ -48,6 +48,15 @@ type
     ## later dereference would be use-after-free. GC_ref transfers
     ## ownership to the registry; release() hands it back.
     obj: pointer
+    ## The typed unref, captured at register time: `GC_unref` must be
+    ## instantiated with the object's *static* type, because its `=destroy`
+    ## for a bare `RootRef` takes the dynamic-dispatch path and reads a
+    ## type-info word at the object head that these objects do not carry —
+    ## a real dispose crash, measured in isolation. Registering is generic,
+    ## so it closes over `T`; releasing only has a pointer, so the closure
+    ## is the type. It captures nothing and is nil for a never-registered
+    ## slot.
+    disposer: proc (p: pointer) {.gcsafe, raises: [].}
     err: string                   ## handle-local error message
 
   Registry = object
@@ -104,6 +113,9 @@ proc register*[T](kind: HandleKind, obj: ref T): GlyHandle =
     registry.slots[slot].obj = cast[pointer](obj)
     registry.slots[slot].err = ""
     GC_ref(obj)
+    registry.slots[slot].disposer =
+      proc (p: pointer) {.gcsafe, raises: [].} =
+        GC_unref(cast[ref T](p))
     result = (registry.slots[slot].generation shl GenerationShift) or
              uint64(uint64(slot) and SlotMask64)
 
@@ -124,19 +136,34 @@ proc release*[T](h: GlyHandle): HandleKind =
   initRegistry()
   var kind: HandleKind
   var freed = false
+  var obj: pointer
+  var dispose: proc (p: pointer) {.gcsafe, raises: [].}
   withLock registry.lock:
     let slotIdx = slotIndex(h)
     if slotMatches(h, slotIdx):
       kind = registry.slots[slotIdx].kind
       freed = true
+      obj = registry.slots[slotIdx].obj
+      dispose = registry.slots[slotIdx].disposer
       registry.slots[slotIdx].live = false
       registry.slots[slotIdx].obj = nil
+      registry.slots[slotIdx].disposer = nil
       registry.slots[slotIdx].err = ""
       inc registry.slots[slotIdx].generation
       if registry.slots[slotIdx].generation >= MaxGeneration:
         registry.slots[slotIdx].generation = 1
       registry.free.add int32(slotIdx)
   if freed:
+    ## The unref happens *after* the slot is marked dead and outside the
+    ## lock, so a concurrent lookup that already passed its liveness check
+    ## still holds a reference the collector has not been told to drop.
+    ## Without the disposer, every close leaked the object's whole graph —
+    ## a follower handle holds an accumulated timeline — and ASan/LSan
+    ## cannot see it, because Nim's allocator keeps the pages. The comment
+    ## in this file promised this ordering from the start; the call is what
+    ## was missing.
+    if dispose != nil:
+      dispose(obj)
     result = kind
 
 proc lookup*[T](h: GlyHandle, kind: HandleKind): T =

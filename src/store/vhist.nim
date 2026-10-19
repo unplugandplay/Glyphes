@@ -262,7 +262,9 @@ proc syncVhist*(vf: VhistFile) =
   ## data without the metadata cost, which is the whole durability point for
   ## an append-only file whose length is not load-bearing metadata.
   when defined(posix):
-    discard posix.fdatasync(vf.f.getFileHandle)
+    if posix.fdatasync(vf.f.getFileHandle) != 0:
+      raise newException(IOError,
+                         "vhist: fdatasync failed: " & osErrorMsg(osLastError()))
   vf.synced = getFileSize(vf.f)
 
 proc closeVhist*(vf: VhistFile) =
@@ -388,7 +390,10 @@ proc truncateVhist*(path: string; goodBytes: int) =
   ## same mode `openWal` uses for its own `truncateTo`.
   let f = open(file, fmAppend)
   when defined(posix):
-    discard posix.ftruncate(f.getFileHandle, posix.Off(goodBytes.int64))
+    if posix.ftruncate(f.getFileHandle, posix.Off(goodBytes.int64)) != 0:
+      f.close()
+      raise newException(IOError,
+                         "vhist: truncate failed: " & osErrorMsg(osLastError()))
   f.close()
 
 export encodeCommitPayload, decodeCommitPayload

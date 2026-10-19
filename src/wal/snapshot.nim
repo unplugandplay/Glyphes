@@ -277,7 +277,10 @@ proc writeSnapshot*(s: GraphStore, path: string; lsn: uint64) =
   f.write(bytes)
   f.flushFile()
   when defined(posix):
-    discard posix.fdatasync(f.getFileHandle)
+    if posix.fdatasync(f.getFileHandle) != 0:
+      f.close()
+      raise newException(IOError,
+                         "snapshot: fdatasync failed: " & osErrorMsg(osLastError()))
   f.close()
   moveFile(tmp, path)
   ## fsync the *directory* as well as the file. Without it the rename may

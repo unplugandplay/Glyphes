@@ -994,8 +994,17 @@ proc commit*(tx: WriteTransaction): bool =
       tx.wal.nextLsn = tx.nextLsn + 1
   except CatchableError:
     if sealedHistory != 0:
-      if tx.store.vhistFile != nil:
-        truncateVhist(tx.store.vhistPath, vhistSyncedBefore)
+      ## The in-memory abort must happen even if the cut does not: a failed
+      ## truncate leaves the phantom frame on disk, where the generation
+      ## stamp keeps it unread until a later commit passes its stamp — the
+      ## format pass (frame-generation contiguity) is what closes that
+      ## residual. The original error is re-raised either way; it is the one
+      ## the caller can act on.
+      try:
+        if tx.store.vhistFile != nil:
+          truncateVhist(tx.store.vhistPath, vhistSyncedBefore)
+      except CatchableError:
+        discard
       tx.store.history.abortCommit(sealedHistory)
     raise
 

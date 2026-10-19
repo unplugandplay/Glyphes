@@ -251,6 +251,45 @@ proc decodeFrame*(buf: string; at: int; limit: int): DecodeResult =
                        txnFlags: txnFlags, payload: payload)
   result.consumed = FrameHeaderSize + int(payloadLen)
 
+  ## WAL.md §2.1: a frame is valid only if its length is also within the
+  ## opcode's minimum. The CRC check above proves the bytes are what a
+  ## writer wrote — but a *crafted or future-writer-broken* frame can carry a
+  ## recomputed CRC over a payload too short for its opcode, and `applyFrame`
+  ## then indexes it without checks: `p[0]`, `i64At(1)`, ranges that
+  ## underflow, which raise Defects — not CatchableErrors — and unwind past
+  ## the ABI's guarded boundary into the host. Short is damage, named here,
+  ## before applyFrame can touch it.
+  const
+    MinPayload: array[0 .. 13, int] = [
+      0,   # opNoop
+      12,  # opCreateNode: id i64 + label code i32
+      8,   # opDeleteNode: id
+      -1,  # opAddLabel: never written by this version; unknown here
+      -1,  # opRemoveLabel: never written
+      28,  # opCreateEdge: id + type code + src + dst
+      8,   # opDeleteEdge: id
+      17,  # opSetProp: target byte + id + key + vtype + aux + flags + inline word
+      13,  # opRemoveProp: target byte + id + key
+      -1,  # opCreateIndex: never written
+      -1,  # opDropIndex: never written
+      4,   # opNewLabel: code + name (name may be empty in a corrupt frame, but never shorter than the code)
+      4,   # opNewRelType
+      4,   # opNewPropKey
+    ]
+  let need = if int(op) <= high(MinPayload): MinPayload[int(op)] else: -1
+  if need < 0:
+    result.reason = "unknown opcode " & $op
+    result.corrupt = true
+    result.frame = Frame()
+    result.consumed = 0
+    return
+  if int(payloadLen) < need:
+    result.reason = "payload of " & $payloadLen & " bytes is shorter than " &
+                    "opcode " & $op & " requires (" & $need & ")"
+    result.corrupt = true
+    result.frame = Frame()
+    result.consumed = 0
+
 proc readI64(b: string, at: int): int64 = cast[int64](readU64(b, at))
 
 # ------------------------------------------------------------------- file
@@ -339,10 +378,12 @@ proc flush*(w: Wal) {.raises: [].} =
   if not w.readOnly:
     w.handle.flushFile()
 
-proc sync*(w: Wal) {.raises: [].} =
+proc sync*(w: Wal) {.raises: [IOError].} =
   ## fdatasync: the durability point. Not `close`, because closing is not
   ## something a database does at every commit, and not `flushFile`,
-  ## because that only reaches the OS.
+  ## because that only reaches the OS. A failed fdatasync raises: a commit
+  ## that reports success without its bytes on the device is the one thing
+  ## WAL.md §0.2 forbids, and the previous `discard` reported exactly that.
   if w.readOnly:
     return
   w.handle.flushFile()
@@ -352,7 +393,9 @@ proc sync*(w: Wal) {.raises: [].} =
     ## the right call rather than fsync: it flushes data without the
     ## metadata cost, and for an append-only log whose length is not
     ## load-bearing metadata, that is the whole durability point.
-    discard posix.fdatasync(w.handle.getFileHandle)
+    if posix.fdatasync(w.handle.getFileHandle) != 0:
+      raise newException(IOError,
+                         "wal: fdatasync failed: " & osErrorMsg(osLastError()))
 
 proc truncateTo*(w: Wal, offset: int64) {.raises: [IOError].} =
   ## Cut a torn tail. Used only by recovery, and only to a position the
@@ -362,7 +405,9 @@ proc truncateTo*(w: Wal, offset: int64) {.raises: [IOError].} =
   ## truncate(2) through the descriptor: Nim's `File` has no truncate, and
   ## going through `setFilePos` + a reopen would leave a window where the
   ## file is longer than the last valid frame.
-  discard posix.ftruncate(w.handle.getFileHandle, posix.Off(offset))
+  if posix.ftruncate(w.handle.getFileHandle, posix.Off(offset)) != 0:
+    raise newException(IOError,
+                       "wal: truncate failed: " & osErrorMsg(osLastError()))
   w.size = offset
 
 proc readAll*(w: Wal): string =

@@ -424,7 +424,10 @@ proc checkpoint*(db: Database, truncate = false, fsync = true) =
       ## *data* behind that name durable. Without it a crash can leave a
       ## name pointing at bytes that never reached the disk.
       let f = open(db.path, fmReadWriteExisting)
-      discard posix.fdatasync(f.getFileHandle)
+      if posix.fdatasync(f.getFileHandle) != 0:
+        f.close()
+        raise newException(IOError,
+                           "checkpoint: fdatasync failed: " & osErrorMsg(osLastError()))
       close(f)
     if truncate:
       ## Drop every log frame the snapshot now contains, so recovery starts

@@ -87,8 +87,12 @@ suite "crc32 (WAL.md §2)":
 
 suite "frame codec (WAL.md §2)":
   test "encode then decode preserves every header field":
+    ## The payload is padded past opSetProp's 17-byte minimum: decode
+    ## enforces the opcode table now, and this test's subject is the codec
+    ## round-trip, not the length rule (which has its own test below).
     let f = Frame(lsn: 42'u64, txnId: 7'u32, op: opSetProp,
-                  txnFlags: TxnCommit, payload: "\x01\x02\x03tail")
+                  txnFlags: TxnCommit,
+                  payload: "\x01\x02\x03tail-padded-past-the-op-minimum")
     let d = decodeFrame(encodeFrame(f), 0, FrameHeaderSize + f.payload.len)
     check d.consumed == FrameHeaderSize + f.payload.len
     check d.frame.lsn == 42'u64
@@ -688,3 +692,31 @@ suite "review regressions: maintenance refuses a live writer (W11)":
     db.checkpoint(truncate = true)
     check getFileSize(path & "-wal") == 0
     close(db)
+
+suite "review regressions: frame validity is the opcode's business too":
+  test "a crc-valid frame shorter than its opcode requires is named, not a defect":
+    ## decodeFrame enforced length only against the *file*. A crafted frame
+    ## — a recomputed CRC over a too-short payload — reached applyFrame's
+    ## unchecked indexing and raised a Defect, which is not a CatchableError
+    ## and so unwound past the ABI's guarded boundary into the host. WAL.md
+    ## §2.1 makes the opcode's minimum part of validity; now validity is
+    ## decided where it is checked.
+    let short = encodeFrame(Frame(lsn: 9, txnId: 1, op: opSetProp,
+                                  txnFlags: 0, payload: "\x00\x01\x02"))
+    let r = decodeFrame(short, 0, short.len)
+    check r.consumed == 0
+    check r.corrupt == true
+    check "shorter" in r.reason
+    ## An unknown opcode — a frame this version never writes — is named
+    ## too, rather than reaching applyFrame's catch-all raise.
+    let unknown = encodeFrame(Frame(lsn: 10, txnId: 1, op: Opcode(3),
+                                    txnFlags: 0, payload: ""))
+    let u = decodeFrame(unknown, 0, unknown.len)
+    check u.consumed == 0
+    check u.corrupt == true
+    check "unknown opcode" in u.reason
+    ## A healthy frame still decodes: the table must not over-reject. A
+    ## commit marker is exactly an empty-payload Noop.
+    let good = encodeFrame(Frame(lsn: 11, txnId: 1, op: opNoop,
+                                 txnFlags: TxnCommit, payload: ""))
+    check decodeFrame(good, 0, good.len).consumed == FrameHeaderSize

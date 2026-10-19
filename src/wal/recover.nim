@@ -356,6 +356,15 @@ proc applyFrame(s: GraphStore, f: Frame): bool =
       s.edges.setLen(max(id.int + 1, s.edges.len * 2))
     if s.nodes.len <= max(src, dst).int:
       raise newException(ValueError, "replay: edge " & $id & " references a node the log never created")
+    ## Bounds alone are not enough: a crafted id can name a padding slot
+    ## (id 0) or a tombstone, and either would attach a live edge to a node
+    ## that cannot own it. A frame the log itself wrote always names a live
+    ## node — commit validation rejected anything else — so this costs a
+    ## healthy replay nothing.
+    if s.nodes[src.int].id != src or not s.nodes[src.int].live:
+      raise newException(ValueError, "replay: edge " & $id & " references a dead or empty source node")
+    if s.nodes[dst.int].id != dst or not s.nodes[dst.int].live:
+      raise newException(ValueError, "replay: edge " & $id & " references a dead or empty destination node")
     var e = newEdge(id, src, dst, code)
     e.nextOut = s.nodes[src.int].outHead
     e.nextIn = s.nodes[dst.int].inHead
@@ -640,5 +649,8 @@ proc recover*(graphPath: string, into: GraphStore): Recovery =
     ## nothing. r+ ("r+") is the one mode that opens an existing file in
     ## place.
     let f = open(walPath, fmReadWriteExisting)
-    discard posix.ftruncate(f.getFileHandle, posix.Off(result.validBytes))
+    if posix.ftruncate(f.getFileHandle, posix.Off(result.validBytes)) != 0:
+      f.close()
+      raise newException(IOError,
+                         "recovery: tail truncate failed: " & osErrorMsg(osLastError()))
     f.close()
