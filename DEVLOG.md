@@ -3473,3 +3473,32 @@ The number says more about the interpreter than about the CPU: a million
 dispatch** — every statement is matched by walking a seventeen-entry
 table, so `NEXT` is the seventeenth one tried. A hashed dispatch would be
 several times faster, and this is the measurement that would show it.
+
+### The same benchmark in Z80 assembly
+
+`ez80/bench/loop.z80` is the million-iteration loop in machine code —
+assembled by the assembler and run directly — and the harness now runs
+both and reports them side by side:
+
+```
+                                     wall        cpu      T-states   per iter
+    GLYPHE BASIC (interpreted)    7.468 s    7.393 s    3898354435       3898
+         Z80 assembly (direct)    0.056 s    0.056 s      26031009         26
+
+speed-up    : 132.7x (wall clock)
+finished    : yes / yes
+```
+
+The two rows are the *same work* — a million iterations of a loop that
+counts down — and they differ by 132×, which is almost exactly the ratio
+of their T-states (3898 against 26). So the interpreter's overhead is
+the work itself, not a fixed cost around it: the BASIC spends 3898
+T-states per `NEXT` where the machine code spends 26, and nearly all of
+that difference is the **keyword dispatch** — every statement is matched
+by walking a seventeen-entry table, and `NEXT` is the seventeenth one
+tried.
+
+A hashed dispatch would be several times faster, and this is the
+measurement that would show it. It is also the number that says how much
+of the BASIC's cost is the language and how much is the interpreter's
+bookkeeping: 26 T-states of the 3898 are the loop.

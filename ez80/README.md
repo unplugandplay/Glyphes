@@ -79,8 +79,10 @@ nimble ez80Bench                      # the interpreter's speed
 
 ## The benchmark
 
-`bench/loop.bas` is a BASIC program the interpreter runs, and
-`bench/bench.nim` times it:
+The same million iterations, twice: once through the interpreter, once
+as Z80 assembly.
+
+`bench/loop.bas` is a BASIC program *fed to* GLYPHE BASIC:
 
 ```
 10 REM ** eZ80 BASIC benchmark: 1000 x 1000 = 1,000,000 loop iterations **
@@ -91,36 +93,59 @@ nimble ez80Bench                      # the interpreter's speed
 60 PRINT "DONE"
 ```
 
-The harness takes the clock **before the interpreter starts** and
-**after it ends**, and reports the delta — so the number is the
-interpreter's own time, not a measurement of the harness:
+`bench/loop.z80` is the same loop in machine code — assembled by
+`ez80asm.nim` and run directly:
 
 ```
-iterations  : 1000000
-wall clock  : 13.733 s
-cpu time    : 13.605 s
-rate        : 72816. iterations/s (wall)
-finished    : yes
+START:  LD BC, OUTER
+OUTERL: LD DE, INNER
+INNERL: DEC DE
+        LD A, D
+        OR E
+        JR NZ, INNERL
+        DEC BC
+        LD A, B
+        OR C
+        JR NZ, OUTERL
+        HALT
 ```
 
-The iteration count is read out of the program (the product of its `FOR`
-limits) rather than repeated in the harness, so the report cannot claim a
-million iterations for a program that does fewer. The program prints
-`DONE` when it arrives at the end, and the harness checks for that
-*printed* line — the echo of the program text contains the word too.
+`bench/bench.nim` runs both, and takes the clock **before the run
+starts** and **after it ends** — so the number is the work's own time and
+not a measurement of the harness:
 
-**Why two loops.** A single loop cannot count to a million here: the
-BASIC's integers are 16-bit signed, so a counter tops out at 32767. Two
-nested loops do it honestly, and they also stand on the `FOR` stack,
-which is the part of the interpreter a benchmark should be measuring.
+```
+                                     wall        cpu      T-states   per iter
+    GLYPHE BASIC (interpreted)    7.468 s    7.393 s    3898354435       3898
+         Z80 assembly (direct)    0.056 s    0.056 s      26031009         26
 
-The number is worth reading for what it says about the interpreter rather
-than about the CPU: a million iterations of `NEXT` cost about 3900
-T-states each, and most of that is the **keyword dispatch** — every
-statement is matched by walking a seventeen-entry table of keywords, so
-`NEXT` is the seventeenth one tried. An interpreter with a hashed
-dispatch would be several times faster, and this is the measurement that
-would show it.
+speed-up    : 132.7x (wall clock)
+finished    : yes / yes
+```
+
+The iteration count is read out of each program — the product of the
+BASIC's `FOR` limits, and the assembler's symbol table for the assembly —
+so a report cannot claim a million iterations for a program that does
+fewer. The BASIC's completion check looks for the *printed* `DONE`: the
+echo of the program text contains the word too, and the first version of
+the check was fooled by exactly that and reported success on a run that
+had never finished.
+
+**Why two loops in the BASIC.** A single loop cannot count to a million
+here: the BASIC's integers are 16-bit signed, so a counter tops out at
+32767. Two nested loops do it honestly, and they also stand on the `FOR`
+stack, which is the part of the interpreter a benchmark should be
+measuring.
+
+**What the gap says.** The two rows are the same work — a million
+iterations of a loop that counts down — and they differ by 132×, which is
+almost exactly the ratio of their T-states (3898 against 26). So the
+interpreter's overhead is the *work*, not a fixed cost around it: the
+BASIC spends 3898 T-states per `NEXT` where the machine code spends 26,
+and most of that is the **keyword dispatch** — every statement is matched
+by walking a seventeen-entry table of keywords, so `NEXT` is the
+seventeenth one tried. A hashed dispatch would be several times faster,
+and this is the measurement that would show it.
 
 ## The BASIC
 

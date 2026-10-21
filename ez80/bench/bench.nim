@@ -1,30 +1,46 @@
-## bench.nim — how fast is the BASIC interpreter?
+## bench.nim — how fast is the interpreter, and how fast is the machine?
 ##
-## The benchmark is a BASIC program (loop.bas) fed to GLYPHE BASIC; the
-## harness times the interpreter around it:
+## The same benchmark twice:
 ##
-##     t0 = the clock before the interpreter starts
-##     t1 = the clock after the interpreter has finished
+## * `loop.bas` — a BASIC program, *fed to* GLYPHE BASIC and interpreted.
+## * `loop.z80` — the same million iterations in Z80 assembly, assembled
+##   and run directly.
 ##
-## and reports the delta, so the number is the interpreter's own time and
-## not a measurement of the harness.
+## The clock is taken before the interpreter (or the program) starts and
+## after it ends, so the number is the work's own time and not a
+## measurement of the harness:
 ##
-## The iteration count is read out of the program itself — the product of
-## its FOR limits — so the report cannot claim a million iterations for a
-## program that does fewer.
+##     t0 = the clock before the run
+##     t1 = the clock after the run
+##
+## The iteration count is read out of each program — the product of its
+## `FOR` limits, and the assembler's symbol table for the assembly — so a
+## report cannot claim a million iterations for a program that does
+## fewer.
 ##
 ## Run it:  nim c -r bench/bench.nim
 
 import std/[times, strutils, os]
 import ../ez80
+import ../ez80asm
 
 const
-  program = "loop.bas"
+  basicProgram = "loop.bas"
+  z80Program = "loop.z80"
   ## The BASIC interpreter: the same binary the demo and the tests use.
   interpreter = "../basic.bin"
 
+type
+  Result = object
+    name: string
+    iterations: int
+    wall: float
+    cpu: float
+    cycles: uint64
+    finished: bool
+
 proc loopCount(lines: seq[string]): int =
-  ## The product of the FOR limits in the program.
+  ## The product of the FOR limits in a BASIC program.
   result = 1
   for ln in lines:
     let up = ln.toUpperAscii
@@ -42,51 +58,88 @@ proc loopCount(lines: seq[string]): int =
     if seen and n > 0:
       result *= n
 
+proc symbolValue(name: string): int =
+  ## A symbol from the last assembly.
+  for s in symbols():
+    if s.name == name:
+      return s.value
+  0
+
+proc runBasic(here: string): Result =
+  ## The BASIC program, interpreted.
+  let src = readFile(here / basicProgram)
+  let lines = src.splitLines()
+  ## The interpreter is fed the program, then RUN, then BYE: the BASIC
+  ## stores the program as it is typed and runs it on the RUN line.
+  var input = src.replace("\n", "\r")
+  if not input.endsWith("\r"):
+    input.add "\r"                ## the last line needs its terminator too
+  input.add "RUN\rBYE\r"
+
+  var z: EZ80
+  z.reset(0)
+  let bin = readFile(here / interpreter)
+  for i, c in bin:
+    z.mem[i] = c.uint8
+  z.mem[0xD6E0] = 1               # echo the input
+  z.inBuf = input
+
+  let wall0 = epochTime()
+  let cpu0 = cpuTime()
+  discard z.run(40_000_000_000'u64)
+  let wall1 = epochTime()
+  let cpu1 = cpuTime()
+
+  result.name = "GLYPHE BASIC (interpreted)"
+  result.iterations = loopCount(lines)
+  result.wall = wall1 - wall0
+  result.cpu = cpu1 - cpu0
+  result.cycles = z.cycles
+  ## The echo of the program text contains the word "DONE" too, so the
+  ## check looks for the *printed* line: the interpreter prints a string
+  ## without its quotes, and the echo shows it with them.
+  result.finished = z.outBuf.contains("DONE\r")
+
+proc runZ80(here: string): Result =
+  ## The assembly program, run directly.
+  let binPath = here.parentDir.parentDir / "tmp" / "ez80_bench_loop.bin"
+  assemble(here / z80Program, binPath)
+  let code = readFile(binPath)
+
+  var z: EZ80
+  z.reset(0)
+  for i, c in code:
+    z.mem[i] = c.uint8
+
+  let wall0 = epochTime()
+  let cpu0 = cpuTime()
+  discard z.run(40_000_000_000'u64)
+  let wall1 = epochTime()
+  let cpu1 = cpuTime()
+
+  result.name = "Z80 assembly (direct)"
+  result.iterations = symbolValue("OUTER") * symbolValue("INNER")
+  result.wall = wall1 - wall0
+  result.cpu = cpu1 - cpu0
+  result.cycles = z.cycles
+  result.finished = z.halted
+
 let here = currentSourcePath().parentDir
-let src = readFile(here / program)
-let lines = src.splitLines()
+let basic = runBasic(here)
+let direct = runZ80(here)
 
-## The interpreter is fed the program, then RUN, then BYE: the BASIC
-## stores the program as it is typed and runs it on the RUN line.
-var input = src.replace("\n", "\r")
-if not input.endsWith("\r"):
-  input.add "\r"                ## the last line needs its terminator too
-input.add "RUN\rBYE\r"
-
-var z: EZ80
-z.reset(0)
-let bin = readFile(here / interpreter)
-for i, c in bin:
-  z.mem[i] = c.uint8
-z.mem[0xD6E0] = 1                       # echo the input
-z.inBuf = input
-
-let iterations = loopCount(lines)
-
-## The measurement: the clock before the interpreter starts and the clock
-## after it has finished.
-let wall0 = epochTime()
-let cpu0 = cpuTime()
-discard z.run(40_000_000_000'u64)
-let wall1 = epochTime()
-let cpu1 = cpuTime()
-
-let wall = wall1 - wall0
-let cpu = cpu1 - cpu0
-## The echo of the program text contains the word "DONE" too, so the check
-## looks for the *printed* line: the interpreter prints the string
-## without its quotes, and the echo shows it with them.
-let done = z.outBuf.contains("DONE\r")
-
-echo "program     : ", program, "  (", lines.len, " lines)"
-echo "iterations  : ", iterations
-echo "wall clock  : ", wall.formatFloat(ffDecimal, 3), " s"
-echo "cpu time    : ", cpu.formatFloat(ffDecimal, 3), " s"
-if wall > 0:
-  echo "rate        : ", (iterations.float / wall).formatFloat(ffDecimal, 0),
-       " iterations/s (wall)"
-  echo "             : ", (iterations.float / cpu).formatFloat(ffDecimal, 0),
-       " iterations/s (cpu)"
-echo "finished    : ", (if done: "yes" else: "NO -- the program did not reach its end")
-echo "emulator    : ", z.cycles, " T-states, ", z.outBuf.len,
-     " characters of console output"
+echo "program     : ", basicProgram, " (", basic.iterations, " iterations, interpreted)"
+echo "             ", z80Program, "  (", direct.iterations, " iterations, assembled)"
+echo ""
+echo "".align(30), "wall".align(11), "cpu".align(11), "T-states".align(14), "per iter".align(11)
+for r in [basic, direct]:
+  let per = if r.cycles > 0: r.cycles div uint64(r.iterations) else: 0
+  echo r.name.align(30),
+       (r.wall.formatFloat(ffDecimal, 3) & " s").align(11),
+       (r.cpu.formatFloat(ffDecimal, 3) & " s").align(11),
+       ($r.cycles).align(14),
+       ($per).align(11)
+echo ""
+echo "speed-up    : ", (basic.wall / direct.wall).formatFloat(ffDecimal, 1), "x (wall clock)"
+echo "finished    : ", (if basic.finished: "yes" else: "NO"), " / ",
+     (if direct.finished: "yes" else: "NO")

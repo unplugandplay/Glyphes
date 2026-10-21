@@ -1,0 +1,37 @@
+; ------------------------------------------------------------------------
+; The same benchmark, in Z80 assembly: a million iterations of a loop.
+;
+; The BASIC version of this benchmark spends about 3900 T-states per
+; iteration, nearly all of it in the interpreter's keyword dispatch --
+; every statement is matched by walking a seventeen-entry table, and NEXT
+; is the seventeenth one tried.
+;
+; This is the loop itself and nothing else:
+;
+;     DEC DE / LD A,D / OR E / JR NZ,inner
+;
+; which is about 24 T-states per iteration. The gap between the two
+; numbers is the price of interpreting, and it is worth having measured
+; rather than argued about.
+;
+; The counters are the same shape as the BASIC benchmark's: 1000 x 1000,
+; because a 16-bit counter tops out at 32767. The values are read out of
+; the symbol table, so the report cannot claim a million iterations for a
+; program that does fewer.
+; ------------------------------------------------------------------------
+OUTER   EQU 1000
+INNER   EQU 1000
+
+        ORG 0
+
+START:  LD BC, OUTER          ; the outer counter
+OUTERL: LD DE, INNER          ; the inner counter
+INNERL: DEC DE                ; one iteration
+        LD A, D
+        OR E
+        JR NZ, INNERL
+        DEC BC
+        LD A, B
+        OR C
+        JR NZ, OUTERL
+        HALT
