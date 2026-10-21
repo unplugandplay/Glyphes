@@ -3365,3 +3365,78 @@ gate green and the open list written down rather than implied:
 - **Next increments, per plan:** the V3 read surface (`node_at`, Ruby
   `diff`), then the follower's structured timeline reads across the ABI
   (`docs/FOLLOWER-SURFACE-PLAN.md`).
+
+---
+
+## 2026-10-21 — the Z80 grew into an eZ80
+
+The repository carried a Z80 emulator and a BASIC written for it, at the
+root, untracked, and the BASIC had never been run to completion: the
+emulator raised on the DD and ED pages, so the BASIC avoided them and the
+two were never actually talking. The request was to make it an eZ80, and
+the first thing that had to happen was to make the BASIC run at all.
+
+**Nine defects in the BASIC, all found by running it**, and none of them
+in the emulator:
+
+* `TOEOL` walked to the end of a line but never wrote the cursor back, so
+  a `REM` line's own tail was parsed as more statements — the first line
+  of every program beginning with a comment died with `?SYNTAX ERROR`.
+* The statement executor pointed the cursor at `ENTRY+1` (the line number)
+  instead of `ENTRY+3` (the text), so every line *after the first* was a
+  syntax error. The first line worked because `S_RUN` counts three bytes.
+* The program store advanced the end pointer by the *position* of the
+  entry rather than its *size*: the copy loop reloads `BC` with the
+  position on every iteration, and the update used it.
+* `FINDLINE` stepped back two bytes on one path and one on the other, so
+  it searched from one byte before each entry and read a length from the
+  middle of the previous line: `?NO SUCH LINE` for a program that had the
+  line.
+* `NEXT` restored the text cursor but not the line pointer, so the loop
+  stepped past the end of the program instead of back to its body.
+* The comparison operators stored the *character* rather than their code
+  (`GETC` overwrote the accumulator on the way to the store), so `<=` and
+  `<>` were silently `=`.
+* The `IF` handler tested the flags *after* popping the condition, so a
+  **true** condition read as "no THEN" — every `IF` was a syntax error.
+* The `INPUT` handler stored the program cursor as the number typed.
+* The `GOSUB` stack check compared only the high bytes of the stack
+  pointer, so the first `GOSUB` was refused as "out of memory" — and the
+  stack itself pushed words big-endian while `RETURN` read them
+  little-endian, so every `RETURN` restored a byte-swapped line pointer.
+
+**Then the eZ80 itself**, from the Zilog eZ80 CPU User Manual (UM0077),
+which is in `tmp/` for the record. Two memory modes (Z80 with 16-bit
+addresses paged by `MBASE`, and ADL with 24-bit addresses over 16 MB),
+24-bit register pairs, index registers, stack pointer and program
+counter; the four memory-mode suffixes `.SIS`, `.LIS`, `.SIL` and `.LIL`
+as one-byte prefixes; the second register bank; and the eZ80's own
+instructions — `LEA`, `MLT`, `TST`, `TSTIO`, `PEA`, `SBC HL,rr`, the
+immediate block-I/O forms, `IN0`/`OUT0`, `LD MB,A` and `STMIX`/`RSMIX`.
+
+The compatibility claim is the one that matters and it is measured, not
+asserted: **the BASIC produces the same transcript byte for byte under
+the eZ80 as it did under the Z80 emulator** — the whole interpreter, with
+`FOR`/`NEXT`, `IF`/`THEN` and all six comparison operators, `GOSUB`/
+`RETURN`, `INPUT`, strings and integer arithmetic. That is a test in the
+suite, not a sentence in a document.
+
+Three of the eZ80's own bugs were found the same way, by the suite
+failing:
+
+* A template's argument was substituted at every use, so `LD IX, nn`
+  evaluated its immediate **twice** and the program counter moved four
+  bytes instead of two.
+* The block copy had its source and destination swapped: `LDIR` copies
+  `(HL)` to `(DE)`, not the other way round.
+* The stack pointer stepped by the *width mask* rather than the *size*,
+  so the first push landed 64 KB below the stack top.
+
+```
+18 eZ80 tests, 0 failures   the BASIC transcript identical to the Z80's
+```
+
+The gaps are written down rather than guessed: the `INI2`/`IND2`/`OUTI2`
+family is left out because the manual's two opcode tables disagree about
+its encoding, the `RS` prefix is not implemented, and the T-state counts
+are the Z80's rather than the eZ80's.

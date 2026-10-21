@@ -1,0 +1,1814 @@
+; ------------------------------------------------------------------------
+; GLYPHE BASIC 1.0 — a tiny line-numbered BASIC interpreter in Z80 assembly
+; (in the spirit of Amstrad CPC 464 Locomotive BASIC 1.0)
+;
+; Runs on z80.nim (our emulator). Console I/O uses ports:
+;   OUT (1),A   print char A (13 = newline)
+;   IN A,(2)    status: 1 = char available, 0 = none
+;   IN A,(1)    read char (BASIC uppercases input)
+;
+; Subset of Locomotive BASIC (uppercase only, 16-bit signed integers,
+; variables A..Z): NEW LIST RUN CLS BYE PRINT INPUT LET IF..THEN FOR/NEXT
+; GOTO GOSUB/RETURN REM END POKE and functions RND ABS INT PEEK.
+; No ELSE, no strings-as-variables, no floats, no graphics.
+; ------------------------------------------------------------------------
+
+; ---- memory map ----
+PROG    EQU 0xC000      ; program text (4 KB), ends with a 0 length byte
+VARS    EQU 0xD000      ; 26 numeric variables, 2 bytes each (A..Z)
+GOSUBST EQU 0xD100      ; gosub stack: 16 entries x 4 (entry, pos)
+GOSUBND EQU 0xD140
+FORST   EQU 0xD200      ; for stack: 16 entries x 8
+FORND   EQU 0xD280
+LINEBUF EQU 0xD400      ; input line buffer, 80 bytes
+IMM     EQU 0xD500      ; pseudo-entry for direct (immediate) commands
+TXT     EQU 0xD600      ; parse cursor (word)
+ENTRY   EQU 0xD602      ; current program entry (word)
+PEND    EQU 0xD604      ; one past final 0 byte of program (word)
+GSP     EQU 0xD606      ; gosub stack pointer (word)
+FSP     EQU 0xD608      ; for stack pointer (word)
+SEED    EQU 0xD60A      ; RND seed (word)
+SCR     EQU 0xD60C      ; scratch bytes: 0C..11 used below
+DIVCNT  EQU 0xD60C
+SGNFLG  EQU 0xD60D
+PNCNT   EQU 0xD60E
+PRSEP   EQU 0xD60F
+COL     EQU 0xD610
+FULFLG  EQU 0xD611
+VARIDX  EQU 0xD612
+SLPOS   EQU 0xD614      ; word scratch for line storage
+SLNUM   EQU 0xD616      ; word scratch
+NEWLENB EQU 0xD618
+OLDLENB EQU 0xD619
+FORVAR  EQU 0xD61A
+FORLIM  EQU 0xD61B      ; word
+FORSTP  EQU 0xD61D      ; word
+FORRES  EQU 0xD61F      ; word
+FORENT  EQU 0xD624      ; word: the FOR line's own entry, so NEXT can
+                        ; come back to it -- without it the loop body was
+                        ; unreachable: the executor's end-of-line step
+                        ; advances the *current* line, and by the time
+                        ; NEXT ran, that was the NEXT line, so the loop
+                        ; stepped past the end of the program instead of
+                        ; back to the body.
+LTFLG   EQU 0xD621
+EQFLG   EQU 0xD622
+RELOPN  EQU 0xD623
+ECHOFLG EQU 0xD6E0      ; 1 = echo input chars (batch), 0 = silent
+STKTOP  EQU 0xBFF0
+
+CR      EQU 13
+
+        ORG 0
+
+; ---- startup ----
+START:
+        LD SP,STKTOP
+        CALL DONEW
+        LD HL,MSGBAN
+        CALL PMSG
+        CALL PRREADY
+        JP MAIN
+
+; ---- main loop: read a line, store it or execute it ----
+MAIN:
+        LD SP,STKTOP            ; also unwinds any junk left by errors
+        CALL RDLN
+        LD HL,LINEBUF
+MN1:
+        LD A,(HL)
+        CP ' '
+        JP NZ,MN2
+        INC HL
+        JP MN1
+MN2:
+        CP '0'
+        JP C,MNIMM
+        CP '9'+1
+        JP NC,MNIMM
+        LD (TXT),HL             ; line number -> store/replace/delete
+        CALL STORLN
+        JP MAIN
+MNIMM:
+        OR A                    ; empty line?
+        JP Z,MAIN
+        LD DE,LINEBUF
+        LD HL,IMM+3
+        LD C,0
+IMC:
+        LD A,(DE)
+        OR A
+        JP Z,IMD
+        LD (HL),A
+        INC HL
+        INC DE
+        INC C
+        JP IMC
+IMD:
+        LD (HL),0
+        LD A,C
+        ADD A,4                 ; len = text + terminator + 3 header bytes
+        LD (IMM),A
+        LD HL,IMM
+        LD (ENTRY),HL
+        LD HL,IMM+3
+        LD (TXT),HL
+        JP STMTLOOP
+
+; ---- statement executor ----
+STMTLOOP:
+        CALL SKIPS
+        CALL PEEKC
+        OR A
+        JP Z,ENDLINE
+        CP ':'
+        JP NZ,DODISP
+        CALL GETC
+        JP STMTLOOP
+DODISP:
+        CALL DOSTMT
+        JP STMTLOOP
+
+ENDLINE:
+        LD HL,(ENTRY)
+        LD DE,IMM               ; direct command? back to prompt
+        LD A,D
+        CP H
+        JP NZ,EL1
+        LD A,E
+        CP L
+        JP Z,MAIN
+EL1:
+        LD A,(HL)               ; advance to next line
+        LD E,A
+        LD D,0
+        ADD HL,DE
+        LD (ENTRY),HL
+        LD A,(HL)
+        OR A
+        JP Z,PROGEND
+        INC HL                  ; past the length byte...
+        INC HL                  ; ...and the two line-number bytes:
+        INC HL                  ; the text starts three bytes in, not one.
+                                ; With one INC the cursor pointed at the
+                                ; low byte of the line number, so every
+                                ; line after the first was parsed as
+                                ; "?SYNTAX ERROR" -- the first line
+                                ; worked because S_RUN points the cursor
+                                ; with three INCs.
+        LD (TXT),HL
+        JP STMTLOOP
+
+PROGEND:
+        CALL RSTSTKS
+        CALL PRREADY
+        JP MAIN
+
+; ---- console ------------------------------------------------------------
+; PUTCHAR: A = char. Clobbers AF only.
+PUTCHAR:
+        OUT (1),A
+        CP CR
+        JP Z,PC1
+        PUSH HL
+        LD HL,COL
+        INC (HL)
+        POP HL
+        RET
+PC1:
+        PUSH HL
+        LD HL,COL
+        LD (HL),0
+        POP HL
+        RET
+
+; GETKEY: blocking read of one char (uppercased). Clobbers AF.
+GETKEY:
+        IN A,(2)
+        OR A
+        JP Z,GETKEY
+        IN A,(1)
+        CP 'a'
+        JP C,GK1
+        CP 'z'+1
+        JP NC,GK1
+        AND 0xDF
+GK1:
+        RET
+
+; RDLN: read a line into LINEBUF (0-terminated). Echoes if ECHOFLG.
+RDLN:
+        LD HL,LINEBUF
+        XOR A
+        LD (FULFLG),A
+RDL1:
+        CALL GETKEY
+        CP CR
+        JP Z,RDLD
+        PUSH AF                 ; save the char
+        LD A,(ECHOFLG)
+        OR A
+        JP Z,RDLST
+        POP AF
+        PUSH AF                 ; keep char
+        CALL PUTCHAR            ; echo it
+RDLST:
+        POP AF
+        PUSH AF                 ; keep the char across the compare
+        PUSH DE
+        LD DE,LINEBUF+78
+        LD A,H
+        CP D
+        JP C,RDLOK
+        JP NZ,RDLF
+        LD A,L
+        CP E
+        JP NC,RDLF
+RDLOK:
+        POP DE
+        POP AF
+        LD (HL),A               ; store char
+        INC HL
+        JP RDL1
+RDLF:
+        LD A,1                  ; buffer full: keep polling, drop chars
+        LD (FULFLG),A
+        POP DE
+        POP AF
+        JP RDL1
+RDLD:
+        LD (HL),0
+        RET
+
+; PMSG: print zero-terminated string at HL.
+PMSG:
+        LD A,(HL)
+        OR A
+        RET Z
+        PUSH HL
+        CALL PUTCHAR
+        POP HL
+        INC HL
+        JP PMSG
+
+PRREADY:
+        LD HL,MSGREADY
+        CALL PMSG
+        LD A,CR
+        CALL PUTCHAR
+        RET
+
+; ---- program storage -----------------------------------------------------
+
+; NEW: wipe program, variables, stacks.
+DONEW:
+        LD HL,PROG
+        LD (HL),0
+        INC HL
+        LD (PEND),HL
+        ; fall through: clear variables
+CLRVARS:                        ; used by RUN (keeps the program!)
+        LD HL,VARS
+        LD C,52
+DW1:
+        LD (HL),0
+        INC HL
+        DEC C
+        JP NZ,DW1
+        CALL RSTSTKS
+        XOR A
+        LD (COL),A
+        RET
+
+RSTSTKS:
+        LD HL,GOSUBST
+        LD (GSP),HL
+        LD HL,FORST
+        LD (FSP),HL
+        RET
+
+; STORLN: TXT points at first digit of a line number in LINEBUF.
+STORLN:
+        CALL SKIPS
+        CALL NUMBER
+        LD (SLNUM),HL
+        LD BC,(SLNUM)           ; walker compares entries against BC
+        LD HL,PROG
+SLW:
+        LD A,(HL)
+        OR A
+        JP Z,SLINS2             ; ran off the end: insert here
+        INC HL
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        LD A,D                  ; equal line numbers -> replace
+        CP B
+        JP NZ,SLNQ
+        LD A,E
+        CP C
+        JP Z,SLM2
+SLNQ:
+        LD A,D                  ; entry number > new number -> insert here
+        CP B
+        JP C,SLADV
+        JP NZ,SLINS3
+        LD A,E
+        CP C
+        JP C,SLADV
+SLINS3:
+        DEC HL
+        DEC HL
+SLINS2:
+        LD (SLPOS),HL
+        JP SLINS
+SLM2:
+        DEC HL
+        DEC HL
+        LD A,(HL)
+        LD (OLDLENB),A
+        LD C,A
+        LD B,0
+        LD (SLPOS),HL
+        PUSH HL
+        ADD HL,BC
+        EX DE,HL                ; DE = src, HL = dst
+        POP HL
+        LD BC,(PEND)
+SLDL:
+        LD A,D
+        CP B
+        JP C,SLDCP
+        JP NZ,SLDDN
+        LD A,E
+        CP C
+        JP NC,SLDDN
+SLDCP:
+        LD A,(DE)
+        LD (HL),A
+        INC HL
+        INC DE
+        JP SLDL
+SLDDN:
+        LD HL,(PEND)
+        LD A,(OLDLENB)
+        LD C,A
+        LD B,0
+        LD A,L
+        SUB C
+        LD L,A
+        LD A,H
+        SBC A,B
+        LD H,A
+        LD (PEND),HL
+        CALL PEEKC              ; empty text -> pure delete
+        OR A
+        RET Z
+        JP SLINS
+SLADV:
+        DEC HL
+        DEC HL
+        LD E,(HL)
+        LD D,0
+        ADD HL,DE
+        JP SLW
+
+; SLINS: insert entry at SLPOS; number in (SLNUM); text from TXT.
+SLINS:
+        LD DE,(TXT)
+        XOR A
+        LD (PNCNT),A
+SLIC:
+        LD A,(DE)
+        OR A
+        JP Z,SLICD
+        INC DE
+        LD A,(PNCNT)
+        INC A
+        LD (PNCNT),A
+        JP SLIC
+SLICD:
+        LD A,(PNCNT)
+        ADD A,4
+        LD (NEWLENB),A
+        ; overflow check: PEND + newlen must stay below 0xD000
+        LD HL,(PEND)
+        LD C,A
+        LD B,0
+        ADD HL,BC
+        LD DE,0xD000
+        LD A,D
+        CP H
+        JP C,ERRMEM
+        ; shift the tail up by newlen (backwards copy)
+        LD HL,(PEND)
+        DEC HL
+        PUSH HL
+        ADD HL,BC
+        EX DE,HL
+        POP HL
+SLUP:
+        LD BC,(SLPOS)
+        LD A,H
+        CP B
+        JP C,SLUPD
+        JP NZ,SLUP1
+        LD A,L
+        CP C
+        JP C,SLUPD
+SLUP1:
+        LD A,(HL)
+        LD (DE),A
+        DEC HL
+        DEC DE
+        JP SLUP
+SLUPD:
+        LD HL,(PEND)
+        LD BC,(NEWLENB)     ; BC is not the new length here: the copy loop
+                            ; above reloads it with SLPOS every iteration,
+                            ; so adding it here moved PEND by the *position*
+                            ; of the entry instead of by its size. The
+                            ; program end pointer then pointed into the
+                            ; middle of the text area, and the next line
+                            ; was stored on top of the first: the run
+                            ; reported "?SYNTAX ERROR IN 18187", a line
+                            ; number nobody ever typed.
+        ADD HL,BC
+        LD (PEND),HL
+        ; write the entry
+        LD HL,(SLPOS)
+        LD A,(NEWLENB)
+        LD (HL),A
+        INC HL
+        LD BC,(SLNUM)
+        LD (HL),C
+        INC HL
+        LD (HL),B
+        INC HL
+        LD DE,(TXT)
+SLCPT:
+        LD A,(DE)
+        LD (HL),A
+        INC HL
+        INC DE
+        OR A
+        JP NZ,SLCPT
+        RET
+
+; FINDLINE: BC = line number -> HL = entry (NC), or C = not found.
+FINDLINE:
+        LD HL,PROG
+FLW:
+        LD A,(HL)
+        OR A
+        JP Z,FLNF
+        INC HL                  ; the line number's low byte
+        LD A,(HL)
+        CP C
+        JP NZ,FLNE1
+        INC HL                  ; the line number's high byte
+        LD A,(HL)
+        CP B
+        JP Z,FLOK
+        DEC HL                  ; the high byte did not match either:
+FLNE1:                        ; one step back to the length byte. The
+        DEC HL                 ; two paths arrive here from different
+        LD E,(HL)              ; places -- the low byte and the high byte
+        LD D,0                 ; -- and they used to step back by the
+        ADD HL,DE              ; same amount, so a line whose *low* byte
+        JP FLW                 ; differed walked from one byte before the
+                               ; entry and read a length from the middle
+                               ; of the previous line: "?NO SUCH LINE"
+                               ; for a program that had the line
+FLOK:
+        DEC HL
+        DEC HL
+        OR A
+        RET
+FLNF:
+        SCF
+        RET
+
+; ---- statement dispatch --------------------------------------------------
+; DOSTMT: TXT at a statement. Returns via RET (handlers keep stack balanced);
+; END/RUN/BYE discard the return address themselves.
+DOSTMT:
+        CALL SKIPS
+        LD HL,KWTAB
+DSM:
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        INC HL
+        LD A,D
+        OR E
+        JP Z,DSNO
+        PUSH HL                 ; table position after name
+        EX DE,HL
+        CALL KWMATCH
+        POP HL
+        JP Z,DSGO
+        INC HL
+        INC HL
+        JP DSM
+DSGO:
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        EX DE,HL
+        JP (HL)                 ; handler; its RET returns to caller
+DSNO:
+        CALL PEEKC              ; not a keyword: assignment to A..Z?
+        CP 'A'
+        JP C,ERRSYN
+        CP 'Z'+1
+        JP NC,ERRSYN
+        JP ASSIGN
+
+; KWMATCH: HL = keyword (ASCIIZ). If TXT starts with it, consume it, Z set.
+KWMATCH:
+        LD DE,(TXT)
+KWML:
+        LD A,(HL)
+        OR A
+        JP Z,KWMY
+        LD A,(DE)
+        CP (HL)
+        JP NZ,KWMN
+        INC DE
+        INC HL
+        JP KWML
+KWMY:
+        LD (TXT),DE
+        XOR A
+        RET
+KWMN:
+        LD A,1
+        OR A
+        RET
+
+; ---- cursor helpers (use DE only: HL holds expression values) -----------
+SKIPS:
+        LD DE,(TXT)
+        LD A,(DE)
+        CP ' '
+        RET NZ
+        INC DE
+        LD (TXT),DE
+        JP SKIPS
+
+PEEKC:
+        LD DE,(TXT)
+        LD A,(DE)
+        RET
+
+GETC:
+        LD DE,(TXT)
+        LD A,(DE)
+        INC DE
+        LD (TXT),DE
+        RET
+
+TOEOL:
+        LD DE,(TXT)
+TEL:
+        LD A,(DE)
+        OR A
+        JP Z,TELD
+        INC DE
+        JP TEL
+TELD:                         ; the cursor must be written back: the
+        LD (TXT),DE           ; statement executor keeps parsing from
+        RET                   ; (TXT) after the handler returns, so a
+                              ; REM whose cursor was left mid-line had
+                              ; the rest of its own comment parsed as
+                              ; more statements — and the first line of
+                              ; every program that started with a REM
+                              ; died with "?SYNTAX ERROR".
+
+; ---- statements ----------------------------------------------------------
+
+S_NEW:
+        CALL DONEW
+        RET
+
+S_LIST:
+        LD DE,PROG
+LSL:
+        LD A,(DE)
+        OR A
+        RET
+        INC DE
+        LD A,(DE)
+        LD L,A
+        INC DE
+        LD A,(DE)
+        LD H,A
+        PUSH DE
+        CALL PNUMU
+        LD A,' '
+        CALL PUTCHAR
+        POP DE
+        INC DE
+LSLT:
+        LD A,(DE)
+        OR A
+        JP Z,LSLE
+        PUSH DE
+        CALL PUTCHAR
+        POP DE
+        INC DE
+        JP LSLT
+LSLE:
+        LD A,CR
+        CALL PUTCHAR
+        INC DE
+        JP LSL
+
+S_RUN:
+        CALL CLRVARS            ; CPC RUN clears variables, keeps program
+        LD A,(PROG)
+        OR A
+        JP Z,RUNMT
+        LD HL,PROG
+        LD (ENTRY),HL
+        INC HL
+        INC HL
+        INC HL
+        LD (TXT),HL
+        POP HL                  ; discard return address: start executing
+        JP STMTLOOP
+RUNMT:
+        POP HL
+        CALL PRREADY
+        JP MAIN
+
+S_CLS:
+        LD A,12                 ; form feed (console may clear)
+        CALL PUTCHAR
+        RET
+
+S_BYE:
+        POP HL
+        HALT
+
+S_LET:
+        JP ASSIGN
+
+; ASSIGN: TXT at variable letter. var = expr
+ASSIGN:
+        CALL SKIPS
+        CALL GETC
+        CP 'A'
+        JP C,ERRSYN
+        CP 'Z'+1
+        JP NC,ERRSYN
+        SUB 'A'
+        LD (VARIDX),A
+        CALL SKIPS
+        CALL GETC
+        CP '='
+        JP NZ,ERRSYN
+        CALL EXPR
+        PUSH HL
+        LD A,(VARIDX)
+        ADD A,A
+        LD E,A
+        LD D,0
+        LD HL,VARS
+        ADD HL,DE
+        POP DE
+        LD (HL),E
+        INC HL
+        LD (HL),D
+        RET
+
+; PRINT [items][;|,]
+S_PRINT:
+        XOR A
+        LD (PRSEP),A
+PRL:
+        CALL SKIPS
+        CALL PEEKC
+        OR A
+        JP Z,PREND
+        CP ':'
+        JP Z,PREND
+        CP '"'
+        JP Z,PRSTR
+        CP ','
+        JP Z,PRCOM
+        CP ';'
+        JP Z,PRSEM
+        CALL EXPR
+        CALL PNUMS
+        XOR A
+        LD (PRSEP),A
+        JP PRL
+PRSTR:
+        CALL GETC               ; opening quote
+PRLS:
+        CALL PEEKC
+        OR A
+        JP Z,ERRSYN
+        CP '"'
+        JP Z,PRSTRE
+        CALL GETC
+        CALL PUTCHAR
+        JP PRLS
+PRSTRE:
+        CALL GETC               ; closing quote
+        XOR A
+        LD (PRSEP),A
+        JP PRL
+PRCOM:
+        CALL GETC
+PRLP:
+        LD A,(COL)
+        AND 7
+        JP Z,PRCE
+        LD A,' '
+        CALL PUTCHAR
+        JP PRLP
+PRCE:
+        LD A,1
+        LD (PRSEP),A
+        JP PRL
+PRSEM:
+        CALL GETC
+        LD A,1
+        LD (PRSEP),A
+        JP PRL
+PREND:
+        LD A,(PRSEP)
+        OR A
+        RET NZ
+        LD A,CR
+        CALL PUTCHAR
+        RET
+
+; INPUT ["prompt";]var
+S_INPUT:
+        CALL SKIPS
+        CALL PEEKC
+        CP '"'
+        JP Z,INPR
+        JP INPV
+INPR:
+        CALL GETC
+INPL:
+        CALL PEEKC
+        OR A
+        JP Z,ERRSYN
+        CP '"'
+        JP Z,INPLE
+        CALL GETC
+        CALL PUTCHAR
+        JP INPL
+INPLE:
+        CALL GETC
+        CALL SKIPS
+        CALL GETC
+        CP ';'
+        JP NZ,ERRSYN
+INPV:
+        CALL SKIPS
+        CALL GETC
+        CP 'A'
+        JP C,ERRSYN
+        CP 'Z'+1
+        JP NC,ERRSYN
+        SUB 'A'
+        LD (VARIDX),A
+        LD A,'?'
+        CALL PUTCHAR
+        LD A,' '
+        CALL PUTCHAR
+        CALL RDLN
+        LD HL,(TXT)             ; save program cursor
+        PUSH HL
+        LD HL,LINEBUF
+        LD (TXT),HL
+        CALL EXPR               ; HL = the value that was typed
+        POP DE                  ; DE = the saved cursor
+        LD (TXT),DE             ; and put the cursor back
+        PUSH HL                 ; the *value* is what the variable gets:
+        LD A,(VARIDX)           ; popping the cursor here stored the
+        ADD A,A                 ; program pointer as the number, and
+        LD E,A                  ; "INPUT N" then printed the cursor
+        LD D,0                  ; (an address like -16369) instead
+        LD HL,VARS
+        ADD HL,DE
+        POP DE
+        LD (HL),E
+        INC HL
+        LD (HL),D
+        RET
+
+; IF expr THEN <statement(s) | line number>
+S_IF:
+        CALL EXPR
+        PUSH HL
+        CALL SKIPS
+        LD HL,KWT_THEN
+        CALL KWMATCH
+        JP NZ,IFNOTHEN          ; the match's Z flag is still live here:
+        POP HL                  ; popping the value would replace it with
+        LD A,H                  ; the *value's* flags, and a true condition
+        OR L                    ; is non-zero -- so "IF X>50 THEN ..."
+        JP Z,IFF                ; failed with "?SYNTAX ERROR" exactly
+                                ; when the condition was true
+        ; true: THEN <number> means GOTO
+        CALL SKIPS
+        CALL PEEKC
+        CP '0'
+        JP C,IFT1
+        CP '9'+1
+        JP NC,IFT1
+        CALL NUMBER
+        PUSH HL
+        POP BC
+        CALL FINDLINE
+        JP C,ERRLINE
+        LD (ENTRY),HL
+        INC HL
+        INC HL
+        INC HL
+        LD (TXT),HL
+        RET
+IFNOTHEN:                       ; out of line: the fall-through from the
+        POP HL                  ; test above is the *true* branch, and
+        JP ERRSYN               ; putting this block in the middle of it
+                                ; made every true condition a syntax error
+IFT1:
+        RET                     ; statements follow
+IFF:
+        CALL TOEOL              ; false: skip rest of line
+        RET
+
+; FOR var = expr TO expr [STEP expr]
+S_FOR:
+        CALL SKIPS
+        CALL GETC
+        CP 'A'
+        JP C,ERRSYN
+        CP 'Z'+1
+        JP NC,ERRSYN
+        SUB 'A'
+        LD (FORVAR),A
+        CALL SKIPS
+        CALL GETC
+        CP '='
+        JP NZ,ERRSYN
+        CALL EXPR               ; start value -> store in variable
+        PUSH HL
+        LD A,(FORVAR)
+        ADD A,A
+        LD E,A
+        LD D,0
+        LD HL,VARS
+        ADD HL,DE
+        POP DE
+        LD (HL),E
+        INC HL
+        LD (HL),D
+        CALL SKIPS
+        LD HL,KWT_TO
+        CALL KWMATCH
+        JP NZ,ERRSYN
+        CALL EXPR
+        LD (FORLIM),HL
+        LD HL,1
+        LD (FORSTP),HL
+        LD HL,KWT_STEP
+        CALL KWMATCH
+        JP NZ,FORG
+        CALL EXPR
+        LD (FORSTP),HL
+FORG:
+        ; room on the loop stack?
+        LD DE,(FSP)
+        LD HL,FORND-10
+        LD A,D
+        CP H
+        JP C,FOROK
+        JP NZ,ERRMEM
+        LD A,E
+        CP L
+        JP NC,ERRMEM
+FOROK:
+        LD HL,(FSP)
+        LD A,(FORVAR)
+        LD (HL),A
+        INC HL
+        LD (HL),0
+        INC HL
+        LD DE,(FORLIM)
+        LD A,E
+        LD (HL),A
+        INC HL
+        LD A,D
+        LD (HL),A
+        INC HL
+        LD DE,(FORSTP)
+        LD A,E
+        LD (HL),A
+        INC HL
+        LD A,D
+        LD (HL),A
+        INC HL
+        LD DE,(TXT)             ; resume here on NEXT
+        LD A,E
+        LD (HL),A
+        INC HL
+        LD A,D
+        LD (HL),A
+        INC HL
+        LD DE,(ENTRY)           ; and the FOR line itself, so NEXT can
+        LD A,E                  ; put the executor back on it
+        LD (HL),A
+        INC HL
+        LD A,D
+        LD (HL),A
+        INC HL
+        LD (FSP),HL
+        RET
+
+; NEXT [var]
+S_NEXT:
+        CALL SKIPS
+        CALL PEEKC
+        CP 'A'
+        JP C,NN1
+        CP 'Z'+1
+        JP NC,NN1
+        CALL GETC               ; consume variable name (ignored)
+NN1:
+        LD DE,(FSP)
+        LD HL,FORST
+        LD A,D
+        CP H
+        JP NZ,NN2
+        LD A,E
+        CP L
+        JP Z,ERRNXT
+NN2:
+        LD HL,(FSP)
+        LD BC,0xFFF6
+        ADD HL,BC               ; HL = top entry (10 bytes per entry)
+        LD A,(HL)
+        LD (FORVAR),A
+        INC HL
+        INC HL
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        LD (FORLIM),DE
+        INC HL
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        LD (FORSTP),DE
+        INC HL
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        LD (FORRES),DE
+        INC HL
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        LD (FORENT),DE          ; the FOR line, to be restored on NNRES
+        ; variable address
+        LD A,(FORVAR)
+        ADD A,A
+        LD E,A
+        LD D,0
+        LD HL,VARS
+        ADD HL,DE
+        LD A,(HL)
+        LD E,A
+        INC HL
+        LD D,(HL)               ; DE = var value
+        LD A,(FORSTP)
+        ADD A,E
+        LD E,A
+        LD A,(FORSTP+1)
+        ADC A,D
+        LD D,A                  ; DE = new value
+        LD (HL),D
+        DEC HL
+        LD (HL),E
+        EX DE,HL                ; HL = new value
+        LD A,(FORSTP+1)
+        RLA                     ; carry = sign of step
+        JP C,NEGSTEP
+        ; step >= 0: continue while var <= limit
+        LD DE,(FORLIM)
+        EX DE,HL                ; HL = limit, DE = var
+        CALL SCMP               ; carry = limit < var -> done
+        JP C,NNPOP
+        JP NNRES
+NEGSTEP:
+        ; step < 0: continue while var >= limit
+        LD DE,(FORLIM)
+        CALL SCMP               ; carry = var < limit -> done
+        JP C,NNPOP
+NNRES:
+        LD HL,(FORRES)
+        LD (TXT),HL
+        LD DE,(FORENT)          ; back to the FOR line: the executor's
+        LD (ENTRY),DE           ; end-of-line step advances the *current*
+        RET                     ; line, and the body is the line after
+                               ; the FOR, not the line after the NEXT
+NNPOP:
+        LD HL,(FSP)
+        LD BC,0xFFF6
+        ADD HL,BC
+        LD (FSP),HL
+        RET
+
+; GOTO expr
+S_GOTO:
+        CALL EXPR
+        PUSH HL
+        POP BC
+        CALL FINDLINE
+        JP C,ERRLINE
+        LD (ENTRY),HL
+        INC HL
+        INC HL
+        INC HL
+        LD (TXT),HL
+        RET
+
+; GOSUB expr
+S_GOSUB:
+        CALL EXPR
+        PUSH HL
+        POP BC
+        CALL FINDLINE
+        JP C,ERRLINE
+        LD DE,(GSP)
+        PUSH HL
+        LD HL,GOSUBND-4
+        ; out of memory when GSP is past the limit. Comparing only the
+        ; high bytes was not enough: the stack starts at 0xD100 and the
+        ; limit is 0xD13C -- the same high byte -- so the *first* GOSUB
+        ; was refused as "out of memory" and no subroutine could ever be
+        ; called. The low bytes decide it when the high ones match.
+        LD A,D
+        CP H
+        JP C,GSOK             ; the stack is below the limit
+        JP NZ,ERRMEM2         ; the stack is past it
+        LD A,E
+        CP L
+        JP C,GSOK             ; same page, still below the limit
+        JP Z,GSOK             ; exactly at it: the last slot that fits
+        JP ERRMEM2
+GSOK:
+        POP HL
+        ; push old (ENTRY,TXT), then jump
+        LD DE,(GSP)
+        PUSH HL                 ; target entry
+        LD HL,(ENTRY)
+        LD A,L
+        LD (DE),A               ; the old ENTRY, low byte first: the
+        INC DE                  ; RETURN reads the words back little-endian
+        LD A,H                  ; (and used to read them big-endian, so
+        LD (DE),A               ; every RETURN restored a byte-swapped
+        INC DE                  ; line pointer -- "?SYNTAX ERROR" on the
+        LD HL,(TXT)             ; line after the subroutine)
+        LD A,L
+        LD (DE),A               ; the old TXT, low byte first
+        INC DE
+        LD A,H
+        LD (DE),A
+        LD HL,(GSP)
+        LD DE,4
+        ADD HL,DE
+        LD (GSP),HL
+        POP HL                  ; target entry
+        LD (ENTRY),HL
+        INC HL
+        INC HL
+        INC HL
+        LD (TXT),HL
+        RET
+ERRMEM2:
+        POP HL
+        JP ERRMEM
+
+; RETURN
+S_RETURN:
+        LD HL,(GSP)
+        LD DE,GOSUBST
+        LD A,D
+        CP H
+        JP NZ,RW1
+        LD A,E
+        CP L
+        JP Z,ERRRET
+RW1:
+        LD BC,0xFFFC
+        ADD HL,BC
+        LD (GSP),HL
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        LD A,E
+        LD (ENTRY),A
+        LD A,D
+        LD (ENTRY+1),A
+        INC HL
+        LD A,(HL)
+        LD (TXT),A
+        INC HL
+        LD A,(HL)
+        LD (TXT+1),A
+        RET
+
+; REM
+S_REM:
+        CALL TOEOL
+        RET
+
+; END
+S_END:
+        CALL RSTSTKS
+        POP HL
+        CALL PRREADY
+        JP MAIN
+
+; POKE expr,expr
+S_POKE:
+        CALL EXPR               ; address
+        PUSH HL
+        CALL SKIPS
+        CALL GETC
+        CP ','
+        JP NZ,ERRSYN
+        CALL EXPR               ; value
+        POP DE
+        LD A,L
+        LD (DE),A
+        RET
+
+; ---- expressions (recursive descent, value in HL) -------------------------
+; precedence: comparisons < + - < * / < unary +/- < ( ) var func number
+
+EXPR:
+        CALL ADEXP
+        CALL SKIPS
+        CALL PEEKC
+        CP '='
+        JP Z,REL1
+        CP '<'
+        JP Z,REL1
+        CP '>'
+        JP Z,REL1
+        RET
+REL1:
+        CALL GETC
+        LD B,A
+        CALL PEEKC
+        CP '='
+        JP Z,REL2A
+        CP '>'
+        JP Z,REL2B
+        ; single-char: '=' 0, '<' 2, '>' 3
+        LD A,B
+        CP '='
+        LD A,0
+        JP Z,RELST
+        LD A,B
+        CP '<'
+        LD A,2
+        JP Z,RELST
+        LD A,3
+        JP RELST
+REL2A:                          ; second char '=': '==' 0, '<=' 4, '>=' 5
+        LD A,B
+        CP '<'
+        LD A,4
+        JP Z,RELST2
+        LD A,B
+        CP '>'
+        LD A,5
+        JP Z,RELST2
+        LD A,0
+        JP RELST2              ; '==' consumes its second char too
+REL2B:                          ; '<>' 1
+        LD A,1
+RELST2:
+        PUSH AF                 ; keep the operator's code: GETC puts
+        CALL GETC               ; the character it read into A, and the
+        POP AF                  ; fall-through below stored *that* as the
+        JP RELST                ; operator -- so "<=" and "<>" compared
+                               ; as "=" and every inequality was a
+                               ; coin toss
+RELST:
+        LD (RELOPN),A
+RELEVAL:
+        PUSH HL                 ; left side
+        CALL ADEXP
+        POP DE                  ; DE = left, HL = right
+        EX DE,HL
+        CALL SCMP               ; carry = left < right
+        PUSH AF
+        LD A,H                  ; equality?
+        CP D
+        JP NZ,REQN
+        LD A,L
+        CP E
+        JP NZ,REQN
+        LD A,1
+        JP REQS
+REQN:
+        XOR A
+REQS:
+        LD (EQFLG),A
+        POP AF
+        LD A,0
+        JP NC,LTS
+        LD A,1
+LTS:
+        LD (LTFLG),A
+        LD A,(RELOPN)
+        OR A
+        JP Z,RQ0
+        CP 1
+        JP Z,RQ1
+        CP 2
+        JP Z,RQ2
+        CP 3
+        JP Z,RQ3
+        CP 4
+        JP Z,RQ4
+        ; '>=': not less
+        LD A,(LTFLG)
+        OR A
+        JP Z,RTRU
+        JP RFAL
+RQ0:
+        LD A,(EQFLG)
+        OR A
+        JP NZ,RTRU
+        JP RFAL
+RQ1:
+        LD A,(EQFLG)
+        OR A
+        JP Z,RTRU
+        JP RFAL
+RQ2:
+        LD A,(LTFLG)
+        OR A
+        JP NZ,RTRU
+        JP RFAL
+RQ3:
+        LD A,(LTFLG)
+        OR A
+        JP NZ,RFAL
+        LD A,(EQFLG)
+        OR A
+        JP NZ,RFAL
+        JP RTRU
+RQ4:
+        LD A,(LTFLG)
+        OR A
+        JP NZ,RTRU
+        LD A,(EQFLG)
+        OR A
+        JP NZ,RTRU
+        JP RFAL
+RTRU:
+        LD HL,0xFFFF
+        RET
+RFAL:
+        LD HL,0
+        RET
+
+ADEXP:
+        CALL MULEXP
+ADL:
+        CALL SKIPS
+        CALL PEEKC
+        CP '+'
+        JP Z,ADP
+        CP '-'
+        JP Z,ADM
+        RET
+ADP:
+        CALL GETC
+        PUSH HL
+        CALL MULEXP
+        POP DE
+        ADD HL,DE
+        JP ADL
+ADM:
+        CALL GETC
+        PUSH HL
+        CALL MULEXP
+        POP DE
+        EX DE,HL                ; HL = left, DE = right
+        LD A,L
+        SUB E
+        LD L,A
+        LD A,H
+        SBC A,D
+        LD H,A
+        JP ADL
+
+MULEXP:
+        CALL UNARY
+MLL:
+        CALL SKIPS
+        CALL PEEKC
+        CP '*'
+        JP Z,MLP
+        CP '/'
+        JP Z,MLDV
+        RET
+MLP:
+        CALL GETC
+        PUSH HL
+        CALL UNARY
+        POP DE
+        EX DE,HL                ; HL = left, DE = right
+        CALL MULS
+        JP MLL
+MLDV:
+        CALL GETC
+        PUSH HL
+        CALL UNARY
+        POP DE
+        EX DE,HL
+        CALL DIVS
+        JP MLL
+
+UNARY:
+        CALL SKIPS
+        CALL PEEKC
+        CP '-'
+        JP Z,UNM
+        CP '+'
+        JP Z,UNP
+        JP FACTOR
+UNM:
+        CALL GETC
+        CALL UNARY
+        JP NEGHL
+UNP:
+        CALL GETC
+        JP UNARY
+
+FACTOR:
+        CALL SKIPS
+        CALL PEEKC
+        CP '('
+        JP Z,FACP
+        CP '0'
+        JP C,FACI
+        CP '9'+1
+        JP C,NUMBER
+FACI:
+        LD HL,KWRND             ; functions first
+        CALL KWMATCH
+        JP Z,FNDR
+        LD HL,KWABS
+        CALL KWMATCH
+        JP Z,FNAB
+        LD HL,KWINT
+        CALL KWMATCH
+        JP Z,FNIN
+        LD HL,KWPEEK
+        CALL KWMATCH
+        JP Z,FNPK
+        CALL PEEKC              ; single-letter variable
+        CP 'A'
+        JP C,ERRSYN
+        CP 'Z'+1
+        JP NC,ERRSYN
+        CALL GETC
+        PUSH AF
+        CALL PEEKC
+        CP 'A'
+        JP C,FACV
+        CP 'Z'+1
+        JP NC,FACV
+        POP AF
+        JP ERRSYN               ; names longer than one letter unsupported
+FACV:
+        POP AF
+        SUB 'A'
+        ADD A,A
+        LD E,A
+        LD D,0
+        LD HL,VARS
+        ADD HL,DE
+        LD A,(HL)
+        INC HL
+        LD H,(HL)
+        LD L,A
+        RET
+FACP:
+        CALL GETC
+        CALL EXPR
+        CALL SKIPS
+        CALL GETC
+        CP ')'
+        JP NZ,ERRSYN
+        RET
+
+NUMBER:                         ; decimal digits -> HL
+        LD HL,0
+NM1:
+        LD DE,(TXT)
+        LD A,(DE)
+        CP '0'
+        RET C
+        CP '9'+1
+        RET NC
+        INC DE
+        LD (TXT),DE
+        SUB '0'
+        LD E,A
+        LD D,0
+        PUSH DE
+        ADD HL,HL
+        PUSH HL
+        ADD HL,HL
+        ADD HL,HL
+        POP DE
+        ADD HL,DE               ; HL = HL*10
+        POP DE
+        ADD HL,DE               ; + digit
+        JP NM1
+
+; ---- functions ------------------------------------------------------------
+
+FNDR:
+        CALL SKIPS
+        CALL PEEKC
+        CP '('
+        JP Z,RNDA
+        CALL RND16
+        RET
+RNDA:
+        CALL GETC               ; consume '('
+        CALL RND16
+        PUSH HL                 ; the random, on the stack
+        CALL EXPR               ; HL = the modulus
+        CALL SKIPS
+        CALL GETC
+        CP ')'                  ; the closing paren belongs to the
+        JP NZ,ERRSYN            ; function: leaving it there made the
+        POP DE                  ; statement executor read it as the start
+        LD A,H                  ; of the next statement, so the line died
+        OR L                    ; with "?SYNTAX ERROR" right after it had
+        JP Z,RNDR               ; printed its value
+        EX DE,HL
+        PUSH DE
+        CALL UDIV
+        POP DE
+        LD L,C
+        LD H,0
+RNDR:
+        RET
+
+RND16:
+        LD HL,(SEED)
+        LD DE,25173
+        CALL MUL16
+        LD DE,13849
+        ADD HL,DE
+        LD (SEED),HL
+        RES 7,H                 ; keep it positive
+        RET
+
+FNAB:
+        CALL GETC
+        CALL EXPR
+        CALL SKIPS
+        CALL GETC
+        CP ')'
+        JP NZ,ERRSYN
+        LD A,H
+        OR A
+        RET P
+        JP NEGHL
+
+FNIN:
+        CALL GETC
+        CALL EXPR
+        CALL SKIPS
+        CALL GETC
+        CP ')'
+        JP NZ,ERRSYN
+        RET
+
+FNPK:
+        CALL GETC
+        CALL EXPR
+        CALL SKIPS
+        CALL GETC
+        CP ')'
+        JP NZ,ERRSYN
+        LD L,(HL)
+        LD H,0
+        RET
+
+; ---- 16-bit arithmetic ----------------------------------------------------
+
+NEGHL:
+        LD A,H
+        CPL
+        LD H,A
+        LD A,L
+        CPL
+        LD L,A
+        INC HL
+        RET
+
+; SCMP: signed compare, carry = HL < DE
+SCMP:
+        LD A,H
+        XOR D
+        JP M,SCMPD
+        LD A,L
+        SUB E
+        LD A,H
+        SBC A,D
+        RET
+SCMPD:
+        LD A,H
+        RLCA                    ; carry = sign of HL
+        RET
+
+; MUL16: HL = HL * DE (mod 65536)
+MUL16:
+        LD A,H
+        OR L
+        RET Z
+        LD A,D
+        OR E
+        RET Z
+        LD A,16
+        LD (DIVCNT),A
+        LD BC,0
+MLLP2:
+        SRL H
+        RR L
+        JP NC,MLNS2
+        LD A,C
+        ADD A,E
+        LD C,A
+        LD A,B
+        ADC A,D
+        LD B,A
+MLNS2:
+        SLA E
+        RL D
+        LD A,(DIVCNT)
+        DEC A
+        LD (DIVCNT),A
+        JP NZ,MLLP2
+        LD L,C
+        LD H,B
+        RET
+
+; UDIV: HL = HL / DE (quotient), BC = remainder
+UDIV:
+        LD A,D
+        OR E
+        JP Z,ERRDIV
+        LD BC,0
+        LD A,16
+        LD (DIVCNT),A
+DVLP:
+        ADD HL,HL
+        RL C
+        RL B
+        LD A,C
+        SUB E
+        LD A,B
+        SBC A,D
+        JP C,DVSK
+        LD A,C
+        SUB E
+        LD C,A
+        LD A,B
+        SBC A,D
+        LD B,A
+        INC L
+DVSK:
+        LD A,(DIVCNT)
+        DEC A
+        LD (DIVCNT),A
+        JP NZ,DVLP
+        RET
+
+; MULS: signed HL = HL * DE
+MULS:
+        LD A,H
+        XOR D
+        AND 0x80
+        LD (SGNFLG),A
+        LD A,H
+        OR A
+        JP P,MUS1
+        CALL NEGHL
+MUS1:
+        LD A,D
+        OR A
+        JP P,MUS2
+        PUSH HL
+        EX DE,HL
+        CALL NEGHL
+        EX DE,HL
+        POP HL
+MUS2:
+        CALL MUL16
+        LD A,(SGNFLG)
+        OR A
+        RET Z
+        JP NEGHL
+
+; DIVS: signed HL = HL / DE
+DIVS:
+        LD A,H
+        XOR D
+        AND 0x80
+        LD (SGNFLG),A
+        LD A,H
+        OR A
+        JP P,DVS1
+        CALL NEGHL
+DVS1:
+        LD A,D
+        OR A
+        JP P,DVS2
+        PUSH HL
+        EX DE,HL
+        CALL NEGHL
+        EX DE,HL
+        POP HL
+DVS2:
+        CALL UDIV
+        LD A,(SGNFLG)
+        OR A
+        RET Z
+        JP NEGHL
+
+; ---- number printing ------------------------------------------------------
+
+PNUMU:                          ; unsigned HL -> decimal
+        LD A,H
+        OR L
+        JP NZ,PU1
+        LD A,'0'
+        CALL PUTCHAR
+        RET
+PU1:
+        XOR A
+        LD (PNCNT),A
+PUL:
+        LD DE,10
+        CALL UDIV
+        LD A,C
+        ADD A,'0'
+        PUSH AF
+        LD A,(PNCNT)
+        INC A
+        LD (PNCNT),A
+        LD A,H
+        OR L
+        JP NZ,PUL
+PUP:
+        POP AF
+        CALL PUTCHAR
+        LD A,(PNCNT)
+        DEC A
+        LD (PNCNT),A
+        JP NZ,PUP
+        RET
+
+PNUMS:                          ; signed, leading space when non-negative (CPC style)
+        LD A,H
+        OR A
+        JP P,PS1
+        PUSH AF
+        LD A,'-'
+        CALL PUTCHAR
+        POP AF
+        CALL NEGHL
+        JP PNUMU
+PS1:
+        LD A,' '
+        CALL PUTCHAR
+        JP PNUMU
+
+; ---- errors ---------------------------------------------------------------
+
+ERRSYN:  LD HL,MSGSYN
+         JP ERRGO
+ERRDIV:  LD HL,MSGDIV
+         JP ERRGO
+ERRLINE: LD HL,MSGLINE
+         JP ERRGO
+ERRRET:  LD HL,MSGRET
+         JP ERRGO
+ERRNXT:  LD HL,MSGNXT
+         JP ERRGO
+ERRMEM:  LD HL,MSGMEM
+ERRGO:
+        PUSH HL
+        LD A,CR
+        CALL PUTCHAR
+        POP HL
+        CALL PMSG
+        LD DE,(ENTRY)           ; " IN <line>" when running a program
+        LD HL,IMM
+        LD A,D
+        CP H
+        JP NZ,ERIN
+        LD A,E
+        CP L
+        JP Z,EROK
+ERIN:
+        LD HL,MSGIN
+        CALL PMSG
+        LD HL,(ENTRY)
+        INC HL
+        LD A,(HL)
+        LD L,A
+        INC HL
+        LD A,(HL)
+        LD H,A
+        CALL PNUMU
+EROK:
+        LD A,CR
+        CALL PUTCHAR
+        CALL RSTSTKS
+        CALL PRREADY
+        JP MAIN
+
+; ---- keyword table and strings --------------------------------------------
+
+KWTAB:
+        DW K_BYE,S_BYE
+        DW K_CLS,S_CLS
+        DW K_END,S_END
+        DW K_FOR,S_FOR
+        DW K_GOSUB,S_GOSUB
+        DW K_GOTO,S_GOTO
+        DW K_IF,S_IF
+        DW K_INPUT,S_INPUT
+        DW K_LET,S_LET
+        DW K_LIST,S_LIST
+        DW K_NEW,S_NEW
+        DW K_NEXT,S_NEXT
+        DW K_POKE,S_POKE
+        DW K_PRINT,S_PRINT
+        DW K_REM,S_REM
+        DW K_RETURN,S_RETURN
+        DW K_RUN,S_RUN
+        DW 0
+
+K_BYE:    DB "BYE",0
+K_CLS:    DB "CLS",0
+K_END:    DB "END",0
+K_FOR:    DB "FOR",0
+K_GOSUB:  DB "GOSUB",0
+K_GOTO:   DB "GOTO",0
+K_IF:     DB "IF",0
+K_INPUT:  DB "INPUT",0
+K_LET:    DB "LET",0
+K_LIST:   DB "LIST",0
+K_NEW:    DB "NEW",0
+K_NEXT:   DB "NEXT",0
+K_POKE:   DB "POKE",0
+K_PRINT:  DB "PRINT",0
+K_REM:    DB "REM",0
+K_RETURN: DB "RETURN",0
+K_RUN:    DB "RUN",0
+
+KWT_TO:   DB "TO",0
+KWT_STEP: DB "STEP",0
+KWT_THEN: DB "THEN",0
+
+KWRND:  DB "RND",0
+KWABS:  DB "ABS",0
+KWINT:  DB "INT",0
+KWPEEK: DB "PEEK",0
+
+MSGBAN:   DB 13,"GLYPHE BASIC 1.0",13,0
+MSGREADY: DB "READY",0
+MSGSYN:   DB "?SYNTAX ERROR",0
+MSGDIV:   DB "?DIVISION BY ZERO",0
+MSGLINE:  DB "?NO SUCH LINE",0
+MSGRET:   DB "?RETURN WITHOUT GOSUB",0
+MSGNXT:   DB "?NEXT WITHOUT FOR",0
+MSGMEM:   DB "?OUT OF MEMORY",0
+MSGIN:    DB " IN ",0
+

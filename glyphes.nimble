@@ -309,3 +309,14 @@ task gate, "Everything CI runs":
   exec "nimble benchVector"
   exec "nimble benchImport"
   exec "nimble tck"
+
+task ez80Test, "eZ80: the CPU's test suite (Z80 compatibility + the eZ80's own features)":
+  ## The eZ80 emulator in ez80/ is a separate project that lives here. Its
+  ## suite includes the strongest compatibility statement available: the
+  ## BASIC interpreter must produce the same transcript, byte for byte, as
+  ## the Z80 emulator it grew out of.
+  exec "nim c -r --mm:atomicArc --threads:on -o:tmp/test_ez80 ez80/tests/test_ez80.nim"
+
+task ez80Asm, "eZ80: assemble basic.z80":
+  exec "nim c -d:release -o:tmp/ez80asm ez80/ez80asm.nim"
+  exec "./tmp/ez80asm ez80/basic.z80 ez80/basic.bin"

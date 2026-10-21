@@ -329,6 +329,22 @@ Design documents: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the map,
 [`docs/ROADMAP.md`](docs/ROADMAP.md) has the gates, and
 [`ENHANCEMENTS.md`](ENHANCEMENTS.md) is what is deliberately not next.
 
+## Also in this repository: an eZ80
+
+[`ez80/`](ez80/README.md) holds a separate project that lives here for
+historical reasons: a **Zilog eZ80** emulator and assembler in Nim, with
+the BASIC that was written for it. The eZ80 is a Z80 superset — two memory
+modes (16-bit Z80 and 24-bit ADL), 24-bit registers, a second register
+bank, and the eZ80's own instruction set — and the suite proves the
+compatibility the only way that counts: the BASIC interpreter, 3000 bytes
+of hand-written assembly, produces the same transcript byte for byte as it
+did on the Z80 emulator it grew out of.
+
+```
+nimble ez80Test        the eZ80's test suite
+nimble ez80Asm         assemble basic.z80
+```
+
 ## Why
 
 Working with graphs today means one of three bad trades:
