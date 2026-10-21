@@ -110,18 +110,33 @@ INNERL: DEC DE
         HALT
 ```
 
-`bench/bench.nim` runs both, and takes the clock **before the run
-starts** and **after it ends** — so the number is the work's own time and
-not a measurement of the harness:
+`bench/bench.nim` runs both — and a third: the same loop written in
+Nim, compiled to native code for this machine, which is the floor under
+the other two. The clock is taken **before the run starts** and **after
+it ends**, so the number is the work's own time and not a measurement of
+the harness:
 
 ```
-                                     wall        cpu      T-states   per iter
-    GLYPHE BASIC (interpreted)    7.468 s    7.393 s    3898354435       3898
-         Z80 assembly (direct)    0.056 s    0.056 s      26031009         26
+                                     wall        cpu    ns/iter     T-states   T/iter
+    GLYPHE BASIC (interpreted)    7.575 s    7.451 s    7574.59   3898354435     3898
+         Z80 assembly (direct)    0.060 s    0.059 s      59.66     26031009       26
+     native Nim (this machine)    0.001 s    0.000 s       0.50            -        -
 
-speed-up    : 132.7x (wall clock)
-finished    : yes / yes
+BASIC vs assembly : 127.0x
+assembly vs native: 118.5x
+finished          : yes / yes / yes
 ```
+
+Two things the third row needs to be honest about. The native loop is
+run 200 times and the elapsed time divided, because a million
+iterations of native code take about a millisecond — below what the clock
+resolves in one go — and the repetition index is folded into the result
+on purpose, so the compiler cannot hoist one call out of the repetitions
+and leave the other 199 as nothing to do (it did exactly that the first
+time, and the row read 0.000 s). And the native loop accumulates its
+counter, which the machine-code version does not: so the native row
+does marginally *more* work than the assembly row, and the floor it
+reports is a slight over-estimate rather than a flattering one.
 
 The iteration count is read out of each program — the product of the
 BASIC's `FOR` limits, and the assembler's symbol table for the assembly —
@@ -137,15 +152,25 @@ here: the BASIC's integers are 16-bit signed, so a counter tops out at
 stack, which is the part of the interpreter a benchmark should be
 measuring.
 
-**What the gap says.** The two rows are the same work — a million
-iterations of a loop that counts down — and they differ by 132×, which is
-almost exactly the ratio of their T-states (3898 against 26). So the
-interpreter's overhead is the *work*, not a fixed cost around it: the
-BASIC spends 3898 T-states per `NEXT` where the machine code spends 26,
-and most of that is the **keyword dispatch** — every statement is matched
-by walking a seventeen-entry table of keywords, so `NEXT` is the
-seventeenth one tried. A hashed dispatch would be several times faster,
-and this is the measurement that would show it.
+**What the gap says.** The rows are the same work — a million iterations
+of a loop that counts down — and they say three different things.
+
+*Interpretation costs 127×.* The BASIC spends 3898 T-states per `NEXT`
+where the machine code spends 26, and the wall clock shows the same
+ratio. So the interpreter's overhead is the *work*, not a fixed cost
+around it, and nearly all of it is the **keyword dispatch**: every
+statement is matched by walking a seventeen-entry table of keywords, so
+`NEXT` is the seventeenth one tried. A hashed dispatch would be several
+times faster, and this is the measurement that would show it.
+
+*Emulation costs 118×.* The same Z80 program, run on the same machine,
+takes 60 ns per iteration as emulated Z80 and 0.5 ns as native code.
+The emulator interprets 26 T-states in about 60 ns — roughly 2.3 ns per
+T-state — which is the price of the interpreter the eZ80 itself is, and
+it is the same order as the BASIC's own dispatch cost per statement.
+
+*And the floor is 0.5 ns.* A million iterations of a decrement, a test
+and a branch, in the object code this machine actually runs.
 
 ## The BASIC
 

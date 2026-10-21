@@ -3502,3 +3502,41 @@ A hashed dispatch would be several times faster, and this is the
 measurement that would show it. It is also the number that says how much
 of the BASIC's cost is the language and how much is the interpreter's
 bookkeeping: 26 T-states of the 3898 are the loop.
+
+### The floor: the same loop in native code
+
+The benchmark's third row is the same loop written in Nim and compiled
+to native code for this machine — no interpreter, no emulator, no Z80:
+
+```
+                                     wall        cpu    ns/iter     T-states   T/iter
+    GLYPHE BASIC (interpreted)    7.575 s    7.451 s    7574.59   3898354435     3898
+         Z80 assembly (direct)    0.060 s    0.059 s      59.66     26031009       26
+     native Nim (this machine)    0.001 s    0.000 s       0.50            -        -
+
+BASIC vs assembly : 127.0x
+assembly vs native: 118.5x
+```
+
+Three rows, three different claims. **Interpretation costs 127×** — the
+BASIC spends 3898 T-states per `NEXT` where the machine code spends 26,
+and the wall clock shows the same ratio, so the interpreter's overhead
+is the work itself rather than a fixed cost around it; nearly all of it
+is the keyword dispatch, every statement being matched by walking a
+seventeen-entry table. **Emulation costs 118×** — the same Z80 program
+takes 60 ns per iteration as emulated Z80 and 0.5 ns as native code, so
+the emulator interprets its 26 T-states in about 2.3 ns each. **And the
+floor is 0.5 ns** — a million iterations of a decrement, a test and a
+branch, in the object code this machine runs.
+
+Two honesty notes about the native row, both learned the hard way. A
+million iterations of native code take about a millisecond, which is
+below what the clock resolves in one go, so the loop is run 200 times and
+the elapsed time divided. And the repetition index is folded into the
+result on purpose: with 200 *identical* repetitions the compiler hoisted
+the call out and left the other 199 as nothing to do — the row read
+0.000 s, and the only reason the loop was still there at all was the
+accumulator. The native loop also accumulates its counter, which the
+machine-code version does not, so that row does marginally more work
+than the assembly row: the floor it reports is a slight over-estimate
+rather than a flattering one.
