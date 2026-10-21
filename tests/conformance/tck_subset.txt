@@ -94,6 +94,15 @@ trav-2hop	in	MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE a.name = 'Alice'
 trav-edge-prop	in	MATCH (a)-[e:KNOWS]->(b) WHERE e.since > 2018 RETURN a.name, b.name	[["Alice","Bob"],["Bob","Dave"],["Carol","Dave"]]
 trav-startswither	in	MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n.name	[["Alice"]]
 
+# ---- graph-pattern predicates (M5.8) ----
+patpred-exists	in	MATCH (a:Person) WHERE (a)-[:KNOWS]->() RETURN count(*) AS n	[[4]]
+patpred-named-end	in	MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE (b)-[:KNOWS]->() RETURN a.name AS a, b.name AS b ORDER BY a, b	[["Alice","Bob"],["Alice","Carol"],["Bob","Dave"],["Carol","Dave"]]
+patpred-undirected	in	MATCH (a:Person) WHERE (a)-[:KNOWS]-() RETURN count(*) AS n	[[5]]
+patpred-as-value	in	MATCH (a:Person) WHERE a.name = 'Alice' RETURN (a)-[:KNOWS]->() AS knows	[[true]]
+patpred-unknown-type	in	MATCH (a:Person) WHERE (a)-[:NOPE]->() RETURN a	[]
+patpred-varlen	out	MATCH (a:Person) WHERE (a)-[:KNOWS*1..2]->() RETURN a	one relationship at a time
+patpred-label	out	MATCH (a:Person) WHERE (a:Person)-[:KNOWS]->() RETURN a	shape only
+
 # ---- projection, ordering, paging, distinct ----
 proj-alias	in	RETURN 1 AS name	[[1]]
 proj-order-alias	in	MATCH (n:Person) RETURN n.name AS name ORDER BY name	[["Alice"],["Bob"],["Carol"],["Dave"],["Eve"],["Frank"]]

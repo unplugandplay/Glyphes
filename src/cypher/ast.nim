@@ -49,6 +49,9 @@ type
     ekMap,       ## {k: v}
     ekFunc,      ## name(args...) in `name`/`items`; `isDistinct` for DISTINCT
     ekExists,    ## EXISTS { pattern }; the pattern in `pattern`
+    ekPatternPred, ## (a)-[:R]->(b), a pattern in expression position: the
+                   ## pattern in `pattern`, used as a filter over variables
+                   ## that are already bound
     ekCountStar  ## count(*) — its own kind, because there is no operand
 
   Expr* = ref object

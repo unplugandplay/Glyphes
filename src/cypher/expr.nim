@@ -606,6 +606,66 @@ proc evalProperty(e: Eval, target: Expr, key: string): Value =
     return t
   propertyOf(e.ctx, t, key)
 
+proc patternHolds*(ctx: QueryCtx; row: Row; pat: Pattern): bool =
+  ## Does this path hold for this row?
+  ##
+  ## Depth-first with backtracking over the adjacency. Every *named* node
+  ## is already bound, so a hop only has to check that the far end is the
+  ## node the row names. An **anonymous** node constrains nothing but
+  ## liveness — `(a)-[:KNOWS]->()` asks "does a know someone?", which the
+  ## adjacency answers without binding anything, and binding nothing is
+  ## exactly what makes this a filter rather than a semi-join.
+  ##
+  ## The relationship's type is resolved per call rather than at plan
+  ## time, because a pattern predicate lives inside an expression and an
+  ## expression has no plan of its own. It costs one dictionary lookup per
+  ## predicate per row; the alternative — resolving it in the planner and
+  ## threading a code through `Pattern` — would give one pattern two
+  ## representations, and they would drift.
+  proc walk(i: int; at: int64): bool =
+    if i >= pat.elems.len:
+      return true
+    let r = pat.elems[i].rel
+    let node = pat.elems[i + 1].node
+    var code = 0'i32
+    if r.types.len > 0:
+      code = ctx.store.relTypes.lookup(r.types[0])
+      ## An unknown type matches nothing — the planner's -1, for the same
+      ## reason: a typo must be an empty answer, never "any relationship".
+      if code == 0:
+        return false
+    var edges: seq[int64]
+    case r.dir
+    of dirIn:
+      edges = ctx.inEdges(at)
+    of dirOut:
+      edges = ctx.outEdges(at)
+    of dirBoth:
+      edges = ctx.outEdges(at)
+      for e in ctx.inEdges(at):
+        edges.add e
+    for eid in edges:
+      let (src, dst, et) = ctx.edgeEnds(eid)
+      if code != 0 and et != code:
+        continue
+      let other = (if src == at: dst else: src)
+      if not ctx.nodeAlive(other):
+        continue
+      if node.varName.len > 0:
+        let (found, v) = row.lookup(node.varName)
+        if not found or v.kind != vkNode or v.id != other:
+          continue
+      if walk(i + 2, other):
+        return true
+    false
+
+  if pat.elems.len < 3 or pat.elems[0].node.varName.len == 0:
+    return false
+  let (found, v) = row.lookup(pat.elems[0].node.varName)
+  if not found or v.kind != vkNode:
+    return false
+  walk(1, v.id)
+
 proc eval(e: Eval, expr: Expr): Value =
   if e.depth > MaxEvalDepth:
     cypherFail(int32(glyErrLimit), "expression nested deeper than " & $MaxEvalDepth)
@@ -801,6 +861,11 @@ proc eval(e: Eval, expr: Expr): Value =
     ## Filled in by the operator that owns the pattern (ops.nim), which has
     ## the plan. Reaching the evaluator means the plan lost the subquery.
     cypherFail(int32(glyErrSql), "EXISTS { … } has no pattern bound")
+  of ekPatternPred:
+    ## A pattern over already-bound variables is a *filter*, not a bind:
+    ## the scope check has refused any variable nobody bound, so all that
+    ## is left is the walk.
+    Value(kind: vkBool, b: patternHolds(e.ctx, e.row, expr.pattern))
 
 proc quoteJson*(s: string): string =
   "\"" & s.replace("\\", "\\\\").replace("\"", "\\\"") & "\""
@@ -1140,7 +1205,9 @@ proc collectVars*(e: Expr, into: var seq[string]) =
   of ekFunc:
     for item in e.items:
       collectVars(item, into)
-  of ekExists:
+  of ekExists, ekPatternPred:
+    ## A predicate's named variables are *reads*: the scope check refuses
+    ## one that nobody bound, which is the whole rule.
     for name in boundVariables(e.pattern):
       into.add name
   else:

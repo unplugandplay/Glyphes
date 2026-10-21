@@ -38,6 +38,13 @@ proc id(v: Value): int64 =
   of vkNode, vkEdge: v.id
   else: -1
 
+proc jsonOf(vals: seq[Value]): seq[string] =
+  ## A `Value` is a case object, so `==` over a seq of them does not
+  ## unfold; the JSON rendering is what the rest of the suite compares,
+  ## and it compares the value, not the layout.
+  for v in vals:
+    result.add valueJson(v)
+
 proc sorted(s: seq[int64]): seq[int64] =
   ## `algorithm.sorted` on a copy: the fixture's ids are 1..5 and a test
   ## that depends on scan order would be testing an accident.
@@ -1081,3 +1088,89 @@ suite "review regressions: answers the engine got wrong":
       e = err
     check e != nil
     check "WHERE" in e.msg
+
+
+suite "M5.8 graph-pattern predicates":
+  ## A pattern in WHERE is a *filter* over variables that are already
+  ## bound: it binds nothing. Binding one would be a semi-join, and the
+  ## engine refuses joins — so the refusal is the rule, not a limitation
+  ## of the matcher.
+  ##
+  ## The seed graph: 1->2, 1->3, 2->4 KNOWS, 1->5 WORKS_AT.
+
+  test "a pattern with an anonymous end is an existence filter":
+    ## "does this node know someone?" — the adjacency answers it without
+    ## binding anything.
+    let s = seedStore()
+    check jsonOf(column(run(s, """
+      MATCH (a:Person) WHERE (a)-[:KNOWS]->() RETURN a.age AS age
+      ORDER BY age"""), "age")) == @["34", "41"]
+    check jsonOf(column(run(s, """
+      MATCH (a:Person) WHERE (a)-[:WORKS_AT]->() RETURN a.age AS age
+      """), "age")) == @["34"]
+
+  test "an undirected pattern sees both directions":
+    ## Ana, Bo, Cleo and Ada each touch a KNOWS edge in one direction or
+    ## the other; Ada only through Bo's edge into her, which still counts.
+    let s = seedStore()
+    check jsonOf(column(run(s, """
+      MATCH (a:Person) WHERE (a)-[:KNOWS]-() RETURN a.age AS age
+      ORDER BY age"""), "age")) == @["27", "34", "41", "55"]
+
+  test "a named end must be the node the row already names":
+    ## Both ends are bound, so the predicate is a check on *this* pair:
+    ## only Ana->Bo has a b that knows someone in turn.
+    let s = seedStore()
+    let rows = run(s, """
+      MATCH (a:Person)-[:KNOWS]->(b:Person)
+      WHERE (b)-[:KNOWS]->()
+      RETURN a.age AS a, b.age AS b""")
+    check rows.len == 1
+    check rows[0].lookup("a")[1].i == 34
+    check rows[0].lookup("b")[1].i == 41
+
+  test "it is an expression, so it can be returned":
+    let s = seedStore()
+    check jsonOf(column(run(s, """
+      MATCH (a:Person)
+      RETURN a.age AS age, (a)-[:KNOWS]->() AS knows
+      ORDER BY age"""), "knows")) ==
+      @["false", "true", "true", "false"]
+
+  test "a type nothing carries matches nothing, not everything":
+    ## The lookup of an unknown type is 0, which is also "any type" in a
+    ## pattern. Treating it as "any" would make a typo answer yes for
+    ## every row.
+    let s = seedStore()
+    check run(s, """
+      MATCH (a:Person) WHERE (a)-[:NOPE]->() RETURN a""").len == 0
+
+  test "a variable the pattern would introduce is refused":
+    ## The rule: a pattern predicate binds nothing. `x` here is a
+    ## semi-join wearing a filter's clothes, and the engine refuses joins.
+    let s = seedStore()
+    var e: CypherError
+    let q = "MATCH (a:Person) WHERE (a)-[:KNOWS]->(x) RETURN a"
+    try:
+      let st = prepare(s, q)
+      st.close()
+    except CypherError as err:
+      e = err
+    check e != nil and "x" in e.msg
+
+  test "what a pattern predicate does not do is refused by name":
+    let s = seedStore()
+    for (q, word) in [
+        ("MATCH (a:Person) WHERE (a)-[:KNOWS*1..2]->() RETURN a", "one relationship at a time"),
+        ("MATCH (a:Person) WHERE (a:Person)-[:KNOWS]->() RETURN a", "shape only"),
+        ("MATCH (a:Person) WHERE ()-[:KNOWS]->(a) RETURN a", "bound node")]:
+      var e: CypherError
+      try:
+        let st = prepare(s, q)
+        st.close()
+      except CypherError as err:
+        e = err
+      check e != nil
+      if e != nil:
+        check e.code == int32(glyErrUnsupported)
+        check word in e.msg

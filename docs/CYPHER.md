@@ -5,7 +5,8 @@
 > `DELETE` / `DETACH DELETE`, `MERGE` with `ON CREATE` / `ON MATCH`,
 > aggregates and grouping, `OPTIONAL MATCH`, variable-length patterns,
 > `Sort` with spill, and — at M6.1 — the range index. `FOREACH` is the
-> last write clause to land (§3.6).
+> last write clause to land (§3.6), and graph-pattern predicates are in
+> `WHERE` (§2.3).
 > Anything described here as refused is refused *by name* with
 > `GLY_ERR_UNSUPPORTED`, and `tests/conformance/tck_subset.txt` carries one
 > out-of-contract row per refusal so the list cannot rot.
@@ -35,7 +36,8 @@
 | Aggregates (§2.8) and the grouping they imply | built |
 | Parameters by name | built |
 | Reading functions (§2.7), including `range()` | built |
-| Pattern predicates `all`/`any`/`none`/`single`, `CASE` | refused (§5) |
+| Graph-pattern predicates — `(a)-[:KNOWS]->(b)` in `WHERE` (§2.3) | built |
+| Quantifiers `all`/`any`/`none`/`single`, `CASE` | refused (§5) |
 
 ### 0.2 The write surface
 
@@ -213,12 +215,38 @@ correlated form is the one to prefer.
 WHERE a.age > 30 AND a.city = 'Lyon'
 WHERE a.name IN ['Ana', 'Bo']        WHERE a.name STARTS WITH 'A'
 WHERE a.x IS NULL                   WHERE NOT (a.x = 1)
+WHERE (a)-[:KNOWS]->()              WHERE (a)-[:KNOWS]->(b)
 ```
 
 Three-valued (pin C6): a comparison against `null` is `null`, and `null`
 is not truthy, so `WHERE NOT (a.x = 1)` does **not** keep the rows where
 `x` is null — `NOT null` is null too. A missing property is null, not an
 error; a missing *variable* is an error at prepare time.
+
+**A pattern is a predicate** (pin C16). `(a)-[:KNOWS]->(b)` in `WHERE` is
+a *filter* over variables that are already bound, and it **binds
+nothing**:
+
+- Every variable in the pattern must already be bound by the enclosing
+  `MATCH`. A pattern that would introduce one — `WHERE (a)-[:KNOWS]->(x)`
+  with `x` free — is refused, because binding it would be a semi-join
+  and the engine refuses joins.
+- An **anonymous** element binds nothing by definition, so it is the
+  useful form: `(a)-[:KNOWS]->()` asks *"does `a` know someone?"* and
+  the adjacency answers it without touching another variable.
+- One relationship at a time: `*` inside a predicate is refused by name.
+  So are labels and property maps inside it — a predicate matches the
+  *shape*, and a label or a property in it would otherwise be accepted
+  and silently ignored, which is the one answer this engine does not
+  give.
+- It is an expression, so it can be projected: `RETURN (a)-[:KNOWS]->()
+  AS knows`.
+
+**The cost.** The walk is the adjacency, so it is the node's degree, not
+the graph's size: on a 10 000-node graph where every node has three
+relationships, one hop costs **0.31 µs per row** over the scan's 0.185 µs
+(a plain property comparison costs 0.13 µs). Each additional hop
+multiplies by the degree walked.
 
 ### 2.4 `WITH`
 
@@ -636,6 +664,8 @@ checked by `nimble tck`:
 | list comprehension `[x IN xs \| …]` | "comprehension" |
 | quantifiers `all`/`any`/`none`/`single`/`reduce` | the keyword |
 | `shortestPath` / `allShortestPaths` | the keyword |
+| a pattern predicate that would bind a variable, or starts anonymous | "not defined by any MATCH" / "bound node" |
+| `*`, a label or a property map inside a pattern predicate | "one relationship at a time" / "shape only" |
 | `UNION`, `CALL` other than `db.idx.text`, `CALL … IN TRANSACTIONS` | the keyword, or the procedure's name |
 | `FOREACH` with `CREATE` / `MERGE` / `DELETE` in its body | "SET or REMOVE" |
 | an unknown function | the function's name |

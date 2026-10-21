@@ -31,6 +31,7 @@
 
 import std/strutils
 import ../store/prop
+import ../abi
 import ./errors
 import ./lexer
 import ./ast
@@ -109,6 +110,47 @@ proc parsePrimary(p: var Parser): Expr =
   of tkSym:
     case t.text
     of "(":
+      ## A pattern predicate — `(a)-[:KNOWS]->(b)` — is a *path* in
+      ## expression position. `(a) - 1` is arithmetic over a parenthesized
+      ## name, and the two are told apart by what the pattern read
+      ## produces, not by a token lookahead: a path (node, relationship,
+      ## node) is a predicate; a lone node pattern was never a path, so
+      ## the read is rewound and the parens read as an expression.
+      ##
+      ## A *named* refusal raised while reading the pattern is the answer,
+      ## not something to try again: only a syntax error rewinds.
+      let save = p.pos
+      var pat: Pattern
+      var isPath = false
+      try:
+        pat = p.parsePattern()
+        isPath = true
+      except CypherError as e:
+        if e.code != int32(glyErrSql):
+          raise
+        p.pos = save
+      if isPath and pat.elems.len > 1:
+        if pat.elems.len < 3 or (pat.elems.len mod 2) == 0:
+          p.failHere("a pattern predicate is a path: node, relationship, node")
+        for i, el in pat.elems:
+          if el.isNode:
+            if el.node.label.len > 0 or el.node.props.len > 0:
+              unsupported("a pattern predicate matches the shape only — " &
+                          "labels and properties inside it are not supported yet")
+            if i == 0 and el.node.varName.len == 0:
+              unsupported("a pattern predicate starts at a bound node")
+          else:
+            if el.rel.varLen:
+              unsupported("a pattern predicate is one relationship at a time " &
+                          "(`*` is not supported there)")
+            if el.rel.types.len > 1:
+              unsupported("relationship type alternation ([:A|B])")
+            if el.rel.props.len > 0:
+              unsupported("a pattern predicate matches the shape only — " &
+                          "a relationship's properties inside it are not supported yet")
+        result = Expr(kind: ekPatternPred, pattern: pat)
+        return
+      p.pos = save
       discard p.advance()
       ## `()` is an empty list, not an empty tuple: Cypher has no tuples.
       if p.atSym(")"):
@@ -1003,6 +1045,8 @@ proc parseQuery*(src: string): Query =
 
 # -------------------------------------------------------------- rendering
 
+proc render*(p: Pattern): string
+
 proc render*(e: Expr): string =
   ## A one-line rendering of an expression, for error messages ("cannot use
   ## X in this position") and for `columns` names. Deliberately not a
@@ -1038,6 +1082,7 @@ proc render*(e: Expr): string =
     for a in e.items: args.add render(a)
     e.name & "(" & (if e.isDistinct: "DISTINCT " else: "") & args.join(", ") & ")"
   of ekExists: "EXISTS { ... }"
+  of ekPatternPred: render(e.pattern)
   of ekCountStar: "*"
 
 proc render*(p: Pattern): string =

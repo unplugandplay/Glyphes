@@ -27,16 +27,22 @@ deliberate refusals rather than failures):
 - `UNWIND`
 - multiple statements in one call
 
-**Not implemented:** subqueries, shortest-path functions, graph
-pattern predicates, `EXISTS { … }` subqueries, most of the type system,
-temporal/spatial types, and multi-database.
+**Not implemented:** subqueries, shortest-path functions, `EXISTS { … }`
+subqueries, most of the type system, temporal/spatial types, and
+multi-database.
 
-Four of those are *planned*, with the syntax, the semantics, the pins
+Three of those are *planned*, with the syntax, the semantics, the pins
 and the order written down in
 [`docs/PLAN-CYPHER-EXTENSIONS.md`](docs/PLAN-CYPHER-EXTENSIONS.md):
-the graph-pattern predicates, the type discipline, the shortest-path
-functions, and the temporal/spatial types. (`FOREACH` was the fifth and
-has landed — CYPHER.md §3.6.)
+the type discipline, the shortest-path functions, and the
+temporal/spatial types.
+
+The other two of the five have landed: `FOREACH` at M5.7 (CYPHER.md
+§3.6), and the graph-pattern predicates at M5.8 (§2.3) — the *filter*
+form, over variables that are already bound. A pattern predicate costs
+about 0.31 µs per row for one hop on a 10 000-node graph with three
+relationships each, against 0.13 µs for a plain property comparison:
+the walk is the node's degree, not the graph's size.
 
 The other three are **decided against**, and the reasons are recorded
 in the same document rather than left as a shrug: subqueries and

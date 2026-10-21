@@ -19,7 +19,7 @@ gate.
 | # | Construct | Why here |
 |---|---|---|
 | **X1** | `FOREACH` — **landed** | the cheapest: it reused the write operators that already exist |
-| **X2** | graph-pattern predicates | a filter over the adjacency the engine already has |
+| **X2** | graph-pattern predicates — **landed** | a filter over the adjacency the engine already has |
 | **X3** | the type discipline | a *foundation*: a date is a type, and there is no point adding types before the types are named and checked |
 | **X4** | shortest-path functions | a traversal with a real cost, and it must be measured before it is offered |
 | **X5** | temporal/spatial types | the largest: new value kinds, new literals, new functions, new storage |
@@ -109,7 +109,20 @@ written (`applySetItem` in `ops.nim`, used by `okSet`).
 
 `rowsAffected` counts the writes, as it does for `SET`.
 
-## 3. X2 — graph-pattern predicates
+## 3. X2 — graph-pattern predicates — landed (M5.8)
+
+Implemented as the *filter* form, with every variable already bound
+(`ekPatternPred`, `patternHolds`). The measured cost is 0.31 µs per row
+for one hop over a 10 000-node graph with three relationships each
+(a plain property comparison: 0.13 µs). The refusals by name are the
+ones §3 above predicted, plus two the implementation made explicit:
+a label or a property map *inside* the predicate matches the shape only
+and is refused rather than ignored, and a predicate must start at a
+bound node.
+
+The original section follows, because the reasoning is what a reader
+wants when changing it:
+
 
 ```
 MATCH (a:Person), (b:Person)
