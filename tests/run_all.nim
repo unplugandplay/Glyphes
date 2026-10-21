@@ -11,7 +11,7 @@ import unit/test_store
 import unit/test_wal
 import unit/test_txn
 import unit/test_abi
-import unit/test_follower_abi
+import unit/test_follow
 import unit/test_cypher
 import unit/test_exec
 import unit/test_write
@@ -22,6 +22,8 @@ import unit/test_vhist
 import unit/test_s1_lock
 import unit/test_s2_shm
 import unit/test_follow
+import unit/test_gq
+import unit/test_gbasic
 
 # Store (M1), durability (M2), transactions (M3) and the exported C
 # surface are landed here; query (M4-M6) suites are added as their
