@@ -239,7 +239,17 @@ suite "M6.1 review findings":
     discard s.setNodeProp(mixed, "v", Value(kind: vkString, s: "later"))
     let reg = withIndex(s, "M", "v")
     check reg.find("M", "v").usable == false
-    sameAnswer(s, "MATCH (n:M) WHERE n.v > 2 RETURN n", reg)
+    ## Equality is defined across kinds (pin C8: it is false), so the
+    ## indexed and the plain plan still agree on it.
+    sameAnswer(s, "MATCH (n:M) WHERE n.v = 2 RETURN n", reg)
+    ## Ordering is not: `'later' > 2` is a type error by name (pin C17),
+    ## not a silently-dropped row —
+    var e: CypherError
+    try:
+      discard runQ(s, "MATCH (n:M) WHERE n.v > 2 RETURN n", reg)
+    except CypherError as err:
+      e = err
+    check e != nil and "STRING and INTEGER" in e.msg
 
   test "a property set to null is an absent key, not a poison":
     ## `age = null` is a stored property with no value — the fixture's own

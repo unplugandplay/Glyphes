@@ -252,14 +252,35 @@ proc labelOfNode*(ctx: QueryCtx, id: int64): string =
   ## "" for an unlabelled or dead node. Callers that care distinguish the
   ## two with `nodeAlive`; `labels(n)` on a dead node returning [] is
   ## Cypher's answer, not a second error path.
+  ##
+  ## Delta-aware, and it has to be: a node this transaction created has an
+  ## id past the snapshot's arrays, so `snap.nodes[id]` for one indexes off
+  ## the end. The transaction's own view is the one that has it — the same
+  ## rule `edgeEnds` follows, and the reason `CREATE (n:X) RETURN
+  ## typeof(n)` can answer at all.
   if not ctx.nodeAlive(id):
     return ""
-  ctx.store.labels.nameOf(ctx.snap.nodes[id.int].label)
+  var code = 0'i32
+  if ctx.writer != nil:
+    let rec = ctx.writer.peekNode(id)
+    if rec.id != 0:
+      code = rec.label
+  elif id > 0 and id.int < ctx.snap.nodes.len:
+    code = ctx.snap.nodes[id.int].label
+  ctx.store.labels.nameOf(code)
 
 proc typeOfEdge*(ctx: QueryCtx, id: int64): string =
+  ## The relationship's type name, delta-aware for the same reason.
   if not ctx.edgeAlive(id):
     return ""
-  ctx.store.relTypes.nameOf(ctx.snap.edges[id.int].etype)
+  var code = 0'i32
+  if ctx.writer != nil:
+    let rec = ctx.writer.peekEdge(id)
+    if rec.id != 0:
+      code = rec.etype
+  elif id > 0 and id.int < ctx.snap.edges.len:
+    code = ctx.snap.edges[id.int].etype
+  ctx.store.relTypes.nameOf(code)
 # ------------------------------------------------------------- traversal
 
 proc outEdges*(ctx: QueryCtx, id: int64): seq[int64] =

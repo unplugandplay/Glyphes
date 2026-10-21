@@ -38,6 +38,19 @@ proc id(v: Value): int64 =
   of vkNode, vkEdge: v.id
   else: -1
 
+proc plain(vals: seq[Value]): seq[string] =
+  ## A value without JSON's quotes around a string: `typeof()` answers a
+  ## string, and comparing it to `"\"Person\""` would test the JSON
+  ## renderer rather than the answer.
+  for v in vals:
+    case v.kind
+    of vkString: result.add v.s
+    of vkBool: result.add (if v.b: "true" else: "false")
+    of vkInt: result.add $v.i
+    of vkFloat: result.add $v.f
+    of vkNull: result.add "null"
+    else: result.add valueJson(v)
+
 proc jsonOf(vals: seq[Value]): seq[string] =
   ## A `Value` is a case object, so `==` over a seq of them does not
   ## unfold; the JSON rendering is what the rest of the suite compares,
@@ -1174,3 +1187,70 @@ suite "M5.8 graph-pattern predicates":
       if e != nil:
         check e.code == int32(glyErrUnsupported)
         check word in e.msg
+
+
+suite "M5.9 the type discipline":
+  ## Pin C17: every operator names the types it accepts and refuses the
+  ## rest by name. The names below are the contract — `typeof()` answers
+  ## with the same words a refusal uses, so a caller can match on them.
+
+  test "typeof names every value kind":
+    let s = seedStore()
+    for (expr, want) in [
+        ("null", "NULL"), ("true", "BOOLEAN"), ("1", "INTEGER"),
+        ("1.5", "FLOAT"), ("'a'", "STRING"), ("[1]", "LIST"),
+        ("{a: 1}", "MAP")]:
+      check plain(column(run(s, "RETURN typeof(" & expr & ") AS t"), "t")) ==
+            @[want]
+
+  test "a node's label is its type, a relationship's type name is its type":
+    ## Pin C13 makes this well defined: one label per node.
+    let s = seedStore()
+    check plain(column(run(s, """
+      MATCH (n:Person) RETURN DISTINCT typeof(n) AS t"""), "t")) == @["Person"]
+    check plain(column(run(s, """
+      MATCH ()-[r:KNOWS]->() RETURN DISTINCT typeof(r) AS t"""), "t")) == @["KNOWS"]
+
+  test "every operator refuses a wrong type by name":
+    ## One row per operator, because the refusal table is the test list: a
+    ## refusal nobody checks is a comment.
+    let s = seedStore()
+    for (expr, want) in [
+        ("true + 1", "BOOLEAN and INTEGER"),
+        ("'a' - 1", "STRING and INTEGER"),
+        ("'a' * 2", "STRING and INTEGER"),
+        ("1 AND true", "INTEGER and BOOLEAN"),
+        ("1 OR true", "INTEGER and BOOLEAN"),
+        ("1 XOR true", "INTEGER and BOOLEAN"),
+        ("NOT 1", "a boolean"),
+        ("1 IN 2", "needs a list"),
+        ("1 =~ 'a'", "two strings"),
+        ("1 CONTAINS 'a'", "two strings"),
+        ("'a' STARTS WITH 1", "two strings"),
+        ("'a' ENDS WITH 1", "two strings"),
+        ("1 < 'a'", "comparable"),
+        ("1 <= true", "comparable"),
+        ("true > 'a'", "comparable")]:
+      var e: CypherError
+      try:
+        discard run(s, "RETURN " & expr & " AS x")
+      except CypherError as err:
+        e = err
+      if e == nil:
+        echo "  no refusal for: ", expr
+      check e != nil
+      if e != nil:
+        check e.code == int32(glyErrSql)
+        check want in e.msg
+
+  test "the answers the type rules define are still answers":
+    ## C17 refuses what the engine cannot answer. It must not refuse what
+    ## it can: equality across kinds is false (C8), int and float order
+    ## (C8), null propagates (C6), and a string concatenates.
+    let s = seedStore()
+    check plain(column(run(s, "RETURN 1 = 1.0 AS x"), "x")) == @["false"]
+    check plain(column(run(s, "RETURN 1 < 1.5 AS x"), "x")) == @["true"]
+    check plain(column(run(s, "RETURN null < 1 AS x"), "x")) == @["null"]
+    check plain(column(run(s, "RETURN 1 IN null AS x"), "x")) == @["null"]
+    check plain(column(run(s, "RETURN 'a' + 1 AS x"), "x")) == @["a1"]
+    check plain(column(run(s, "RETURN [1] + [2] AS x"), "x")) == @["[1,2]"]

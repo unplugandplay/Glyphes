@@ -110,6 +110,7 @@ contract change, not a refactor.
 | **C8** | Cross-kind equality is false, as any other kind mismatch. Only *ordering* mixes int and float, because a sort needs a total order and equality does not. |
 | **C9** | A single-hop query over 10⁶ nodes answers in ≲ 20 µs; the 2-hop query over 10⁶ nodes in ≲ 3 ms. (`ROADMAP.md` carries the measured numbers.) |
 | **C13** | A node carries **exactly one** label. `CREATE (n:A:B)` and `SET n:Admin` are refused by name; the store's structures assume it (`STORAGE.md` §2). |
+| **C17** | **Every operator names the types it accepts and refuses the rest by name.** `typeof()` and the refusal messages use the same words (§6.2); C5 is a case of this rule, and equality across kinds keeps its defined `false` (C8) rather than becoming a refusal. |
 
 ---
 
@@ -672,6 +673,7 @@ checked by `nimble tck`:
 | a nested property path in `SET` | "nested property writes" |
 | `SET n = <not a map>` | "needs a map" |
 | a write clause with no transaction | the clause |
+| a type mismatch in an operator | both type names (§6.2) |
 
 Two more that are refused with `GLY_ERR_SQL` rather than unsupported,
 because the query *is* malformed: a variable nobody bound, a map subscript
@@ -680,6 +682,8 @@ on a non-map, a comparison between incomparable types.
 ---
 
 ## 6. Types
+
+### 6.1 The value model
 
 The property value model is `STORAGE.md` §2.4; what the query layer adds is
 the three reference kinds, so that a row can bind a node, a relationship or
@@ -695,16 +699,63 @@ A node or relationship cannot become a property: `setProp` and the blob
 codec reject them, so they never reach the snapshot and adding them changed
 no stored bytes and no pin.
 
-**Comparisons.** Numbers compare across `int` and `float` — a sort needs a
-total order, and refusing to order them would leave the sort undefined.
-Strings compare bytewise, which is what openCypher does for `<`. Booleans
-order `false < true`. Anything else — a node against a number, `null`
-against anything — is *incomparable*, and the caller turns that into an
-error by name.
+### 6.2 The type discipline — pin C17
 
-**Equality does not mix kinds** (pin C8): `3 = 3.0` is `false`, and
-`null = null` is `null` rather than `true`, so `WHERE n.x = n.x` does not
-keep every node.
+Every value has a **name**, and the names are the contract: `typeof()`
+answers with them, and a refusal uses the same words.
+
+| value | `typeof()` |
+|---|---|
+| null | `NULL` |
+| bool | `BOOLEAN` |
+| int | `INTEGER` |
+| float | `FLOAT` |
+| string | `STRING` |
+| bytes | `BYTES` |
+| vector | `VECTOR` |
+| list | `LIST` |
+| map | `MAP` |
+| node | **its label** (pin C13: one label per node), or `NODE` when it has none |
+| relationship | **its type name**, or `RELATIONSHIP` when it cannot be read |
+| path | `PATH` |
+
+**C17: every operator names the types it accepts and refuses the rest by
+name.** One table, and the refusal messages are generated from it:
+
+| operator | accepts | a mismatch says |
+|---|---|---|
+| `+` | two numbers, two strings, or two lists — and a string with *anything*, because `+` renders the other side | "needs two numbers, two strings or two lists, not BOOLEAN and INTEGER" |
+| `-` `*` `/` `%` `^` | two numbers | "needs numbers, not STRING and INTEGER" |
+| `AND` `OR` `XOR` | two booleans, or null (three-valued, C6) | "needs two booleans, not INTEGER and BOOLEAN" |
+| `NOT` | a boolean, or null | "needs a boolean, not INTEGER" |
+| `= <>` | anything — cross-kind is `false` (C8), never a refusal | — |
+| `< <= > >=` | two numbers (int and float order, C8), two strings, two booleans; null propagates | "needs two comparable values, not INTEGER and STRING" |
+| `IN` | a list on the right; null propagates | "needs a list on its right side, not INTEGER" |
+| `=~` `CONTAINS` `STARTS WITH` `ENDS WITH` | two strings (the three may take a list on the left); null propagates | "needs two strings, not INTEGER and STRING" |
+| `IS NULL` | any value | — |
+
+**C5 is a case of C17**, not a separate rule: an `int` and a `float` are
+never `=` because they are different types with different semantics, and
+the answer is `false` (C8) rather than a refusal because *equality across
+kinds has a defined answer*: it is false.
+
+**The order of the checks.** `AND`/`OR` check both sides as soon as both
+have been evaluated, *before* either side's value decides the answer:
+`1 OR true` is ill-typed whichever answer the short-circuit would give,
+and answering `true` for it would be a query error dressed as an answer.
+The left side's own short-circuit still skips the right side entirely —
+a value that is never evaluated cannot be type-checked.
+
+**What stays an answer.** C17 refuses what the engine *cannot* answer. It
+must not refuse what it can: equality across kinds is `false` (C8), `int`
+and `float` order (C8), `null` propagates (C6), and `+` concatenates a
+string with anything.
+
+**Functions are not operators.** A reading function given a wrong-typed
+argument answers `null` where openCypher says it does (`toUpper(1)`), and
+the string predicates spelled as operators refuse. That difference is
+deliberate: an operator is a piece of the language's logic, and a function
+is a call whose answer may legitimately be "nothing".
 
 ---
 

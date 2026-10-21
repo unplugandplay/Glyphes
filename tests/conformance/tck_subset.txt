@@ -63,6 +63,17 @@ tvl-xor-null	in	RETURN true XOR null AS x	[[null]]
 tvl-not-null	in	RETURN NOT null AS x	[[null]]
 tvl-where-null	in	MATCH (n:Person) WHERE null RETURN n	[]
 
+# ---- the type discipline (M5.9, pin C17) ----
+typeof-integer	in	RETURN typeof(1) AS t	[["INTEGER"]]
+typeof-float	in	RETURN typeof(1.5) AS t	[["FLOAT"]]
+typeof-string	in	RETURN typeof('a') AS t	[["STRING"]]
+typeof-boolean	in	RETURN typeof(true) AS t	[["BOOLEAN"]]
+typeof-null	in	RETURN typeof(null) AS t	[["NULL"]]
+typeof-list	in	RETURN typeof([1]) AS t	[["LIST"]]
+typeof-map	in	RETURN typeof({a: 1}) AS t	[["MAP"]]
+typeof-node-label	in	MATCH (n:Person) WHERE n.name = 'Alice' RETURN typeof(n) AS t	[["Person"]]
+typeof-edge-type	in	MATCH ()-[r:KNOWS]->() WHERE r.since = 2020 RETURN typeof(r) AS t	[["KNOWS"]]
+
 # ---- functions (CYPHER.md §2.7) ----
 fn-abs	in	RETURN abs(-3) AS x	[[3]]
 fn-size	in	RETURN size([1, 2, 3]) AS x	[[3]]
@@ -156,6 +167,14 @@ write-merge-relationship	in	MERGE (a:E {k: 1})-[r:R]->(b:E {k: 2})	[[1]]	write:M
 write-merge-on-create	in	MERGE (n:Made {v: 1}) ON CREATE SET n.tag = "new"	[["new"]]	write:MATCH (n:Made) RETURN n.tag AS t
 write-merge-on-match	in	CREATE (n:Made {v: 1}) MERGE (n:Made {v: 1}) ON MATCH SET n.tag = "again"	[["again"]]	write:MATCH (n:Made) RETURN n.tag AS t
 write-merge-label-differs	in	MERGE (n:Other {v: 1})	[[1]]	write:MATCH (n:Other) RETURN n.v AS v
+
+# ---- the type discipline's refusals (pin C17) ----
+type-mismatch-add	out	RETURN true + 1 AS x	BOOLEAN and INTEGER
+type-mismatch-order	out	RETURN 1 < 'a' AS x	comparable
+type-mismatch-logic	out	RETURN 1 AND true AS x	INTEGER and BOOLEAN
+type-mismatch-logic-or	out	RETURN 1 OR true AS x	INTEGER and BOOLEAN
+type-mismatch-in	out	RETURN 1 IN 2 AS x	needs a list
+type-mismatch-contains	out	RETURN 1 CONTAINS 'a' AS x	two strings
 
 # ---- out of contract (refusals; never counted as passes) ----
 out-merge	out	MERGE (n:X)	MERGE

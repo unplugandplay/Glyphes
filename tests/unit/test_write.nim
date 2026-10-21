@@ -953,3 +953,19 @@ suite "M5.7 FOREACH":
     let (_, v) = rows[0].lookup("s")
     check v.kind == vkInt and v.i == 1
     close(db2)
+
+
+suite "M5.9 the type discipline — a node the transaction made":
+  test "typeof sees a node created in the same statement":
+    ## A node this transaction created has an id past the snapshot's
+    ## arrays, so the label getter has to look in the transaction first.
+    ## Without that it indexed off the end of `snap.nodes`.
+    var f = newFixture()
+    var st = prepare(f.s, "CREATE (n:Widget) RETURN typeof(n) AS t",
+                     initTable[string, Value](), f.tx)
+    var got = ""
+    while st.step():
+      got = st.current.lookup("t")[1].s
+    st.close()
+    check got == "Widget"
+    discard f.tx.rollback()

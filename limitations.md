@@ -28,21 +28,26 @@ deliberate refusals rather than failures):
 - multiple statements in one call
 
 **Not implemented:** subqueries, shortest-path functions, `EXISTS { … }`
-subqueries, most of the type system, temporal/spatial types, and
-multi-database.
+subqueries, temporal/spatial types, and multi-database.
 
-Three of those are *planned*, with the syntax, the semantics, the pins
-and the order written down in
-[`docs/PLAN-CYPHER-EXTENSIONS.md`](docs/PLAN-CYPHER-EXTENSIONS.md):
-the type discipline, the shortest-path functions, and the
-temporal/spatial types.
+Two of those are *planned*, with the syntax, the semantics, the pins and
+the order written down in
+[`docs/PLAN-CYPHER-EXTENSIONS.md`](docs/PLAN-CYPHER-EXTENSIONS.md): the
+shortest-path functions and the temporal/spatial types.
 
-The other two of the five have landed: `FOREACH` at M5.7 (CYPHER.md
-§3.6), and the graph-pattern predicates at M5.8 (§2.3) — the *filter*
-form, over variables that are already bound. A pattern predicate costs
-about 0.31 µs per row for one hop on a 10 000-node graph with three
-relationships each, against 0.13 µs for a plain property comparison:
-the walk is the node's degree, not the graph's size.
+Three of the five have landed. `FOREACH` at M5.7 (CYPHER.md §3.6). The
+graph-pattern predicates at M5.8 (§2.3) — the *filter* form, over
+variables that are already bound; one hop costs about 0.31 µs per row on
+a 10 000-node graph with three relationships each, against 0.13 µs for a
+plain property comparison, because the walk is the node's degree and not
+the graph's size. The type discipline at M5.9 (§6.2, pin C17):
+`typeof()`, and every operator refusing a wrong-typed operand by the
+name of both types.
+
+What is *not* in the type discipline: temporal and spatial values (X5),
+and the type system's static half — the engine is dynamically typed, as
+Cypher is, and a query's types are checked when a value reaches an
+operator, not when the query is prepared.
 
 The other three are **decided against**, and the reasons are recorded
 in the same document rather than left as a shrug: subqueries and

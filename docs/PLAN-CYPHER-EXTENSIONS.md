@@ -20,7 +20,7 @@ gate.
 |---|---|---|
 | **X1** | `FOREACH` — **landed** | the cheapest: it reused the write operators that already exist |
 | **X2** | graph-pattern predicates — **landed** | a filter over the adjacency the engine already has |
-| **X3** | the type discipline | a *foundation*: a date is a type, and there is no point adding types before the types are named and checked |
+| **X3** | the type discipline — **landed** | a *foundation*: a date is a type, and there is no point adding types before the types are named and checked |
 | **X4** | shortest-path functions | a traversal with a real cost, and it must be measured before it is offered |
 | **X5** | temporal/spatial types | the largest: new value kinds, new literals, new functions, new storage |
 
@@ -158,6 +158,28 @@ measured (a pattern filter multiplies the per-row cost by the pattern's
 hops, and the plan says by how much).
 
 ---
+
+## 4. X3 — the type discipline — landed (M5.9)
+
+`typeof()` answers with the contract's names (a node's label is its type,
+a relationship's type name is its type), and every operator refuses a
+wrong-typed operand by naming both types. Two things the implementation
+settled that the plan above did not say:
+
+- **The check precedes the value's decision.** `1 OR true` answers `true`
+  mathematically and is a type error nonetheless, so `AND`/`OR` check both
+  sides as soon as both are evaluated. The left side's own short-circuit
+  still skips the right entirely — a value never evaluated cannot be
+  type-checked.
+- **A node created in the same statement has a type.** `labelOfNode` /
+  `typeOfEdge` were snapshot-only, so reading the label of a node the
+  transaction had just made indexed past the snapshot's arrays. They are
+  delta-aware now, which `typeof` needed and `labels(n)` wanted.
+
+`limitations.md` no longer lists "most of the type system"; what remains
+there is the temporal/spatial half (X5).
+
+The original section follows:
 
 ## 4. X3 — the type discipline
 

@@ -47,6 +47,40 @@ type
     ## current bindings rather than from a fresh scan.
     depth*: int
 
+proc typeName*(v: Value): string =
+  ## The type's name, in one place. The refusal messages, `typeof()`, and
+  ## the contract in CYPHER.md §6 all use these words, so a caller can
+  ## match on them and a new type is a case here rather than a string in
+  ## every operator.
+  case v.kind
+  of vkNull: "NULL"
+  of vkBool: "BOOLEAN"
+  of vkInt: "INTEGER"
+  of vkFloat: "FLOAT"
+  of vkString: "STRING"
+  of vkBytes: "BYTES"
+  of vkVector: "VECTOR"
+  of vkList: "LIST"
+  of vkMap: "MAP"
+  of vkNode: "NODE"
+  of vkEdge: "RELATIONSHIP"
+  of vkPath: "PATH"
+
+proc typeOfValue*(ctx: QueryCtx; v: Value): string =
+  ## `typeof()`'s answer. A node's **label** is its type and a
+  ## relationship's **type name** is its type — pin C13, one label per
+  ## node — and the structural names above are the fallback for a node or
+  ## an edge whose type cannot be read (dead, or unlabelled).
+  case v.kind
+  of vkNode:
+    let l = labelOfNode(ctx, v.id)
+    (if l.len > 0: l else: "NODE")
+  of vkEdge:
+    let t = typeOfEdge(ctx, v.id)
+    (if t.len > 0: t else: "RELATIONSHIP")
+  else:
+    typeName(v)
+
 const
   MaxEvalDepth* = 64
   ## Guards `EXISTS { EXISTS { … } }` and a pathological map/list nesting.
@@ -134,7 +168,11 @@ proc toCypherString(v: Value): string =
 
 proc logicFail(op: string, l, r: Value) {.noreturn.} =
   cypherFail(int32(glyErrSql),
-    op & " needs booleans, got " & $l.kind & " and " & $r.kind)
+    op & " needs two booleans, not " & typeName(l) & " and " & typeName(r))
+
+proc logicFailUnary(op: string, v: Value) {.noreturn.} =
+  cypherFail(int32(glyErrSql),
+    op & " needs a boolean, not " & typeName(v))
 
 proc eqValues*(a, b: Value): Value =
   if a.kind == vkNull or b.kind == vkNull:
@@ -272,7 +310,16 @@ proc arith(op: string, a, b: Value): Value =
       return Value(kind: vkList, items: a.items & b.items)
   var x, y: float64
   if not numOf(a, x) or not numOf(b, y):
-    cypherFail(int32(glyErrSql), op & " needs numbers, got " & $a.kind & " and " & $b.kind)
+    ## `+` is the one arithmetic operator with more than one shape, and
+    ## its message says so: `1 + true` is refused for being none of them,
+    ## not for being "not a number" — a string and a list are numbers to
+    ## nobody and valid to `+`.
+    if op == "+":
+      cypherFail(int32(glyErrSql),
+        "+ needs two numbers, two strings or two lists, not " &
+        typeName(a) & " and " & typeName(b))
+    cypherFail(int32(glyErrSql),
+      op & " needs numbers, not " & typeName(a) & " and " & typeName(b))
   ## Integers stay integers. `1 + 1` is `2`, not `2.0`: promoting here would
   ## make every count a float on its way to the host, and a count that
   ## renders as 2.0 is a wrong answer however you dress it up.
@@ -461,6 +508,9 @@ proc callFunc(e: Eval, name: string, args: seq[Value]): Value {.gcsafe.} =
     if args[0].kind != vkString:
       return Value(kind: vkNull)
     Value(kind: vkString, s: args[0].s.strip())
+  of "typeof":
+    if n != 1: cypherFail(int32(glyErrSql), "typeof() takes one argument")
+    Value(kind: vkString, s: typeOfValue(e.ctx, args[0]))
   of "startswith":
     if n != 2: cypherFail(int32(glyErrSql), "startsWith() takes two arguments")
     if args[0].kind != vkString or args[1].kind != vkString:
@@ -724,8 +774,11 @@ proc eval(e: Eval, expr: Expr): Value =
     let a = e.eval(expr.items[0])
     let b = e.eval(expr.items[1])
     if expr.op == "IN":
-      if b.kind != vkList:
+      if b.kind == vkNull:
         return Value(kind: vkNull)
+      if b.kind != vkList:
+        cypherFail(int32(glyErrSql),
+          "IN needs a list on its right side, not " & typeName(b))
       ## Cypher's `IN` folds equality over the list under three-valued
       ## logic: `2 IN [1, null]` is *null* — an equality the engine could
       ## not answer might have matched, so `NOT (2 IN [1, null])` must not
@@ -756,10 +809,16 @@ proc eval(e: Eval, expr: Expr): Value =
             if m.b:
               return Value(kind: vkBool, b: true)
         return Value(kind: vkBool, b: false)
+      if a.kind != vkString or b.kind != vkString:
+        cypherFail(int32(glyErrSql),
+          expr.op & " needs two strings, not " & typeName(a) & " and " & typeName(b))
       return e.callFunc(toLowerAscii(expr.op).replace(" ", ""), @[a, b])
     if expr.op == "=~":
-      if a.kind != vkString or b.kind != vkString:
+      if a.kind == vkNull or b.kind == vkNull:
         return Value(kind: vkNull)
+      if a.kind != vkString or b.kind != vkString:
+        cypherFail(int32(glyErrSql),
+          "=~ needs two strings, not " & typeName(a) & " and " & typeName(b))
       var rx: Regex
       if not regexOf(b.s, rx):
         cypherFail(int32(glyErrSql), "invalid regular expression: " & b.s)
@@ -773,7 +832,14 @@ proc eval(e: Eval, expr: Expr): Value =
       return Value(kind: vkBool, b: not r.b)
     let (ord, ok) = compareValues(a, b)
     if not ok:
-      return Value(kind: vkNull)
+      ## Null propagates (pin C6); a non-null pair the engine cannot order
+      ## is a type error by name (pin C17). Answering null for `1 < 'a'`
+      ## would drop the row and look like "no matches".
+      if a.kind == vkNull or b.kind == vkNull:
+        return Value(kind: vkNull)
+      cypherFail(int32(glyErrSql),
+        expr.op & " needs two comparable values, not " & typeName(a) &
+        " and " & typeName(b))
     case expr.op
     of "<": Value(kind: vkBool, b: ord < 0)
     of "<=": Value(kind: vkBool, b: ord <= 0)
@@ -786,28 +852,42 @@ proc eval(e: Eval, expr: Expr): Value =
     ## right side, `true AND x` is x. A non-boolean, non-null operand is a
     ## query error, Cypher's rule: `1 AND 1` is not `true`, and a silent
     ## `true` here would smuggle an int predicate past a WHERE.
+    ##
+    ## The type check runs as soon as *both* sides have been evaluated,
+    ## before either side's value decides the answer: `1 AND false` is
+    ## ill-typed whichever answer the short-circuit would give, and
+    ## answering `false` for it would be a query error dressed as an
+    ## answer (pin C17). The left side's own short-circuit still skips the
+    ## right side entirely, which is the documented rule — a value that is
+    ## never evaluated cannot be type-checked.
     let l = e.eval(expr.items[0])
     if l.kind == vkBool and not l.b:
       return Value(kind: vkBool, b: false)
     let r = e.eval(expr.items[1])
+    if l.kind != vkBool and l.kind != vkNull:
+      logicFail(expr.op, l, r)
+    if r.kind != vkBool and r.kind != vkNull:
+      logicFail(expr.op, l, r)
     if r.kind == vkBool and not r.b:
       return Value(kind: vkBool, b: false)
     if l.kind == vkNull or r.kind == vkNull:
       return Value(kind: vkNull)
-    if l.kind != vkBool or r.kind != vkBool:
-      logicFail(expr.op, l, r)
     Value(kind: vkBool, b: true)
   of ekOr:
+    ## The same order as AND, for the same reason: `1 OR true` answers
+    ## `true` mathematically, and is a type error nonetheless.
     let l = e.eval(expr.items[0])
     if l.kind == vkBool and l.b:
       return Value(kind: vkBool, b: true)
     let r = e.eval(expr.items[1])
+    if l.kind != vkBool and l.kind != vkNull:
+      logicFail(expr.op, l, r)
+    if r.kind != vkBool and r.kind != vkNull:
+      logicFail(expr.op, l, r)
     if r.kind == vkBool and r.b:
       return Value(kind: vkBool, b: true)
     if l.kind == vkNull or r.kind == vkNull:
       return Value(kind: vkNull)
-    if l.kind != vkBool or r.kind != vkBool:
-      logicFail(expr.op, l, r)
     Value(kind: vkBool, b: false)
   of ekXor:
     ## Three-valued with no short-circuit: XOR needs both sides. `1 XOR 0`
@@ -825,7 +905,7 @@ proc eval(e: Eval, expr: Expr): Value =
     if v.kind == vkNull:
       return v
     if v.kind != vkBool:
-      logicFail("NOT", v, v)
+      logicFailUnary("NOT", v)
     Value(kind: vkBool, b: not v.b)
   of ekIsNull:
     let v = e.eval(expr.target)
