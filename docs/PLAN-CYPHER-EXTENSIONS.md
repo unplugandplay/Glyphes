@@ -69,6 +69,34 @@ N writes, so the plan says what N writes cost).
 
 ---
 
+### X1's recipe — the five edits, in order
+
+The clause is a *write clause* like `SET`, and it is worth spending one
+sentence on why that is the cheap shape: a `FOREACH` applies the **same
+`SetItem`s** a `SET` applies, to a list of nodes instead of to the
+current row. So the whole implementation is "evaluate a list, bind a
+variable per element, apply the items" — and the "apply" is already
+written (`applySetItem` in `ops.nim`, used by `okSet`).
+
+| # | file | the edit |
+|---|---|---|
+| 1 | `src/cypher/ast.nim` | a `qpForeach` part: `list*: Expr`, `varName*: string`, `setItems*: seq[SetItem]`, `removeItems*: seq[PropRef]` — the same item types `SET` and `REMOVE` use, for the reason `MERGE`'s `ON CREATE SET` reuses `SetItem` |
+| 2 | `src/cypher/parser.nim` | `parseForeach`: `FOREACH ( n IN <expr> | SET … \| REMOVE … )`. The list is a **parameter** (`UNWIND` is refused, so there is no other source); the body is `SET`/`REMOVE` only — `CREATE` or `DELETE` inside is refused by name, as openCypher refuses it. The existing `parseSet`/`parseRemove` bodies are reused rather than re-written, so a `SET` inside a `FOREACH` and a `SET` outside it are the same code |
+| 3 | `src/cypher/execute.nim` | the scope arm: the variable is added to the scope (the `qpUnwind` precedent — it leaks the same way an `UNWIND`'s variable does), and the items' targets are checked against it with `checkWriteTarget` |
+| 4 | `src/cypher/plan.nim` | `of qpForeach:` → `seed = newForeach(ctx, seed, part)` — beside the other write clauses, so it takes a row to act on the way they do |
+| 5 | `src/cypher/ops.nim` | an `okForeach` operator: per row, evaluate the list expression; for each element, copy the row, bind the variable to the element, and apply the items with `applySetItem` / the `REMOVE` path — **and the row count must not change**: a `FOREACH` is not an `UNWIND`, it writes and passes the row through |
+
+**The two traps, named.**
+
+- **The rows must not multiply.** An `UNWIND` turns one row into N;
+  a `FOREACH` must turn one row into one. The operator therefore
+  applies the items *in place* and leaves the row alone.
+- **The element must be a node.** `FOREACH (n IN $ids | SET n.x = 1)`
+  with `$ids` holding node ids is the shape that works; an element that
+  is not a node is refused by name, the way `DELETE`'s target is.
+
+`rowsAffected` counts the writes, as it does for `SET`.
+
 ## 3. X2 — graph-pattern predicates
 
 ```
