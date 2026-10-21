@@ -15,9 +15,12 @@
 import std/[unittest, strutils, os]
 import ../ez80
 import ../../src/abi
+import ../../src/store/prop
 import ../../src/database
 import ../../src/txn/txn
 import ../../src/gbasic_channel
+import ../../src/gbasic
+import ../../src/gbasic_store
 
 const
   ## The Z80 transcript of the BASIC demo, captured from the Z80 emulator
@@ -386,4 +389,83 @@ suite "the port channel — the guest and the real host":
     discard z.run(1_000_000)
     check z.outBuf == "Person\rCompany"
     close(db)
+
+
+
+# ------------------------------------------------------------ the guest
+#
+# The E4 gate (PLAN-GLYPH-BASIC.md §6): the same script, run on the
+# host client and on the guest, must produce the same bytes. The guest
+# is not a second client with its own ways — it is the same client in
+# another body, and the transcript is how that is proved.
+
+const
+  gbScript = [
+    "find Person",
+    "count Person",
+    "labels"
+  ]
+
+proc guestFixture(): Database =
+  ## The fixture the host client and the guest both run against: the
+  ## same three nodes and the same edge, so the ids are the same ids.
+  let path = "tmp" / "ez80-gbasic.glyph"
+  removeFile(path)
+  removeFile(path & "-wal")
+  result = openDatabase(path, GLY_OPEN_CREATE)
+  let tx = result.beginTransaction()
+  let ana = tx.createNode("Person")
+  let bo = tx.createNode("Person")
+  let acme = tx.createNode("Company")
+  discard tx.setNodeProp(ana, "name", Value(kind: vkString, s: "Ana"))
+  discard tx.setNodeProp(bo, "name", Value(kind: vkString, s: "Bo"))
+  discard tx.setNodeProp(acme, "name", Value(kind: vkString, s: "Acme"))
+  discard tx.createEdge(ana, bo, "KNOWS")
+  discard result.commitTransaction(tx)
+
+proc hostTranscript(db: Database; script: openArray[string]): string =
+  ## The host client's transcript for the script.
+  let t = newStoreTransport(db)
+  var s = newSession()
+  for line in script:
+    if not s.runStatement(t, line):
+      break
+  result = s.transcript
+
+proc guestTranscript(db: Database; script: openArray[string]): string =
+  ## The guest's transcript: the same script, fed to the guest on the
+  ## console, with the host answering over the channel.
+  let here = currentSourcePath().parentDir.parentDir
+  let bin = readFile(here / "gbasic.bin")
+  var z: EZ80
+  z.reset(0)
+  for i, c in bin:
+    z.mem[i] = c.uint8
+  var input = ""
+  for line in script:
+    input.add line & "\r"
+  z.inBuf = input
+  z.chanHandler = proc(request: string): string = channelAnswer(db, request)
+  discard z.run(10_000_000'u64)
+  result = z.outBuf.replace("\r", "\n")
+
+suite "GLYPH BASIC — the guest and the host client":
+
+  test "the same script, the same transcript":
+    ## The gate (GB-F): the guest's bytes are the host client's bytes.
+    ## The script covers the statements this first cut implements — the
+    ## ones that reach the graph — and says so.
+    let db = guestFixture()
+    let host = hostTranscript(db, gbScript)
+    let guest = guestTranscript(db, gbScript)
+    check guest == host
+    check host.len > 0
+    close(db)
+
+  test "the guest is small":
+    ## The measuring instrument: the language, in Z80 assembly, in
+    ## bytes. The plan's mark is 3 KB for the whole grammar (E3).
+    let here = currentSourcePath().parentDir.parentDir
+    let bin = readFile(here / "gbasic.bin")
+    check bin.len < 3072
 

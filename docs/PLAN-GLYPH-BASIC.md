@@ -173,6 +173,34 @@ refusal it cannot see is a refusal the child never learns about.
 Cypher compiler, and the host compiles ✓ (which is the point ✓: the
 language is small enough to *send*, and the engine's is not).
 
+**What E3 and E4 are, as shipped.** The guest is
+`ez80/gbasic.z80` — GLYPH BASIC in Z80 assembly, 615 bytes for the
+statements it covers. It reads a line, splits it into words, sends a
+GLYPH QUERY line over the channel, reads the answer, and prints what
+the host client prints.
+
+The statements this first cut covers are the ones that reach the graph:
+`find`, `count`, `labels` and `end`. The names, `show`, `go`, the
+expressions and the control flow are the next cut, and the transcript
+test says so by only exercising what is here — a gate that claims more
+than it checks is a gate that rots.
+
+**E4 is the gate, and it is a byte-for-byte comparison**: the same
+script runs on the host client and on the guest, and the two transcripts
+must be identical. The fixture is the same graph for both, so the ids
+are the same ids. It is the same discipline as the eZ80 BASIC's golden
+transcript ✓ — *the same work, two ways, compared* ✓.
+
+Two things the guest learned the hard way, and both are the client's
+rules rather than the guest's:
+
+- **A request is built from parts and ends once.** The guest sends
+  `gq find ` and `Person` as two parts and one CR at the end; a CR
+  after each part is two requests, and the compiler's answer to the
+  second one is "a GLYPH QUERY statement is one line" ✓.
+- **The answer's lines are NUL-separated and end with an empty line**,
+  because the guest has to know where an answer stops ✓.
+
 **E3 is where the size of the language is proved.** If the grammar
 cannot be written in 3 KB of Z80 assembly, it is too big, and the host
 client has taught us that by being too big. That is the honest use of

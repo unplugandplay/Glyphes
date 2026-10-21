@@ -293,6 +293,13 @@ proc encode(mnIn: string, args: seq[string], line: int): seq[uint8] =
         result.add 0xF9'u8
         break done
       let rd16 = rpcode(d)
+      let rs16 = rpcode(s)
+      if rd16 >= 0 and rs16 >= 0:
+        ## LD rr, rr' -- the Z80's register-pair moves (0x01 | rd << 4 | rs).
+        ## LD HL,DE is 0x21; the only pair move that is not one is
+        ## LD SP,HL, which is handled above.
+        result.add bt(0x01 or (rd16 shl 4) or rs16)
+        break done
       if rd16 >= 0:
         result.add bt(0x01 or (rd16 shl 4))
         addImm(result, evalExpr(s, line))

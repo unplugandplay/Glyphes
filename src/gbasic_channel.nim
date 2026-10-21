@@ -8,6 +8,7 @@
 ## parser in 3 KB of assembly:
 ##
 ##     gq <line>            a GLYPH QUERY line: the ids it matched
+##     exec <line>          a GLYPH QUERY write: how many entities landed
 ##     props <id>           a node's label, then "key value" per property
 ##     edges <id>           "TYPE dir other" per edge, dir being > or <
 ##     link <a> <t> <b>     one edge between two existing nodes
@@ -140,6 +141,16 @@ proc channelAnswer*(db: Database; request: string): string =
       for field in paramFields:
         parseParamField(field, params)
       gqAnswer(t, arg, params)
+    of "exec":
+      ## A write: the answer is how many entities landed, because the
+      ## client prints that ("1 created", "1 updated", "1 dropped") and
+      ## the guest must print the same.
+      if arg.len == 0:
+        return failAnswer("exec needs a GLYPH QUERY line")
+      var params = initTable[string, Value]()
+      for field in paramFields:
+        parseParamField(field, params)
+      $t.runFn(arg, params).affected
     of "props":
       if arg.len == 0:
         return failAnswer("props needs a node id")

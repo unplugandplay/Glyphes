@@ -1,0 +1,437 @@
+; ------------------------------------------------------------------------
+; gbasic.z80 — GLYPH BASIC on the eZ80.
+;
+; The second implementation of the client's language, and the reason pin
+; GB9 exists: the language has to be small enough to be written twice.
+; The host client is Nim; this is Z80 assembly on an eZ80. The proof is
+; the *transcript*: the same script, run on both, must produce the same
+; bytes (PLAN-GLYPH-BASIC.md §6, E4).
+;
+; The graph is not here. The guest sends a GLYPH QUERY line over the
+; port channel (ez80/channel.z80) and reads the answer back — so the
+; guest needs no compiler and no graph, and the host does the work.
+;
+; What is here is the client's *own* part: the line, the words, the
+; request, the answer, and the printing — which is exactly the part the
+; host client has in Nim, and exactly the part that has to be small.
+;
+; This first cut covers the statements that reach the graph:
+; `find`, `count`, `labels` and `end`. The names, `show`, `go`, the
+; expressions and the control flow are the next cut, and the transcript
+; test says so by only exercising what is here.
+;
+; Assemble:  nim c -r ez80/ez80asm.nim -- ez80/gbasic.z80 ez80/gbasic.bin
+; ------------------------------------------------------------------------
+
+CR      EQU 13
+
+; ---- memory map ----------------------------------------------------
+LINEBUF EQU 0xD400      ; the statement line (96 bytes)
+WORDS   EQU 0xD470      ; the word offsets (24 bytes)
+WCOUNT  EQU 0xD490      ; the number of words (1 byte)
+ANSBUF  EQU 0xD4A0      ; the host's answer (128 bytes)
+DIVCNT  EQU 0xD530      ; the division's counter
+PNCNT   EQU 0xD531      ; the printed digits
+SCR     EQU 0xD532      ; scratch
+STKTOP  EQU 0xBFF0
+
+        ORG 0
+
+; ---- startup --------------------------------------------------------
+START:
+        LD SP,STKTOP
+MAIN:
+        CALL READLINE
+        CALL TOKENIZE
+        CALL RUNSTMT
+        JR MAIN
+
+; ---- the console -----------------------------------------------------
+
+; Print the NUL-terminated string at HL.
+PRSTR:  LD A,(HL)
+         OR A
+         RET Z
+         OUT (1),A
+         INC HL
+         JR PRSTR
+
+; Print a space, then the string at HL.
+PRSP:   LD A,' '
+         OUT (1),A
+         JR PRSTR
+
+; Print the number in HL, unsigned decimal. (Adapted from the eZ80
+; BASIC's PNUMU: the same division, the same digit stack.)
+PNUMU:
+        LD A,H
+        OR L
+        JP NZ,PU1
+        LD A,'0'
+        CALL PUTCHAR
+        RET
+PU1:
+        XOR A
+        LD (PNCNT),A
+PUL:
+        LD DE,10
+        CALL UDIV
+        LD A,C
+        ADD A,'0'
+        PUSH AF
+        LD A,(PNCNT)
+        INC A
+        LD (PNCNT),A
+        LD A,H
+        OR L
+        JP NZ,PUL
+PUP:
+        POP AF
+        CALL PUTCHAR
+        LD A,(PNCNT)
+        DEC A
+        LD (PNCNT),A
+        JP NZ,PUP
+        RET
+
+PUTCHAR:
+        OUT (1),A
+        RET
+
+; UDIV: HL / DE. The quotient in HL, the remainder in C. (The eZ80
+; BASIC's, unchanged: a shift-and-subtract division.)
+UDIV:
+        LD A,D
+        OR E
+        JP Z,DVERR
+        LD BC,0
+        LD A,16
+        LD (DIVCNT),A
+DVLP:
+        ADD HL,HL
+        RL C
+        RL B
+        LD A,C
+        SUB E
+        LD A,B
+        SBC A,D
+        JP C,DVSK
+        LD A,C
+        SUB E
+        LD C,A
+        LD A,B
+        SBC A,D
+        LD B,A
+        INC L
+DVSK:
+        LD A,(DIVCNT)
+        DEC A
+        LD (DIVCNT),A
+        JP NZ,DVLP
+        RET
+DVERR:
+        LD HL,SCR
+        LD (HL),'/'        ; a division by zero: the sign, and no more
+        LD A,(HL)
+        OUT (1),A
+        RET
+
+; ---- the line and the words ------------------------------------------
+
+; Read a line from the console into LINEBUF. The length comes back in A.
+READLINE:
+        LD HL,LINEBUF
+        LD B,0
+RL1:    IN A,(2)              ; a character is waiting?
+        OR A
+        JR Z,RL1
+        IN A,(1)
+        CP CR
+        JR Z,RL2
+        LD (HL),A
+        INC HL
+        INC B
+        JR RL1
+RL2:    LD (HL),0
+        LD A,B
+        RET
+
+; Split the line into words: the offsets of the words in WORDS, and the
+; count in WCOUNT. Each word is NUL-terminated in place — the space
+; that ended it becomes the terminator.
+TOKENIZE:
+        LD A,0
+        LD (WCOUNT),A
+        LD HL,LINEBUF
+        LD DE,WORDS
+        LD C,0              ; the offset in the line
+TK1:    LD A,(HL)
+        OR A
+        RET Z
+        CP ' '
+        JR Z,TKSKIP
+        LD A,C
+        LD (DE),A
+        INC DE
+        LD A,(WCOUNT)
+        INC A
+        LD (WCOUNT),A
+TKEND:  LD A,(HL)
+        OR A
+        JR Z,TKDONE          ; the end of the line
+        CP ' '
+        JR Z,TKSKIP          ; the end of the word
+        INC HL
+        INC C
+        JR TKEND
+TKSKIP: LD (HL),0           ; the separator ends the previous word
+        INC HL
+        INC C
+        JR TK1
+TKDONE: LD (HL),0
+        RET
+
+; The address of word A (0-based) in HL.
+WORDAI: LD L,A
+        LD H,0
+        LD DE,WORDS
+        ADD HL,DE
+        LD E,(HL)
+        LD D,0
+        LD HL,LINEBUF
+        ADD HL,DE
+        RET
+
+; Is the word at HL the keyword at DE? The case is ignored, and the
+; answer is in A: 0 for the same, 1 for different.
+ISWORD:
+        LD (SCR),HL          ; the word's address, for the walk
+ISW1:   LD A,(DE)
+        OR A
+        JR Z,ISW2
+        LD A,(HL)
+        OR A
+        JR Z,ISWNO
+        LD A,(DE)
+        CP 'a'
+        JR C,ISW3
+        CP 123
+        JR NC,ISW3
+        SUB 32              ; an upper-case letter
+ISW3:   LD B,A
+        LD A,(HL)
+        CP 'a'
+        JR C,ISW4
+        CP 123
+        JR NC,ISW4
+        SUB 32
+ISW4:   CP B
+        JR NZ,ISWNO
+        INC HL
+        INC DE
+        JR ISW1
+ISW2:   LD A,(HL)
+        OR A
+        JR Z,ISWYES
+ISWNO:  LD A,1
+        RET
+ISWYES: LD A,0
+        RET
+
+; ---- the channel ------------------------------------------------------
+
+; Send the NUL-terminated string at HL to the host, with no terminator:
+; a request is built from parts, and only the last one ends it.
+SENDPART:
+        LD A,(HL)
+        OR A
+        RET Z
+        OUT (3),A
+        INC HL
+        JR SENDPART
+
+; Send the NUL-terminated string at HL to the host, then CR — the end
+; of the request.
+SENDSTR:
+        CALL SENDPART
+        LD A,CR
+        OUT (3),A
+        RET
+
+; Read the host's answer into ANSBUF: the lines are NUL-separated, and
+; the answer ends at the empty line.
+READANS:
+        LD HL,ANSBUF
+        LD B,0
+RA1:    IN A,(5)              ; a byte is waiting?
+        OR A
+        JR Z,RA1
+        IN A,(4)
+        CP CR
+        JR Z,RA2
+        LD (HL),A
+        INC HL
+        INC B
+        JR RA1
+RA2:    ; a CR: the next byte decides whether the answer is over
+        IN A,(5)
+        OR A
+        JR Z,RA2
+        IN A,(4)
+        CP CR
+        JR Z,RA3              ; the empty line: the answer is over
+        ; The CR ends this line, and the byte we just read is the
+        ; first of the next one: it must not be dropped.
+        LD (HL),0
+        INC HL
+        INC B
+        LD (HL),A
+        INC HL
+        INC B
+        JR RA1
+RA3:    LD (HL),0
+        RET
+
+; Count the ids in the answer's first line. The count comes back in HL.
+COUNTIDS:
+        LD HL,ANSBUF
+        LD DE,0              ; the count
+CI1:    LD A,(HL)
+        OR A
+        JR Z,CIDONE
+        CP '0'
+        JR C,CINEXT
+        CP 58                ; '9' + 1
+        JR NC,CINEXT
+        INC DE
+CI2:    INC HL
+        LD A,(HL)
+        CP '0'
+        JR C,CI1
+        CP 58
+        JR NC,CI1
+        JR CI2
+CINEXT: INC HL
+        JR CI1
+CIDONE: LD H,D
+        LD L,E
+        RET
+
+; Print the answer's lines, one per line.
+PRTLINES:
+        LD HL,ANSBUF
+PT1:    LD A,(HL)
+        OR A
+        RET Z
+PT2:    LD A,(HL)
+        OR A
+        JR Z,PT3
+        OUT (1),A
+        INC HL
+        JR PT2
+PT3:    LD A,CR
+        OUT (1),A
+        INC HL
+        JR PT1
+
+; ---- the statements ----------------------------------------------------
+
+RUNSTMT:
+        LD A,(WCOUNT)
+        OR A
+        RET Z
+        LD A,0
+        CALL WORDAI
+        LD (SCR+1),HL         ; the command's address
+
+        LD DE,MSGFIND
+        CALL ISWORD
+        OR A
+        JR Z,STFIND
+        LD DE,MSGCOUNT
+        CALL ISWORD
+        OR A
+        JR Z,STCOUNT
+        LD DE,MSGLABELS
+        CALL ISWORD
+        OR A
+        JR Z,STLABELS
+        LD DE,MSGEND
+        CALL ISWORD
+        OR A
+        JR Z,STEND
+        LD DE,MSGFIND
+        CALL ISWORD
+        OR A
+        JR Z,STEND
+        RET
+
+; find <label>
+STFIND:
+        LD A,(WCOUNT)
+        CP 2
+        JR C,STERR
+        LD HL,MSGQFIND
+        CALL SENDPART
+        LD A,1
+        CALL WORDAI
+        CALL SENDSTR
+        CALL READANS
+        CALL COUNTIDS
+        CALL PNUMU
+        LD HL,MSGNODES
+        CALL PRSP
+        LD A,CR
+        OUT (1),A
+        RET
+
+; count <label>
+STCOUNT:
+        LD A,(WCOUNT)
+        CP 2
+        JR C,STERR
+        LD HL,MSGQCOUNT
+        CALL SENDPART
+        LD A,1
+        CALL WORDAI
+        CALL SENDSTR
+        CALL READANS
+        ; The answer *is* the count, as text: the guest prints the
+        ; host's own digits rather than counting them again — one less
+        ; thing to get wrong, and one less conversion.
+        LD HL,ANSBUF
+        CALL PRSTR
+        LD A,CR
+        OUT (1),A
+        RET
+
+; labels
+STLABELS:
+        LD HL,MSGQLABELS
+        CALL SENDSTR
+        CALL READANS
+        CALL PRTLINES
+        RET
+
+; end
+STEND:
+        HALT
+
+STERR:
+        LD HL,MSGERR
+        CALL PRSTR
+        LD A,CR
+        OUT (1),A
+        RET
+
+; ---- the strings -------------------------------------------------------
+
+MSGQFIND:  DB "gq find ", 0
+MSGQCOUNT: DB "gq count ", 0
+MSGQLABELS: DB "gq labels", 0
+MSGFIND:   DB "find", 0
+MSGCOUNT:  DB "count", 0
+MSGLABELS: DB "labels", 0
+MSGEND:    DB "end", 0
+MSGNODES:  DB "nodes", 0
+MSGERR:    DB "?", 0
