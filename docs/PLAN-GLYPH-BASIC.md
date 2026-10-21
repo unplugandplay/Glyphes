@@ -82,6 +82,33 @@ edges as `type -> other` ✓ — using the engine's *read-only
 introspection* doors (`glyphes_node_props`, `glyphes_edge_info`) ✓,
 which the ABI already has ✓✓.
 
+**The control flow, as it came out.** Two modules, because the
+expressions and the statements both need the *values* and a cycle
+would not do: `src/gbasic_types.nim` holds the value kinds, and
+`src/gbasic_expr.nim` holds the evaluator, which works on the session's
+*names* rather than on the session — so the evaluator and the client
+never import each other.
+
+The grammar, as shipped:
+
+    if <expr> then <statement>[: <statement>...]
+    for <var> = <a> to <b> [step <s>] : <statement>... : next
+    input <name>
+    print <expression>
+    <name> = <expression>
+
+Bodies are **one line**, separated by `:`. The reason is the program
+model, not the effort: `goto` names a line, and a client line has no
+number — it has a position in a session — so subroutines and
+multi-line bodies wait for the client to hold a numbered program, and
+they wait together (PRD §3.2).
+
+Two details that are worth their own line, because both were bugs
+before they were rules: the right-hand side of an assignment is the
+**rest of the line** (`t = t + 1` — taking the third word alone quietly
+drops the `+ 1`), and a loop that cannot finish **refuses** after a
+million rounds rather than hanging.
+
 ## 4. B3 — the prompt
 
 - The `READY>` loop: read a line, run it, print the result, print
@@ -132,6 +159,16 @@ New file `tests/unit/test_gbasic.nim`:
 | the parameters | a client value never reaches the query text — checked at the transport boundary (GB-D) ✓ |
 | the arithmetic | a node id above 2³¹ round-trips (GB-E) ✓ |
 | the cursor | `find`/`go` replace the cursor; `first`/`last` pick from it; `count` prints its size ✓ |
+| the control flow | the conditional runs the statement that follows it; the loop counts up and down; the loop that cannot finish says so ✓ |
+| the null | a null condition is false ✓ |
+| the durability | a link survives a reopen, because it went through the log ✓ |
+
+The durability test is the one that earned its keep: the door's link
+wrote straight to the store, which is *in memory and nowhere else*, and
+the fixture's nodes did the same — so a fixture built that way hides
+the bug the test is looking for. Both now go through the transaction
+(`tx.createNode`, `tx.createEdge`), which is the path that reaches the
+log.
 
 ## 8. Running the two plans together
 
@@ -172,6 +209,10 @@ engine later), and the tests pin what crosses it.
       transcript is unchanged (B4, GB-B) ✓
 - [ ] a client value never reaches the query text (B4, GB-D) ✓
 - [ ] a node id above 2³¹ round-trips (B4, GB-E) ✓
+- [ ] the control flow runs: the conditional, the loop, `input`, and the
+      client's own expressions (B2) ✓
+- [ ] a client's write survives a reopen, because it went through the
+      log (B4) ✓
 - [ ] the eZ80 guest produces the same transcript as the host client
       (B5, GB-F) ✓
 - [ ] `docs/ABI.md` records the doors the client uses ✓

@@ -15,11 +15,15 @@
 
 import std/[unittest, strutils, os, tables]
 import ../../src/gbasic
+import ../../src/gbasic_types
+import ../../src/gbasic_expr
 import ../../src/gbasic_store
+
 import ../../src/database
 import ../../src/abi
 import ../../src/store/prop
 import ../../src/store/store
+import ../../src/txn/txn
 import ../../src/cypher/execute
 
 var dbCounter = 0
@@ -35,23 +39,27 @@ proc freshDb(): Database =
   removeFile(path & "-wal")
   let db = openDatabase(path, GLY_OPEN_CREATE)
   let tx = db.beginTransaction()
-  ## The fixture is built through the store, not through Cypher, for two
-  ## reasons: the ids are then known exactly (a transcript is only
-  ## checkable if the fixture is fixed), and the edge between two
-  ## *existing* nodes is something the engine's query language cannot
-  ## express — a comma-`MATCH` is a cartesian product and is refused, a
-  ## second `MATCH` is a join and is refused, and a `MERGE` creates the
-  ## whole pattern, including a second copy of the far end. That gap is
-  ## what the link door exists for (PRD-GLYPH-QUERY.md §5).
-  let ana = db.store.createNode("Person")
-  let bo = db.store.createNode("Person")
-  let acme = db.store.createNode("Company")
-  discard db.store.setNodeProp(ana, "name", Value(kind: vkString, s: "Ana"))
-  discard db.store.setNodeProp(ana, "age", Value(kind: vkInt, i: 34))
-  discard db.store.setNodeProp(bo, "name", Value(kind: vkString, s: "Bo"))
-  discard db.store.setNodeProp(bo, "age", Value(kind: vkInt, i: 41))
-  discard db.store.setNodeProp(acme, "name", Value(kind: vkString, s: "Acme"))
-  discard db.store.createEdge(ana, bo, "KNOWS")
+  ## The fixture is built through the *transaction*, not through the
+  ## store, for three reasons. The ids are then known exactly (a
+  ## transcript is only checkable if the fixture is fixed); the edge
+  ## between two *existing* nodes is something the engine's query
+  ## language cannot express — a comma-`MATCH` is a cartesian product
+  ## and is refused, a second `MATCH` is a join and is refused, and a
+  ## `MERGE` creates the whole pattern, including a second copy of the
+  ## far end (that gap is what the link door exists for,
+  ## PRD-GLYPH-QUERY.md §5); and the writes reach the log, so the
+  ## fixture is as durable as the client's own writes. A fixture built
+  ## through the store is a fixture that a reopen empties — which hides
+  ## exactly the bug the durability test is there to catch.
+  let ana = tx.createNode("Person")
+  let bo = tx.createNode("Person")
+  let acme = tx.createNode("Company")
+  discard tx.setNodeProp(ana, "name", Value(kind: vkString, s: "Ana"))
+  discard tx.setNodeProp(ana, "age", Value(kind: vkInt, i: 34))
+  discard tx.setNodeProp(bo, "name", Value(kind: vkString, s: "Bo"))
+  discard tx.setNodeProp(bo, "age", Value(kind: vkInt, i: 41))
+  discard tx.setNodeProp(acme, "name", Value(kind: vkString, s: "Acme"))
+  discard tx.createEdge(ana, bo, "KNOWS")
   discard db.commitTransaction(tx)
   result = db
 
@@ -107,6 +115,127 @@ suite "GLYPH BASIC — the transcript":
     let text2 = run(db, ["go knows"])
     check text2 == "no relationship type 'knows'; the types are: KNOWS\n"
     close(db)
+
+suite "GLYPH BASIC — the control flow":
+
+  test "a conditional runs the statement that follows it":
+    ## The conditional the query language refuses to have: the engine
+    ## has no CASE and no EXISTS, so a client that wants a choice makes
+    ## it here.
+    let db = freshDb()
+    let text = run(db, ["let x = 1",
+                        "if x = 1 then print \"yes\"",
+                        "if x = 2 then print \"no\"",
+                        "if x = 1 then print \"a\" : print \"b\""])
+    check text == "yes\na\nb\n"
+    close(db)
+
+  test "a condition that is null is false":
+    ## Null is not truthy, in the client's language as in the engine's
+    ## (C6): a language that treats null as false teaches the wrong
+    ## thing quietly.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    s.names["n"] = GbValue(kind: gbvNull)
+    check not condition(s.names, "n")
+    close(db)
+
+  test "a loop counts, and the variable it leaves behind is the last one":
+    let db = freshDb()
+    let text = run(db, ["let t = 0",
+                        "for i = 1 to 5 : t = t + i : next",
+                        "print t",
+                        "print i"])
+    check text == "15\n5\n"
+    close(db)
+
+  test "a loop that counts down works too":
+    let db = freshDb()
+    let text = run(db, ["for i = 5 to 1 step -1 : print i : next"])
+    check text == "5\n4\n3\n2\n1\n"
+    close(db)
+
+  test "a loop that cannot finish says so instead of hanging":
+    ## The client is a prompt, and a prompt that hangs is a prompt that
+    ## is broken.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runStatement(t, "for i = 1 to 10000000 : print i : next")
+    except CatchableError as e:
+      msg = e.msg
+    check "did not finish" in msg
+    close(db)
+
+  test "input reads a line into a name":
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    s.inputFn = proc(): string = "42"
+    discard s.runStatement(t, "input n")
+    check s.names.hasKey("n")
+    ## A line that reads as a whole number is a number: `input n` then
+    ## `if n > 5` must not compare text.
+    check s.names["n"].kind == gbvNumber
+    check s.names["n"].number == 42
+    close(db)
+
+  test "input reads anything else as text":
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    s.inputFn = proc(): string = "Ada"
+    discard s.runStatement(t, "input who")
+    check s.names["who"].kind == gbvString
+    check s.names["who"].text == "Ada"
+    close(db)
+
+  test "the statements after a next run once, after the loop":
+    let db = freshDb()
+    let text = run(db, ["let t = 0",
+                        "for i = 1 to 3 : t = t + i : next : print \"done\"",
+                        "print t"])
+    check text == "done\n6\n"
+    close(db)
+
+  test "a link survives a reopen, because it went through the log":
+    ## The door's writes have to reach the log. A write that a restart
+    ## forgets is a lie, and the store's own `createEdge` is such a
+    ## write: it is in memory and nowhere else. The transaction's
+    ## `createEdge` is the one that is in the log.
+    inc dbCounter
+    let path = getTempDir() / "glyphes-gbasic-link-" & $getCurrentProcessId() &
+              "-" & $dbCounter & ".glyph"
+    removeFile(path)
+    removeFile(path & "-wal")
+    let db = openDatabase(path, GLY_OPEN_CREATE)
+    let tx = db.beginTransaction()
+    ## The *transaction's* createNode, not the store's: a node that never
+    ## reached the log is a node a restart forgets, and then the link
+    ## would point at nothing. Both ends of a link must be as durable as
+    ## the link.
+    let ana = tx.createNode("Person")
+    let bo = tx.createNode("Person")
+    discard db.commitTransaction(tx)
+    let t = newStoreTransport(db)
+    var s = newSession()
+    discard s.runStatement(t, "p = " & $ana)
+    discard s.runStatement(t, "q = " & $bo)
+    discard s.runStatement(t, "link p KNOWS q")
+    close(db)
+
+    let db2 = openDatabase(path, 0)
+    let t2 = newStoreTransport(db2)
+    var s2 = newSession()
+    discard s2.runStatement(t2, "p = " & $ana)
+    ## The edge is there: the follow finds the far end.
+    discard s2.runStatement(t2, "go KNOWS from p")
+    check s2.cursor.len == 1
+    check s2.cursor[0] == bo
+    close(db2)
 
 suite "GLYPH BASIC — the refusals":
 

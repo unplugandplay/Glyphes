@@ -112,6 +112,37 @@ The BASIC's, unchanged:
 | `rem ...` | a comment |
 | `end` | stop the program |
 
+**The expressions are the client's own** (pin GB7): a number, a string, a
+name, a comparison (`=` `<>` `<` `>` `<=` `>=`), `and` / `or` / `not`,
+`+ - * /`, and parentheses. They are evaluated **in the client**, not by
+the engine — the door is for the *graph*, and `1 + 1` is not a graph
+query. Null is a value like any other and it is not true: a comparison
+with null gives null, and a null condition is false (the engine's
+three-valued logic, CYPHER.md §6, inherited — a language that treats
+null as false teaches the wrong thing quietly).
+
+**What the first cut ships.** The conditional, the loop and `input` are
+in. `goto` / `gosub` / `return` are **not**, and the reason is shape,
+not effort: a subroutine names a *line*, and a client line has no
+number — it has a position in a session. Numbering the client's lines
+means giving the client a **program** (a list of lines and a program
+counter), and that same program model is what makes a *multi-line* loop
+body possible. The two come together, so both wait. Until then the
+bodies are **one line**, separated by `:` — the separator the eZ80
+BASIC already uses:
+
+    ready> if x = 1 then print "one" : print "and the rest"
+    ready> for i = 1 to 5 : t = t + i : next
+
+A loop that cannot finish **says so** instead of hanging: the client
+is a prompt, and a prompt that hangs is a prompt that is broken.
+
+`input <name>` reads a line, and it knows what it read: a line that
+reads as a whole number is a **number**, anything else is **text** —
+the BASIC's `INPUT`. The alternative (text always) would make
+`input n` then `if n > 5` a *text* comparison, which is quietly wrong
+rather than refused, and quietly wrong is the worst kind.
+
 ### 3.3 The session
 
 The BASIC's variables are 26 single letters; a graph session wants
@@ -175,6 +206,11 @@ client is what a real user types.
 - **Functions and procedures.** `gosub` is enough for a first language,
   and a call stack in the guest is a lot of memory. The host version may
   add `def`.
+- **The program model, and with it the subroutines and the multi-line
+  bodies.** `goto` / `gosub` / `return` and a loop whose body is the
+  *lines that follow* all need the client to hold a numbered program
+  rather than a session of statements. That is the next cut, and it is
+  the cut that turns the client from a prompt into a program runner.
 - **A `while`.** `for` with a step, and `goto`, cover it; `while` is
   sugar for a `for` over 1..32767 ✗ hmm — the 64-bit host makes it
   trivial ✓ and the guest's 24-bit ADL mode makes it possible ✓✓

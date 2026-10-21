@@ -27,21 +27,13 @@
 
 import std/[tables, strutils]
 import ./gq
+import ./gbasic_types
+import ./gbasic_expr
 import ./store/prop
 
 type
   GbError* = object of CatchableError
     ## A client-side refusal, naming the statement that caused it.
-
-  GbValueKind* = enum
-    gbvNode, gbvNumber, gbvString
-
-  GbValue* = object
-    ## What a name in the session can hold.
-    case kind*: GbValueKind
-    of gbvNode: nodeId*: int64
-    of gbvNumber: number*: int64
-    of gbvString: text*: string
 
   GbResult* = object
     ## What a GLYPH QUERY statement returned, in the client's terms.
@@ -76,6 +68,10 @@ type
     names*: Table[string, GbValue]
     cursor*: seq[int64]     ## the current set of node ids (pin GB2)
     transcript*: string      ## the transcript so far
+    ## Where `input` reads from. The host supplies it (the prompt reads
+    ## the terminal); the guest would read a port channel. Without one,
+    ## `input` is refused by name rather than hanging.
+    inputFn*: proc(): string
 
   GbLoop* = object
     ## One `for` loop's state: the variable, the limit, the step and the
@@ -91,6 +87,48 @@ proc gbFail(msg: string) {.noreturn.} =
 
 proc newSession*(): GbSession =
   result.names = initTable[string, GbValue]()
+
+proc findKeyword(text: string, word: string): int =
+  ## Where a keyword starts, at a word boundary — so `if tomorrow then`
+  ## does not find a "to" inside "tomorrow", and a name called `then`
+  ## does not end a condition early. Returns -1 if the word is not
+  ## there.
+  var at = 0
+  while at < text.len:
+    let i = text.toLowerAscii.find(word.toLowerAscii, at)
+    if i < 0:
+      return -1
+    let beforeOk = i == 0 or not (text[i - 1] in {'a'..'z'} or
+                                  text[i - 1] in {'A'..'Z'} or
+                                  text[i - 1] in {'0'..'9'} or
+                                  text[i - 1] == '_')
+    let afterAt = i + word.len
+    let afterOk = afterAt >= text.len or not (text[afterAt] in {'a'..'z'} or
+                                            text[afterAt] in {'A'..'Z'} or
+                                            text[afterAt] in {'0'..'9'} or
+                                            text[afterAt] == '_')
+    if beforeOk and afterOk:
+      return i
+    at = i + 1
+  -1
+
+proc splitStatements(line: string): seq[string] =
+  ## The statements on one line, separated by `:` — the BASIC's own
+  ## separator (the eZ80 BASIC uses it, and so does the CPC's).
+  var cur = ""
+  var inStr = false
+  for ch in line:
+    if ch == '"':
+      inStr = not inStr
+      cur.add ch
+    elif ch == ':' and not inStr:
+      if cur.strip.len > 0:
+        result.add cur.strip
+      cur = ""
+    else:
+      cur.add ch
+  if cur.strip.len > 0:
+    result.add cur.strip
 
 proc say*(s: var GbSession, text: string) =
   ## Append to the transcript.
@@ -114,12 +152,6 @@ proc parseValue(s: GbSession, text: string): GbValue =
     return s.names[text]
   gbFail("no such name '" & text & "'")
 
-proc valueText(v: GbValue): string =
-  case v.kind
-  of gbvNode: $v.nodeId
-  of gbvNumber: $v.number
-  of gbvString: v.text
-
 proc nodeOf(s: GbSession, name: string): int64 =
   ## The node a name holds. A name that holds a number is a node id too:
   ## the client is the one that knows ids are numbers, and a child
@@ -131,6 +163,8 @@ proc nodeOf(s: GbSession, name: string): int64 =
   of gbvNode: v.nodeId
   of gbvNumber: v.number
   of gbvString: gbFail("the name '" & name & "' holds text, not a node")
+  of gbvBool: gbFail("the name '" & name & "' holds a yes or a no, not a node")
+  of gbvNull: gbFail("the name '" & name & "' holds nothing, not a node")
 
 proc setCursor*(s: var GbSession, ids: seq[int64]) =
   s.cursor = ids
@@ -186,6 +220,8 @@ proc clientParams(s: GbSession, text: string, params: var Table[string, Value]) 
       of gbvNode: params[pname] = Value(kind: vkInt, i: v.nodeId)
       of gbvNumber: params[pname] = Value(kind: vkInt, i: v.number)
       of gbvString: params[pname] = Value(kind: vkString, s: v.text)
+      of gbvBool: params[pname] = Value(kind: vkBool, b: v.flag)
+      of gbvNull: params[pname] = Value(kind: vkNull)
       i = j
     else:
       inc i
@@ -212,6 +248,8 @@ proc substituteVars(s: GbSession, text: string, params: var Table[string, Value]
       of gbvNode: params[pname] = Value(kind: vkInt, i: v.nodeId)
       of gbvNumber: params[pname] = Value(kind: vkInt, i: v.number)
       of gbvString: params[pname] = Value(kind: vkString, s: v.text)
+      of gbvBool: params[pname] = Value(kind: vkBool, b: v.flag)
+      of gbvNull: params[pname] = Value(kind: vkNull)
       acc.add "$" & pname
       i = j
     else:
@@ -254,7 +292,12 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
   if words.len >= 3 and words[1] == "=" and cmd notin
       ["find", "go", "count", "show", "add", "link", "set", "drop",
        "labels", "print", "let", "if", "for", "end", "rem"]:
-    let v = s.parseValue(words[2])
+    ## The right-hand side is the *rest of the line*, so `t = t + 1` is a
+    ## thing: taking the third word alone would quietly drop the `+ 1`.
+    let eq = line.find('=')
+    if eq < 0:
+      gbFail("'" & words[0] & " = ' needs a value")
+    let v = evalExpr(s.names, line[eq + 1 .. ^1].strip())
     s.names[words[0]] = v
     return true
   case cmd
@@ -275,9 +318,125 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
       else:
         s.say($s.cursor.len & " nodes")
     else:
-      for w in words[1 .. ^1]:
-        let v = s.parseValue(w)
+      ## Each item is an expression, so `print i + 1` is a thing.
+      for item in splitStatements(line[5 .. ^1]):
+        if item.len == 0: continue
+        let v = evalExpr(s.names, item)
         s.say(v.valueText())
+  of "if":
+    ## if <expr> then <statement>[: <statement>...]
+    ##
+    ## The conditional the query language refuses to have: the engine
+    ## has no CASE and no EXISTS, so a client that wants a choice makes
+    ## it here.
+    let rest = line[2 .. ^1].strip()
+    let at = findKeyword(rest, "then")
+    if at < 0:
+      gbFail("if needs 'then'")
+    let condText = rest[0 ..< at].strip()
+    let bodyText = rest[at + 4 .. ^1].strip()
+    if condText.len == 0:
+      gbFail("if needs a condition")
+    if bodyText.len == 0:
+      gbFail("if needs a statement after 'then'")
+    if condition(s.names, condText):
+      for stmt in splitStatements(bodyText):
+        discard s.runStatement(t, stmt)
+  of "for":
+    ## for <var> = <a> to <b> [step <s>] : <statement>... : next
+    ##
+    ## The loop the query language refuses to have: no FOREACH, no UNION.
+    ## The body is on the same line, separated by `:` — the first cut's
+    ## shape, and a multi-line body is the next cut.
+    let rest = line[3 .. ^1].strip()
+    let parts = splitStatements(rest)
+    if parts.len == 0:
+      gbFail("for needs a variable, a range and a body")
+    let header = parts[0]
+    let eq = header.find('=')
+    if eq < 0:
+      gbFail("for needs '=' between the variable and the first value")
+    let varName = header[0 ..< eq].strip()
+    let rangeText = header[eq + 1 .. ^1].strip()
+    let toAt = findKeyword(rangeText, "to")
+    if toAt < 0:
+      gbFail("for needs 'to'")
+    let firstText = rangeText[0 ..< toAt].strip()
+    var lastText = rangeText[toAt + 2 .. ^1].strip()
+    var stepText = "1"
+    let stepAt = findKeyword(lastText, "step")
+    if stepAt >= 0:
+      stepText = lastText[stepAt + 4 .. ^1].strip()
+      lastText = lastText[0 ..< stepAt].strip()
+    if varName.len == 0:
+      gbFail("for needs a variable name")
+    if parts.len < 2:
+      gbFail("for needs a body")
+    ## `next` ends the body: the statements before it are the loop's, and
+    ## the statements after it are the ones that follow the loop. The
+    ## marker itself is optional — a one-line loop may end without it.
+    var body: seq[string] = @[]
+    var after: seq[string] = @[]
+    var inBody = true
+    for i in 1 ..< parts.len:
+      let stmt = parts[i]
+      if stmt.toLowerAscii == "next":
+        inBody = false
+        continue
+      if inBody:
+        body.add stmt
+      else:
+        after.add stmt
+    if body.len == 0:
+      gbFail("for needs a body")
+    let first = evalExpr(s.names, firstText)
+    let last = evalExpr(s.names, lastText)
+    let step = evalExpr(s.names, stepText)
+    if first.kind != gbvNumber or last.kind != gbvNumber or
+       step.kind != gbvNumber:
+      gbFail("for needs numbers")
+    if step.number == 0:
+      gbFail("for needs a step that is not zero")
+    ## A cap, so a loop that cannot finish says so instead of hanging:
+    ## the client is a prompt, and a prompt that hangs is a prompt that
+    ## is broken.
+    var v = first.number
+    var rounds = 0
+    while (if step.number > 0: v <= last.number else: v >= last.number):
+      s.names[varName] = GbValue(kind: gbvNumber, number: v)
+      for stmt in body:
+        discard s.runStatement(t, stmt)
+      v += step.number
+      inc rounds
+      if rounds > 1_000_000:
+        gbFail("the loop did not finish after a million rounds")
+    ## Whatever followed the `next` runs once, after the loop.
+    for stmt in after:
+      discard s.runStatement(t, stmt)
+  of "input":
+    ## input <name>
+    ##
+    ## A line that reads as a whole number is a number, and anything
+    ## else is text — the BASIC's INPUT, which takes what you type and
+    ## knows what it is. The alternative (text always) would make
+    ## `input n` then `if n > 5` a *text* comparison, quietly wrong
+    ## rather than refused.
+    if words.len != 2:
+      gbFail("input needs a name")
+    if s.inputFn == nil:
+      gbFail("there is nothing to read from")
+    let typed = s.inputFn().strip()
+    var n: int64 = 0
+    var isNumber = typed.len > 0
+    for ch in typed:
+      if ch in {'0'..'9'}:
+        n = n * 10 + (ord(ch) - ord('0'))
+      else:
+        isNumber = false
+    if isNumber:
+      s.names[words[1]] = GbValue(kind: gbvNumber, number: n)
+    else:
+      s.names[words[1]] = GbValue(kind: gbvString, text: typed)
   of "find", "count":
     ## find [<label>] [where <expr>]
     var label = ""

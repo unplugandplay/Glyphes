@@ -24,9 +24,18 @@ proc main() =
   let db = openDatabase(args[0], 0)
   let transport = newStoreTransport(db)
   var session = newSession()
+  ## `input` reads from the terminal: the client's input is the host's
+  ## business, and the guest's would be a port channel.
+  session.inputFn = proc(): string =
+    try:
+      stdin.readLine()
+    except EOFError:
+      ""
   echo "GLYPH BASIC 1.0 -- a prompt over ", args[0]
   echo "  find <label> [where <expr>]   go [back] <type> [from <name>]"
   echo "  show <name>   count   add   link   set   drop   labels"
+  echo "  let <name> = <value>   print <expr>   input <name>"
+  echo "  if <expr> then <stmt>   for <var> = <a> to <b> : <stmt> : next"
   echo "  a name holds a node: p = 1, and $p refers to it in a where clause"
   while true:
     stdout.write "ready> "

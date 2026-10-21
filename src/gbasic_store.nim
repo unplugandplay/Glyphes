@@ -18,6 +18,7 @@ import ./store/prop
 import ./store/store
 import ./cypher/ctx
 import ./cypher/execute
+import ./txn/txn
 
 proc valueText(v: Value): string =
   ## A property's value as text. A number reads as its number, a string
@@ -118,7 +119,15 @@ proc newStoreTransport*(db: Database): GbTransport =
           "glyph basic: no node " & $toId)
       let tx = db.beginTransaction()
       try:
-        result.linkId = store.createEdge(fromId, toId, program.linkType)
+        ## The *transaction's* createEdge, not the store's: the door's
+        ## writes have to reach the log, or the link is a memory that a
+        ## reopen forgets. (The client's writes are the client's whole
+        ## point, and a client's write that does not survive a restart
+        ## is a lie.)
+        result.linkId = tx.createEdge(fromId, toId, program.linkType)
+        if result.linkId == 0:
+          raise newException(GbError,
+            "glyph basic: cannot link " & $fromId & " to " & $toId)
         discard db.commitTransaction(tx)
       except CatchableError:
         discard db.rollbackTransaction(tx)
@@ -167,7 +176,12 @@ proc newStoreTransport*(db: Database): GbTransport =
       raise newException(GbError, "glyph basic: no node " & $toId)
     let tx = db.beginTransaction()
     try:
-      result = store.createEdge(fromId, toId, rtype)
+      ## Through the transaction, so the link is in the log (see the
+      ## other one).
+      result = tx.createEdge(fromId, toId, rtype)
+      if result == 0:
+        raise newException(GbError,
+          "glyph basic: cannot link " & $fromId & " to " & $toId)
       discard db.commitTransaction(tx)
     except CatchableError:
       discard db.rollbackTransaction(tx)
