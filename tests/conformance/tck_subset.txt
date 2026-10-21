@@ -91,6 +91,14 @@ fn-in-list	in	RETURN 1 IN [1, 2] AS x	[[true]]
 fn-index	in	RETURN [1, 2, 3][1] AS x	[[2]]
 fn-map-index	in	RETURN {a: 1}['a'] AS x	[[1]]
 
+# ---- shortest paths (M6.4, pin C18) ----
+sp-length	in	MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]->(b:Person {name: 'Dave'}) RETURN DISTINCT shortestPathLength(a, b) AS d	[[2]]
+sp-type	in	MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]->(b:Person {name: 'Dave'}) RETURN DISTINCT shortestPathLength(a, b, 'KNOWS') AS d	[[2]]
+sp-unknown-type	in	MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]->(b:Person {name: 'Dave'}) RETURN DISTINCT shortestPathLength(a, b, 'NOPE') AS d	[[null]]
+sp-self	in	MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]->(b:Person {name: 'Dave'}) RETURN DISTINCT shortestPathLength(a, a, 'KNOWS') AS d	[[0]]
+sp-path	in	MATCH (a:Person {name: 'Alice'})-[:KNOWS*2..2]->(b:Person {name: 'Dave'}) RETURN DISTINCT size(shortestPath(a, b)) AS n	[[3]]
+sp-too-deep	out	MATCH (a:Person {name: 'Alice'})-[:KNOWS*1..3]->(b:Person {name: 'Dave'}) RETURN DISTINCT shortestPathLength(a, b, 'KNOWS', 1) AS d	maxDepth
+
 # ---- matching, labels, properties ----
 match-label	in	MATCH (n:Person) RETURN n.name AS name ORDER BY name	[["Alice"],["Bob"],["Carol"],["Dave"],["Eve"],["Frank"]]
 match-unknown-label	in	MATCH (n:NoSuch) RETURN n	[]

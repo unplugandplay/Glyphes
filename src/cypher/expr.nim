@@ -26,7 +26,7 @@
 ## rather than openCypher's. Recorded rather than hidden: a
 ## pattern that means one thing in the TCK and another here is a
 ## bug report waiting for a name.
-import std/[math, sets, strutils, math, tables]
+import std/[algorithm, math, sets, strutils, math, tables]
 import re
 import ../abi
 import ../store/store
@@ -392,6 +392,93 @@ proc flipDirs(dirs: seq[uint8]): seq[uint8] =
   for d in dirs:
     result.add (if d == 0'u8: 1'u8 else: 0'u8)
 
+# --------------------------------------------------- shortest paths (M6.4)
+
+type
+  PathStatus* = enum
+    psFound, psNoPath, psTooDeep
+
+proc neighboursOf(ctx: QueryCtx; at: int64; typeCode: int32):
+    seq[(int64, int64, uint8)] =
+  ## `(edge id, far node, direction)` for one node, both directions.
+  ## `dirs` is 0 when the edge was walked src→dst and 1 the other way —
+  ## the same byte `PathVal` stores, so the rebuild needs no second
+  ## convention.
+  for eid in ctx.outEdges(at):
+    let (_, dst, et) = ctx.edgeEnds(eid)
+    if typeCode != 0 and et != typeCode:
+      continue
+    if not ctx.nodeAlive(dst):
+      continue
+    result.add (eid, dst, 0'u8)
+  for eid in ctx.inEdges(at):
+    let (src, _, et) = ctx.edgeEnds(eid)
+    if typeCode != 0 and et != typeCode:
+      continue
+    if not ctx.nodeAlive(src):
+      continue
+    result.add (eid, src, 1'u8)
+
+proc shortestPathOf*(ctx: QueryCtx; fromId, toId: int64; rtype: string;
+                     maxDepth: int): (PathStatus, PathVal) =
+  ## Breadth-first, both directions, with a visited set: a cycle must not
+  ## make it loop, and the first time a node is reached is the shortest
+  ## way to it.
+  ##
+  ## Three outcomes, and the third is the one that matters:
+  ## **found**, **no path** (the frontier emptied — an honest `null`), and
+  ## **too deep** (the search hit `maxDepth` with nodes still to explore).
+  ## Answering `null` for the third would be a lie — the path may exist
+  ## and simply be longer — so the caller refuses it by name, which is
+  ## pin C18.
+  ##
+  ## The walk is undirected. "How far apart are these two things" is the
+  ## question the function answers, and a direction is a detail of the
+  ## edge, not of the distance; a caller that wants a directed walk has
+  ## `MATCH … -[*]->` for it.
+  var typeCode = 0'i32
+  if rtype.len > 0:
+    typeCode = ctx.store.relTypes.lookup(rtype)
+    ## A type nothing carries has no path: the planner's -1 distinction,
+    ## one layer down. Without it a typo would walk every edge.
+    if typeCode == 0:
+      return (psNoPath, PathVal())
+  if fromId == toId:
+    return (psFound, PathVal(nodes: @[fromId]))
+  var parents = initTable[int64, (int64, int64, uint8)]()
+  var seen = initHashSet[int64]()
+  seen.incl fromId
+  var frontier: seq[int64] = @[fromId]
+  for _ in 1 .. maxDepth:
+    var next: seq[int64] = @[]
+    for at in frontier:
+      for (eid, far, dir) in neighboursOf(ctx, at, typeCode):
+        if far in seen:
+          continue
+        seen.incl far
+        parents[far] = (at, eid, dir)
+        if far == toId:
+          var nodes: seq[int64] = @[toId]
+          var edges: seq[int64] = @[]
+          var dirs: seq[uint8] = @[]
+          var cur = toId
+          while cur != fromId:
+            let (prev, pe, pd) = parents[cur]
+            edges.add pe
+            dirs.add pd
+            nodes.add prev
+            cur = prev
+          nodes.reverse()
+          edges.reverse()
+          dirs.reverse()
+          return (psFound,
+                  PathVal(nodes: nodes, edges: edges, dirs: dirs))
+        next.add far
+    if next.len == 0:
+      return (psNoPath, PathVal())
+    frontier = next
+  (psTooDeep, PathVal())
+
 proc callFunc(e: Eval, name: string, args: seq[Value]): Value {.gcsafe.} =
   let lower = toLowerAscii(name)
   let n = args.len
@@ -484,6 +571,51 @@ proc callFunc(e: Eval, name: string, args: seq[Value]): Value {.gcsafe.} =
     of vkVector: Value(kind: vkInt, i: v.dims.len)
     of vkPath: Value(kind: vkInt, i: v.path.nodes.len)
     else: Value(kind: vkNull)
+  of "shortestpath", "shortestpathlength":
+    ## `shortestPath(a, b [, type [, maxDepth]])` — the path between two
+    ## nodes as a value; `shortestPathLength(...)` — its length in hops.
+    ##
+    ## A *function*, not a pattern: the openCypher spelling is
+    ## `shortestPath((a)-[*]-(b))`, which is path binding, and the engine
+    ## refuses path binding (CYPHER.md §2.6). The endpoints here are
+    ## values the caller already has, which makes the function the honest
+    ## form of the same question.
+    if n < 2 or n > 4:
+      cypherFail(int32(glyErrSql), lower & "() takes two to four arguments")
+    if args[0].kind != vkNode or args[1].kind != vkNode:
+      cypherFail(int32(glyErrSql),
+        lower & "() needs two nodes, not " & typeName(args[0]) &
+        " and " & typeName(args[1]))
+    var rtype = ""
+    if n >= 3:
+      if args[2].kind != vkString:
+        cypherFail(int32(glyErrSql),
+          lower & "() needs a relationship type as a string, not " &
+          typeName(args[2]))
+      rtype = args[2].s
+    var maxDepth = 16
+    if n >= 4:
+      if args[3].kind != vkInt:
+        cypherFail(int32(glyErrSql),
+          lower & "() needs a whole maxDepth, not " & typeName(args[3]))
+      maxDepth = int(args[3].i)
+      if maxDepth < 1 or maxDepth > 1024:
+        cypherFail(int32(glyErrSql),
+          lower & "() needs a maxDepth between 1 and 1024")
+    let (status, path) = shortestPathOf(e.ctx, args[0].id, args[1].id,
+                                        rtype, maxDepth)
+    case status
+    of psFound:
+      if lower == "shortestpath":
+        Value(kind: vkPath, path: path)
+      else:
+        Value(kind: vkInt, i: int64(path.edges.len))
+    of psNoPath:
+      Value(kind: vkNull)
+    of psTooDeep:
+      cypherFail(int32(glyErrSql),
+        lower & "() hit maxDepth " & $maxDepth &
+        " without an answer; raise the bound")
   of "coalesce":
     if n == 0: cypherFail(int32(glyErrSql), "coalesce() needs at least one argument")
     for a in args:

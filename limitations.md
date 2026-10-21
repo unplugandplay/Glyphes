@@ -27,13 +27,13 @@ deliberate refusals rather than failures):
 - `UNWIND`
 - multiple statements in one call
 
-**Not implemented:** subqueries, shortest-path functions, `EXISTS { … }`
-subqueries, temporal/spatial types, and multi-database.
+**Not implemented:** subqueries, `EXISTS { … }` subqueries,
+temporal/spatial types, and multi-database.
 
-Two of those are *planned*, with the syntax, the semantics, the pins and
+One of those is *planned*, with the syntax, the semantics, the pins and
 the order written down in
 [`docs/PLAN-CYPHER-EXTENSIONS.md`](docs/PLAN-CYPHER-EXTENSIONS.md): the
-shortest-path functions and the temporal/spatial types.
+temporal/spatial types.
 
 Three of the five have landed. `FOREACH` at M5.7 (CYPHER.md §3.6). The
 graph-pattern predicates at M5.8 (§2.3) — the *filter* form, over
@@ -48,6 +48,15 @@ What is *not* in the type discipline: temporal and spatial values (X5),
 and the type system's static half — the engine is dynamically typed, as
 Cypher is, and a query's types are checked when a value reaches an
 operator, not when the query is prepared.
+
+Shortest paths landed at M6.4 (CYPHER.md §2.7.1): a function rather than a
+pattern, undirected, and **bounded** — a search that hits `maxDepth` with
+nodes still to explore is refused by name, because `null` means "no path"
+and a search that stopped early has not established that. The cost is
+O(visited nodes × their edges): on a 10 000-node ring with three
+relationships each, a neighbour is 0.01 ms, 300 hops is 0.8 ms, and a bound
+hit after ~3000 nodes is 2.6 ms. `allShortestPaths` is still refused: a
+list of paths is a second shape with a second cost.
 
 The other three are **decided against**, and the reasons are recorded
 in the same document rather than left as a shrug: subqueries and

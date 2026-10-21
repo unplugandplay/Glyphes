@@ -21,7 +21,7 @@ gate.
 | **X1** | `FOREACH` — **landed** | the cheapest: it reused the write operators that already exist |
 | **X2** | graph-pattern predicates — **landed** | a filter over the adjacency the engine already has |
 | **X3** | the type discipline — **landed** | a *foundation*: a date is a type, and there is no point adding types before the types are named and checked |
-| **X4** | shortest-path functions | a traversal with a real cost, and it must be measured before it is offered |
+| **X4** | shortest-path functions — **landed** | a traversal with a real cost, and it must be measured before it is offered |
 | **X5** | temporal/spatial types | the largest: new value kinds, new literals, new functions, new storage |
 
 X3 sits in the middle rather than the start because it touches every
@@ -208,6 +208,20 @@ per operator per mismatch (the table is the test list — a refusal
 table that is not a test list rots); the TCK rows.
 
 ---
+
+## 5. X4 — shortest-path functions — landed (M6.4)
+
+`shortestPath(a, b [, type [, maxDepth]])` and `shortestPathLength(…)`,
+undirected, with the three outcomes §5 above named: found, no path
+(`null`), and **too deep** (refused by name, pin C18). The measured cost
+(10 000-node ring, three relationships each) is 0.01 ms for a neighbour,
+0.8 ms for 300 hops, and 2.6 ms for a bound hit after ~3000 nodes — the
+graph, not the query, which is why the bound is a pin.
+
+`allShortestPaths` stays refused: a list of paths is a second shape with
+a second cost.
+
+The original section follows:
 
 ## 5. X4 — shortest-path functions
 

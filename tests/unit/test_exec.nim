@@ -1254,3 +1254,74 @@ suite "M5.9 the type discipline":
     check plain(column(run(s, "RETURN 1 IN null AS x"), "x")) == @["null"]
     check plain(column(run(s, "RETURN 'a' + 1 AS x"), "x")) == @["a1"]
     check plain(column(run(s, "RETURN [1] + [2] AS x"), "x")) == @["[1,2]"]
+
+
+suite "M6.4 shortest paths":
+  ## A function rather than a pattern: the openCypher spelling is path
+  ## *binding*, which this engine refuses (§2.6), so the endpoints are
+  ## values the caller already has.
+  ##
+  ## The seed graph: Ana->Bo->Ada gives Ana and Ada two hops apart.
+
+  test "the length is the number of hops, and the function is undirected":
+    let s = seedStore()
+    check plain(column(run(s, """
+      MATCH (a:Person {age: 34})-[:KNOWS*1..3]->(b:Person {age: 55})
+      RETURN DISTINCT shortestPathLength(a, b) AS d"""), "d")) == @["2"]
+    ## The same question asked from the other end.
+    check plain(column(run(s, """
+      MATCH (b:Person {age: 55})-[:KNOWS*1..3]-(a:Person {age: 34})
+      RETURN DISTINCT shortestPathLength(b, a) AS d"""), "d")) == @["2"]
+
+  test "a type filters the walk, and an unknown type is no path":
+    let s = seedStore()
+    check plain(column(run(s, """
+      MATCH (a:Person {age: 34})-[:KNOWS*1..3]->(b:Person {age: 55})
+      RETURN DISTINCT shortestPathLength(a, b, 'KNOWS') AS d"""), "d")) == @["2"]
+    check plain(column(run(s, """
+      MATCH (a:Person {age: 34})-[:KNOWS*1..3]->(b:Person {age: 55})
+      RETURN DISTINCT shortestPathLength(a, b, 'NOPE') AS d"""), "d")) == @["null"]
+
+  test "the path is a value, and a node is zero hops from itself":
+    let s = seedStore()
+    check plain(column(run(s, """
+      MATCH (a:Person {age: 34})-[:KNOWS*2..2]->(b:Person {age: 55})
+      RETURN DISTINCT size(shortestPath(a, b)) AS n"""), "n")) == @["3"]
+    check plain(column(run(s, """
+      MATCH (a:Person {age: 34})-[:KNOWS*1..3]->(b:Person {age: 55})
+      RETURN DISTINCT shortestPathLength(a, a) AS d"""), "d")) == @["0"]
+
+  test "a cycle does not make the walk loop":
+    ## 1->2->3->1, and 3->4. The walk is undirected, so the cycle's
+    ## closing edge makes 1 and 3 adjacent: the answer is two hops, and
+    ## the test finishing at all is the visited set doing its job.
+    let s = newStore()
+    let a = s.createNode("C")
+    let b = s.createNode("C")
+    let c = s.createNode("C")
+    let d = s.createNode("C")
+    discard s.createEdge(a, b, "E")
+    discard s.createEdge(b, c, "E")
+    discard s.createEdge(c, a, "E")
+    discard s.createEdge(c, d, "E")
+    check plain(column(run(s, """
+      MATCH (x:C)-[:E*1..4]->(y:C) WHERE id(x) = 1 AND id(y) = 4
+      RETURN DISTINCT shortestPathLength(x, y) AS d"""), "d")) == @["2"]
+
+  test "a search that hits the bound is refused, not answered null":
+    ## `null` means "no path". A search that stopped early has not
+    ## established that, and pin C18 says so by name.
+    let s = seedStore()
+    var e: CypherError
+    try:
+      discard run(s, """
+        MATCH (a:Person {age: 34})-[:KNOWS*1..3]->(b:Person {age: 55})
+        RETURN DISTINCT shortestPathLength(a, b, 'KNOWS', 1) AS d""")
+    except CypherError as err:
+      e = err
+    if e == nil:
+      echo "  no refusal for a search that could not finish"
+    check e != nil
+    if e != nil:
+      check e.code == int32(glyErrSql)
+      check "maxDepth" in e.msg

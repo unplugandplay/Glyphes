@@ -5,8 +5,8 @@
 > `DELETE` / `DETACH DELETE`, `MERGE` with `ON CREATE` / `ON MATCH`,
 > aggregates and grouping, `OPTIONAL MATCH`, variable-length patterns,
 > `Sort` with spill, and — at M6.1 — the range index. `FOREACH` is the
-> last write clause to land (§3.6), and graph-pattern predicates are in
-> `WHERE` (§2.3).
+> last write clause to land (§3.6), graph-pattern predicates are in
+> `WHERE` (§2.3), and shortest paths are functions (§2.7.1).
 > Anything described here as refused is refused *by name* with
 > `GLY_ERR_UNSUPPORTED`, and `tests/conformance/tck_subset.txt` carries one
 > out-of-contract row per refusal so the list cannot rot.
@@ -37,6 +37,7 @@
 | Parameters by name | built |
 | Reading functions (§2.7), including `range()` | built |
 | Graph-pattern predicates — `(a)-[:KNOWS]->(b)` in `WHERE` (§2.3) | built |
+| Shortest paths — `shortestPath`, `shortestPathLength` (§2.7.1) | built |
 | Quantifiers `all`/`any`/`none`/`single`, `CASE` | refused (§5) |
 
 ### 0.2 The write surface
@@ -110,6 +111,7 @@ contract change, not a refactor.
 | **C8** | Cross-kind equality is false, as any other kind mismatch. Only *ordering* mixes int and float, because a sort needs a total order and equality does not. |
 | **C9** | A single-hop query over 10⁶ nodes answers in ≲ 20 µs; the 2-hop query over 10⁶ nodes in ≲ 3 ms. (`ROADMAP.md` carries the measured numbers.) |
 | **C13** | A node carries **exactly one** label. `CREATE (n:A:B)` and `SET n:Admin` are refused by name; the store's structures assume it (`STORAGE.md` §2). |
+| **C18** | **A shortest path is bounded, and a bound it hits is refused by name.** `null` means "no path"; a search that stopped early has not established that. |
 | **C17** | **Every operator names the types it accepts and refuses the rest by name.** `typeof()` and the refusal messages use the same words (§6.2); C5 is a case of this rule, and equality across kinds keeps its defined `false` (C8) rather than becoming a refusal. |
 
 ---
@@ -278,10 +280,15 @@ filter by existence.
 
 ### 2.6 Paths
 
-A pattern is not a value in 0.1. `MATCH p = (a)-[]->(b) RETURN p` is refused
-by name (§5): a path has node ids, edge ids and a direction per edge, and
-binding one as a value means building it per walk and rendering it at the
-ABI — a surface with no consumer in the contract yet. `nodes(p)`, `relationships(p)`
+A pattern is not a value you can **bind**. `MATCH p = (a)-[]->(b) RETURN p`
+is refused by name (§5): a path has node ids, edge ids and a direction per
+edge, and binding one *per walk* means building it at every step and
+rendering it at the ABI — a surface with no consumer in the contract yet.
+
+The path **value** itself has been there all along — `Value.path`, the
+ABI's `GLY_PATH`, the Ruby binding's `Path` — and since M6.4
+`shortestPath(a, b)` produces one (§2.7.1), with `size(path)` counting its
+nodes. What is refused is the binding, not the value. `nodes(p)`, `relationships(p)`
 and `length(p)` exist in the function table for the day it does, and return
 an empty list rather than refusing — so a query written against the full
 surface fails on the *semantics* it is missing, not on the spelling.
@@ -304,11 +311,51 @@ which is why it produces two rows per edge.
 | `startsWith`, `endsWith`, `contains`, `=~` | `=~` is bytewise |
 | `nodes`, `edges`, `relationships` | present for §2.6's path value and return an empty list while paths are refused — a named shape rather than an "unknown function", so a query written for the full surface fails on the *semantics* and not on the spelling |
 | `range(a, b)` / `range(a, b, step)` | inclusive at both ends; with no step the range runs *toward* the end, so `range(3, 1)` is `[3, 2, 1]`. Capped at 10⁷ elements because the list is materialised |
+| `shortestPath(a, b [, type [, maxDepth]])` | the path between two nodes (§2.7.1) |
+| `shortestPathLength(a, b [, type [, maxDepth]])` | its length in hops |
 | aggregates | §2.8 |
 
 Every other name is refused by name: "no such function" and "returned
 null" are different problems, and conflating them is how a typo becomes a
 silent empty result set.
+
+#### 2.7.1 Shortest paths — pin C18
+
+```
+shortestPathLength(a, b)                      -- any relationship, both directions
+shortestPathLength(a, b, 'KNOWS')             -- one type
+shortestPathLength(a, b, 'KNOWS', 64)         -- and a depth bound
+shortestPath(a, b)                            -- the path itself, as a value
+```
+
+**A function, not a pattern.** openCypher spells this
+`shortestPath((a)-[*]-(b))`, which is path *binding*, and the engine
+refuses path binding (§2.6). The function form takes the two endpoints as
+values the caller already has, which is the same question without the
+refusal.
+
+**Undirected.** "How far apart are these two things" is the question the
+function answers, and a direction is a detail of an edge, not of a
+distance. A caller who wants a directed walk has `MATCH … -[*]->` for it.
+
+**Three outcomes, and the third is the one that matters** (pin C18):
+
+| outcome | answer |
+|---|---|
+| found | the path, or its length in hops |
+| the frontier emptied | `null` — an honest "no path" |
+| `maxDepth` reached with nodes still to explore | **refused by name** |
+
+The third must not be `null`: a search that stopped early has not
+established that no path exists. `maxDepth` defaults to 16, and is capped
+at 1024; a caller who needs more is asking a question whose cost is the
+graph, not the query.
+
+**The cost** (a 10 000-node ring, three relationships each): a neighbour
+is 0.01 ms, 300 hops is 0.8 ms, and a search that hits its bound after
+visiting ~3000 nodes is 2.6 ms. It is O(visited nodes × their edges) —
+the graph, not the query — which is why the bound is a pin and not a
+default.
 
 ### 2.8 Aggregates
 
@@ -664,7 +711,8 @@ checked by `nimble tck`:
 | pattern `EXISTS` | "EXISTS" |
 | list comprehension `[x IN xs \| …]` | "comprehension" |
 | quantifiers `all`/`any`/`none`/`single`/`reduce` | the keyword |
-| `shortestPath` / `allShortestPaths` | the keyword |
+| `allShortestPaths` (a list of paths: a second shape and a second cost) | the keyword |
+| a shortest-path search that hits its `maxDepth` | "maxDepth" |
 | a pattern predicate that would bind a variable, or starts anonymous | "not defined by any MATCH" / "bound node" |
 | `*`, a label or a property map inside a pattern predicate | "one relationship at a time" / "shape only" |
 | `UNION`, `CALL` other than `db.idx.text`, `CALL … IN TRANSACTIONS` | the keyword, or the procedure's name |

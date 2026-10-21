@@ -220,8 +220,12 @@ proc parsePrimary(p: var Parser): Expr =
     ## than left to the "expected an expression" fall-through: a refusal
     ## must say what was refused, and a SQL error for a keyword the
     ## grammar recognises is the wrong diagnosis.
+    ## `shortestPath` left this list at M6.4: it is a function now, and
+    ## the *function* form is the one the engine can answer without path
+    ## binding. `allShortestPaths` stays: it returns a list of paths, and
+    ## a list of paths is a second shape with a second cost.
     for kw in ["case", "all", "any", "none", "single", "reduce",
-               "shortestpath", "allshortestpaths"]:
+               "allshortestpaths"]:
       if cmpIgnoreCase(t.text, kw) == 0:
         unsupported(t.text)
     if cmpIgnoreCase(t.text, "exists") == 0:
