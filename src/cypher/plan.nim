@@ -626,7 +626,7 @@ proc plan*(ctx: QueryCtx, q: Query): Plan =
         seed = newOneRow(ctx)
       seed = newMerge(ctx, seed, part)
 
-    of qpSet, qpRemove, qpDelete:
+    of qpSet, qpRemove, qpDelete, qpForeach:
       ## Every write clause needs a row to act on, for the same reason
       ## CREATE does: `SET a.x = 1` with nothing before it has one empty
       ## row, and with a MATCH before it has one row per match. The clause's
@@ -638,6 +638,9 @@ proc plan*(ctx: QueryCtx, q: Query): Plan =
         seed = newSet(ctx, seed, part.setItems)
       of qpRemove:
         seed = newRemove(ctx, seed, part.removeItems)
+      of qpForeach:
+        seed = newForeach(ctx, seed, part.foreachList, part.foreachVar,
+                          part.foreachSet, part.foreachRemove)
       else:
         seed = newDelete(ctx, seed, part.deleteVars, part.detach)
 

@@ -166,11 +166,38 @@ class M5Test < Minitest::Test
   def test_the_clauses_that_have_not_landed_yet_are_still_refused
     with_db do |db|
       db.exec("CREATE (:X)")
-      { "MATCH (n) FOREACH (x IN [1] | SET n.x = x)" => "FOREACH",
-        "LOAD CSV FROM 'x' AS line RETURN line" => "LOAD" }.each do |q, word|
+      # FOREACH left this list at M5.7; LOAD CSV is the remaining named
+      # refusal, and a refusal by name is a contract rather than a gap.
+      { "LOAD CSV FROM 'x' AS line RETURN line" => "LOAD" }.each do |q, word|
         e = assert_raises(Glyphes::UnsupportedError) { db.exec(q) }
         assert_includes e.message, word
       end
+    end
+  end
+
+  def test_foreach_writes_once_per_element
+    with_db do |db|
+      db.exec("CREATE (:P {seen: 0})")
+      # One row (the one P), two elements: two writes, and the row does
+      # not multiply. That is what makes a FOREACH not a rewritten UNWIND.
+      assert_equal 2, db.exec("MATCH (n:P) FOREACH (x IN [n, n] | SET x.seen = 1)")
+      assert_equal [[1]], db.query("MATCH (n:P) RETURN n.seen").to_a
+    end
+  end
+
+  def test_foreach_refuses_what_it_does_not_do
+    with_db do |db|
+      db.exec("CREATE (:P)")
+      # The element has to be writable.
+      e = assert_raises(Glyphes::SqlError) do
+        db.exec("MATCH (n:P) FOREACH (x IN [1] | SET x.seen = 1)")
+      end
+      assert_includes e.message, "FOREACH's element"
+      # And CREATE/DELETE inside are refused by name, as openCypher does.
+      e = assert_raises(Glyphes::SqlError) do
+        db.exec("MATCH (n:P) FOREACH (x IN [n] | CREATE (:Q))")
+      end
+      assert_includes e.message, "SET or REMOVE"
     end
   end
 

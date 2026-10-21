@@ -47,6 +47,7 @@ type
     okCreate,                         ## M5: writes a pattern, per row
     okSet, okRemove, okDelete,         ## …and the clauses that change one
     okMerge,                          ## M5.3: match, else create
+    okForeach,                        ## a write clause, once per element
     okAggregate,                      ## M5.4: group, then fold
     okVarLen,                         ## M5.5: one path per row, no edge twice
     okInputRow,                       ## M5.5: yields the row it was handed
@@ -983,6 +984,18 @@ proc newRemove*(ctx: QueryCtx, child: Operator, items: seq[PropRef]): Operator =
   result = writeOperator(ctx, child, okRemove, "REMOVE")
   result.removeItems = items
 
+proc newForeach*(ctx: QueryCtx, child: Operator, list: Expr, varName: string,
+                 sets: seq[SetItem], removes: seq[PropRef]): Operator =
+  ## `FOREACH (n IN <list> | SET …)`: a write clause that runs once per
+  ## *element* instead of once per row. A write clause, so it funnels
+  ## through `writeOperator` for the same reason the others do: a write
+  ## planned with no transaction is a write nobody would ever see.
+  result = writeOperator(ctx, child, okForeach, "FOREACH")
+  result.cond = list
+  result.endVar = varName
+  result.setItems = sets
+  result.removeItems = removes
+
 proc newDelete*(ctx: QueryCtx, child: Operator, vars: seq[string];
                 detach: bool): Operator =
   result = writeOperator(ctx, child, okDelete, "DELETE")
@@ -1681,9 +1694,9 @@ proc next*(op: Operator): bool =
         mergeActions(op.ctx, op.current, op.onCreateSet, op.onCreateRemove)
     return true
 
-  of okSet, okRemove, okDelete:
-    ## The three per-row write clauses share a shape: pull a row, do the
-    ## thing to it, pass it on. SET and REMOVE count one per assignment and
+  of okSet, okRemove, okDelete, okForeach:
+    ## The per-row write clauses share a shape: pull a row, do the thing
+    ## to it, pass it on. SET and REMOVE count one per assignment and
     ## one per removal; DELETE counts the entities it removed, cascade
     ## included — which is the number a caller actually wants back from a
     ## write door ("how much did that delete").
@@ -1705,6 +1718,31 @@ proc next*(op: Operator): bool =
         if not ok:
           fail(int32(glyErrConstraint), "could not remove " & target.key)
         inc op.ctx.rowsAffected
+    of okForeach:
+      ## One row in, one row out — that is the whole difference between a
+      ## FOREACH and an UNWIND: the loop writes and passes the row on, it
+      ## does not turn one row into N.
+      ##
+      ## The list is evaluated per row, so a property of the row can decide
+      ## what the loop walks; a parameter is the common case and the reason
+      ## the plan says "the list is a parameter", but the expression is an
+      ## expression like any other.
+      let evaluated = evaluate(op.ctx, op.child.current, op.cond)
+      if evaluated.kind != vkList:
+        fail(int32(glyErrSql),
+             "FOREACH needs a list, not a " & $evaluated.kind)
+      for element in evaluated.items:
+        if element.kind != vkNode and element.kind != vkEdge:
+          fail(int32(glyErrSql),
+               "FOREACH's element is a " & $element.kind &
+               ", not a node or a relationship")
+        ## The loop's variable lives on a *copy*: the row handed on keeps
+        ## the bindings it came with, so `FOREACH (x IN …)` cannot leak
+        ## `x` into what follows. The scope check takes it out of the
+        ## scope for the same reason.
+        var loopRow = copyRow(op.current)
+        loopRow.set(op.endVar, element)
+        mergeActions(op.ctx, loopRow, op.setItems, op.removeItems)
     of okDelete:
       for name in op.deleteVars:
         let (found, v) = op.current.lookup(name)

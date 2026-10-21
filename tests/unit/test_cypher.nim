@@ -292,12 +292,11 @@ suite "parser: clauses":
     check q.parts[2].limitAmount.kind == ekParam
 
 suite "parser: refusals (PRD §5.1)":
-  test "every write clause is named, not silently dropped":
-    ## CREATE (M5.1), SET/REMOVE/DELETE (M5.2) and MERGE (M5.3) left this
-    ## list and joined suites of their own in test_write.nim. What remains
-    ## is FOREACH, which is not scheduled.
+  test "every clause the engine does not evaluate is named, not silently dropped":
+    ## CREATE (M5.1), SET/REMOVE/DELETE (M5.2), MERGE (M5.3) and FOREACH
+    ## (M5.7) left this list and joined suites of their own in
+    ## test_write.nim. What remains is LOAD CSV and UNION.
     for (src, word) in [
-        ("MATCH (a) FOREACH (x IN [1] | SET a.x = x)", "FOREACH"),
         ("LOAD CSV FROM 'x' AS line RETURN line", "LOAD"),
         ("MATCH (a) RETURN a UNION MATCH (b) RETURN b", "UNION")]:
       var e: CypherError

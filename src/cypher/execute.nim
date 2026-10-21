@@ -154,6 +154,26 @@ proc semanticCheck(q: Query) =
     of qpRemove:
       for target in part.removeItems:
         checkWriteTarget(target.varName, scope, "REMOVE")
+    of qpForeach:
+      ## The loop's variable is bound *inside* the clause and taken back
+      ## out afterwards: a `SET` or a `RETURN` after the FOREACH that
+      ## names it is a typo, and it should be refused at prepare time
+      ## rather than fail at run time on the first row.
+      ##
+      ## `existed` matters: a `FOREACH (n IN …)` whose variable is already
+      ## bound shadows it inside the loop and must leave the outer binding
+      ## alone afterwards, so the scope is restored, not emptied.
+      let existed = part.foreachVar in scope
+      if not existed:
+        scope.add part.foreachVar
+      for item in part.foreachSet:
+        checkWriteTarget(item.target.varName, scope, "SET")
+      for target in part.foreachRemove:
+        checkWriteTarget(target.varName, scope, "REMOVE")
+      if not existed:
+        let at = scope.find(part.foreachVar)
+        if at >= 0:
+          scope.delete(at)
     of qpDelete:
       for name in part.deleteVars:
         checkWriteTarget(name, scope, "DELETE")

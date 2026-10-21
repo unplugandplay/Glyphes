@@ -139,7 +139,7 @@ type
     ## M5 write clauses. Same ordering convention: they appear in the part
     ## list in source order, and the planner turns each into an operator
     ## that acts on the rows flowing through it.
-    qpCreate, qpSet, qpRemove, qpDelete,
+    qpCreate, qpSet, qpRemove, qpDelete, qpForeach,
     qpMerge,                       ## M5.3: match, or create when no match
     qpTextCall                     ## M6.2: CALL db.idx.text … YIELD …
 
@@ -190,6 +190,20 @@ type
       ## setting a property to null *stores* a null, and removing it takes
       ## the key away. Those are different states (CYPHER.md §3.2).
       removeItems*: seq[PropRef]
+    of qpForeach:
+      ## `FOREACH (n IN $nodes | SET n.x = 1)`. A write clause like SET,
+      ## applied once per *element* instead of once per row — which is why
+      ## its updates are the same `SetItem`s and `PropRef`s, parsed by the
+      ## same code.
+      ##
+      ## The field names are prefixed because a Nim variant object cannot
+      ## carry one field name in two branches: `qpSet` already owns
+      ## `setItems`, and this branch wants the same shape with a different
+      ## owner.
+      foreachList*: Expr
+      foreachVar*: string
+      foreachSet*: seq[SetItem]
+      foreachRemove*: seq[PropRef]
     of qpMerge:
       ## `MERGE (n:P {…}) ON CREATE SET … ON MATCH SET …`. The pattern is
       ## stored as patterns, and the actions as the same `SetItem`s SET

@@ -129,6 +129,7 @@ write-create-return-own	in	CREATE (m:Ret {v: 5}) RETURN m.v AS v	[[5]]	write
 write-set-property	in	CREATE (n:Made {v: 1}) SET n.v = 9	[[9]]	write:MATCH (n:Made) RETURN n.v AS v
 write-set-expression	in	CREATE (n:Made {v: 9}) SET n.v = n.v * 10	[[90]]	write:MATCH (n:Made) RETURN n.v AS v
 write-set-merge	in	CREATE (n:Made {v: 1}) SET n += {extra: 5}	[[5]]	write:MATCH (n:Made) RETURN n.extra AS e
+write-foreach	in	MATCH (n:Seed) FOREACH (x IN [n] | SET x.v = 7)	[[7],[7]]	write:MATCH (n:Seed) RETURN n.v AS v
 write-set-replace	in	CREATE (n:Made {v: 1, gone: 2}) SET n = {only: 3}	[[3]]	write:MATCH (n:Made) RETURN n.only AS o
 write-set-null-drops	in	CREATE (n:Made {v: 1}) SET n.v = null	[[null]]	write:MATCH (n:Made) RETURN n.v AS v
 write-set-two-in-one	in	CREATE (n:Made) SET n.a = 1, n.b = 2	[[1]]	write:MATCH (n:Made) RETURN n.a AS a

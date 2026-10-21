@@ -68,7 +68,7 @@ class M7Test < Minitest::Test
       # SQL: a parse error.
       assert_raises(Glyphes::SqlError) { db.query("MATCH (") }
       # Unsupported: a named refusal.
-      assert_raises(Glyphes::UnsupportedError) { db.query("FOREACH (x IN [1] | x)") }
+      assert_raises(Glyphes::UnsupportedError) { db.query("LOAD CSV FROM 'x' AS line RETURN line") }
       # Closed: a handle past close.
       db2 = Glyphes::Database.open(":memory:")
       db2.close

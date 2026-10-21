@@ -5,7 +5,7 @@
 > `DELETE` / `DETACH DELETE`, `MERGE` with `ON CREATE` / `ON MATCH`,
 > aggregates and grouping, `OPTIONAL MATCH`, variable-length patterns,
 > `Sort` with spill, and — at M6.1 — the range index. `FOREACH` is the
-> last write clause refused.
+> last write clause to land (§3.6).
 > Anything described here as refused is refused *by name* with
 > `GLY_ERR_UNSUPPORTED`, and `tests/conformance/tck_subset.txt` carries one
 > out-of-contract row per refusal so the list cannot rot.
@@ -85,6 +85,9 @@ projection containing an aggregate a group-by (§2.8).
 **M5.6 — `Sort` with spill** (§2.10) and the E gates: `LIMIT 10` over a
 10⁶-row traversal in 0.62 ms (gate 2 ms), and a 10⁷-row sort that spills
 200 runs and completes in 88 s.
+
+**M5.7 — `FOREACH`** (§3.6), the last write clause: a loop that applies
+`SET` / `REMOVE` once per element of a list.
 
 ---
 
@@ -443,6 +446,41 @@ Both action clauses may appear, and each runs on exactly one of the two
 outcomes. The match half is planned per row and constrained by every
 already-bound variable.
 
+### 3.6 `FOREACH`
+
+```
+MATCH (n:Tag) FOREACH (x IN [n] | SET x.seen = 1)
+UNWIND $rows AS row FOREACH (v IN [row.v] | SET row.seen = true())
+```
+
+One row in, **one row out** — that is the whole difference between a
+`FOREACH` and an `UNWIND`, and the reason a `FOREACH` cannot be planned as
+a rewritten `UNWIND`: the loop writes and passes the row on, it does not
+turn one row into N.
+
+The list is an expression, evaluated **per row**, so the elements may come
+from a parameter, a property, or a list built from the row's own bindings.
+The updates are the same `SET` / `REMOVE` items a top-level clause takes —
+parsed by the same code, applied by the same setter — so a `SET` inside a
+loop and a `SET` outside it cannot drift apart.
+
+Three rules the clause keeps:
+
+1. **Only `SET` and `REMOVE` inside.** `CREATE`, `MERGE` and `DELETE`
+   are refused **by name**: the write set of a statement is what the
+   transaction logs, and a clause that creates and deletes in a loop is a
+   different thing to reason about. This is openCypher's own restriction.
+2. **The element must be a node or a relationship.** A number has no
+   properties; `FOREACH (x IN [1, 2] | SET x.v = 1)` is refused by name
+   rather than silently doing nothing.
+3. **The loop variable is scoped to the clause.** A later `SET` or
+   `RETURN` that names it is refused at prepare time, not left to fail on
+   the first row — or, worse, on a query that produces no rows and so
+   never fails at all.
+
+`rowsAffected` counts the updates: one `SET` per element is one write,
+so two elements are two.
+
 ### 3.5 Expressions
 
 Precedence, lowest to highest: `OR` → `XOR` → `AND` → `NOT` → comparison
@@ -598,7 +636,8 @@ checked by `nimble tck`:
 | list comprehension `[x IN xs \| …]` | "comprehension" |
 | quantifiers `all`/`any`/`none`/`single`/`reduce` | the keyword |
 | `shortestPath` / `allShortestPaths` | the keyword |
-| `UNION`, `CALL` other than `db.idx.text`, `CALL … IN TRANSACTIONS`, `FOREACH` | the keyword, or the procedure's name |
+| `UNION`, `CALL` other than `db.idx.text`, `CALL … IN TRANSACTIONS` | the keyword, or the procedure's name |
+| `FOREACH` with `CREATE` / `MERGE` / `DELETE` in its body | "SET or REMOVE" |
 | an unknown function | the function's name |
 | a nested property path in `SET` | "nested property writes" |
 | `SET n = <not a map>` | "needs a map" |

@@ -295,23 +295,21 @@ suite "M5.1 refusals and boundaries":
     check "alternation" in e.msg
     discard f.tx.rollback()
 
-  test "the not-yet-written clauses keep their named refusals":
-    ## M5.3 is CREATE/SET/REMOVE/DELETE/MERGE. FOREACH is the only write
-    ## clause still refused, and it is the only one not scheduled — so this
-    ## list has one entry, and the test fails the day that entry stops
-    ## being true. That is the point of keeping it: a shrinking refusal list
-    ## is a contract, and a contract nobody checks is a comment.
-    for (sql, word) in [
-        ("MATCH (a) FOREACH (x IN [1] | SET a.x = x)", "FOREACH")]:
-      var e: CypherError
-      try:
-        discard parseQuery(sql)
-      except CypherError as err:
-        e = err
-      doAssert e != nil, "should refuse: " & sql
-      if e != nil:
-        check e.code == int32(glyErrUnsupported)
-        check word in e.msg
+  test "the clauses the engine does not evaluate keep their named refusals":
+    ## FOREACH left this list at M5.7: it is a write clause the engine
+    ## evaluates now. LOAD CSV is the remaining named refusal in the
+    ## parser, and this test is the contract that it is refused *by name*
+    ## rather than parsed into a plan that quietly drops it.
+    let sql = "LOAD CSV FROM 'x' AS line RETURN line"
+    var e: CypherError
+    try:
+      discard parseQuery(sql)
+    except CypherError as err:
+      e = err
+    check e != nil
+    if e != nil:
+      check e.code == int32(glyErrUnsupported)
+      check "LOAD" in e.msg
 
 suite "M5.1 durability":
   test "a committed CREATE is visible to a new snapshot":
@@ -837,3 +835,121 @@ suite "M5.5 writes survive the commit they were read from":
     check pairs(s, "MATCH (a:R)-[r:E]->(b) RETURN a.n AS a, b.n AS b") ==
           ["a>b", "b>c", "c>a"]
     check countOf(s, "MATCH (n:R) RETURN n.n AS n") == 6
+
+
+suite "M5.7 FOREACH":
+  test "the loop writes once per element, not once per row":
+    ## One row (the one P), two elements: two writes, and the row count
+    ## stays one. That is the whole difference between a FOREACH and an
+    ## UNWIND, and the reason a FOREACH cannot be a rewritten UNWIND.
+    var f = newFixture()
+    discard f.exec("CREATE (:P {seen: 0})")
+    check f.exec("MATCH (n:P) FOREACH (x IN [n, n] | SET x.seen = 1)") == 2
+    discard f.tx.commit()
+    let (_, v) = read(f.s, "MATCH (n:P) RETURN n.seen AS s")[0].lookup("s")
+    check v.kind == vkInt and v.i == 1
+
+  test "the element must be a node or a relationship, and is refused by name":
+    ## A list of numbers is a list, but a number has no properties: the
+    ## element is refused the way SET's own target is.
+    var f = newFixture()
+    discard f.exec("CREATE (:P)")
+    var e: ref GlyError
+    try:
+      discard f.exec("MATCH (n:P) FOREACH (x IN [1, 2] | SET x.v = 1)")
+    except GlyError as err:
+      e = err
+    check e != nil
+    if e != nil:
+      check e.status == int32(glyErrSql)
+      check "FOREACH's element is a vkInt" in e.msg
+
+  test "the list must be a list":
+    var f = newFixture()
+    discard f.exec("CREATE (:P)")
+    var e: ref GlyError
+    try:
+      discard f.exec("MATCH (n:P) FOREACH (x IN 3 | SET x.v = 1)")
+    except GlyError as err:
+      e = err
+    check e != nil
+    if e != nil:
+      check e.status == int32(glyErrSql)
+      check "FOREACH needs a list" in e.msg
+
+  test "CREATE and DELETE inside a FOREACH are refused by name":
+    ## The write set of a statement is what the transaction logs, and a
+    ## clause that creates and deletes in a loop is a different thing to
+    ## reason about. The refusal names the word, not just the clause.
+    for sql in ["MATCH (n:P) FOREACH (x IN [n] | CREATE (:Q))",
+                "MATCH (n:P) FOREACH (x IN [n] | DELETE x)"]:
+      var e: CypherError
+      try:
+        discard parseQuery(sql)
+      except CypherError as err:
+        e = err
+      check e != nil
+      check "SET or REMOVE" in e.msg
+      check "CREATE" in e.msg or "DELETE" in e.msg
+
+  test "the loop variable is scoped to the clause":
+    ## A later `RETURN x` is a typo, and it is refused at prepare time
+    ## rather than failing on the first row — or, worse, on a query that
+    ## happens to produce no rows and so never fails at all.
+    ## The scope check is part of planning, so the refusal comes from
+    ## `prepare` — with a writer, or the write door's own refusal would
+    ## fire first and the test would be about the wrong thing.
+    var f = newFixture()
+    var e: CypherError
+    try:
+      discard prepare(f.s,
+        "MATCH (n:P) FOREACH (x IN [n] | SET x.seen = 1) RETURN x",
+        initTable[string, Value](), f.tx)
+    except CypherError as err:
+      e = err
+    check e != nil and "x" in e.msg
+
+  test "a FOREACH with no write transaction is refused by name":
+    ## The write door's rule: a write planned with no transaction is a
+    ## write nobody would ever see.
+    let s = newStore()
+    var e: CypherError
+    try:
+      discard prepare(s, "MATCH (n:P) FOREACH (x IN [n] | SET x.seen = 1)")
+    except CypherError as err:
+      e = err
+    check e != nil and e.code == int32(glyErrUnsupported)
+    check "FOREACH" in e.msg
+
+  test "a FOREACH write survives a reopen":
+    ## The write goes through the transaction's setter, so it reaches the
+    ## log — the rule the client's link door was fixed for. A write a
+    ## restart forgets is not a write.
+    let path = "tmp" / "foreach-durable.glyph"
+    removeFile(path)
+    removeFile(path & "-wal")
+    let db = openDatabase(path, GLY_OPEN_CREATE)
+    let tx = db.beginTransaction()
+    let created = tx.createNode("P")
+    discard tx.setNodeProp(created, "seen", Value(kind: vkInt, i: 0))
+    discard db.commitTransaction(tx)
+
+    let wtx = db.beginTransaction()
+    var st = prepare(db.store,
+                     "MATCH (n:P) FOREACH (x IN [n] | SET x.seen = 1)",
+                     initTable[string, Value](), wtx, 0, "", db.indices)
+    while st.step():
+      discard
+    check st.rowsAffected() == 1
+    st.close()
+    discard db.commitTransaction(wtx)
+    close(db)
+
+    let db2 = openDatabase(path, 0)
+    let st2 = prepare(db2.store, "MATCH (n:P) RETURN n.seen AS s")
+    defer: st2.close()
+    let rows = st2.collectRows()
+    check rows.len == 1
+    let (_, v) = rows[0].lookup("s")
+    check v.kind == vkInt and v.i == 1
+    close(db2)

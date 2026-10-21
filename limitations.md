@@ -27,15 +27,16 @@ deliberate refusals rather than failures):
 - `UNWIND`
 - multiple statements in one call
 
-**Not implemented:** subqueries, `FOREACH`, shortest-path functions, graph
+**Not implemented:** subqueries, shortest-path functions, graph
 pattern predicates, `EXISTS { … }` subqueries, most of the type system,
 temporal/spatial types, and multi-database.
 
-Five of those are *planned*, with the syntax, the semantics, the pins
+Four of those are *planned*, with the syntax, the semantics, the pins
 and the order written down in
 [`docs/PLAN-CYPHER-EXTENSIONS.md`](docs/PLAN-CYPHER-EXTENSIONS.md):
-`FOREACH`, the graph-pattern predicates, the type discipline, the
-shortest-path functions, and the temporal/spatial types.
+the graph-pattern predicates, the type discipline, the shortest-path
+functions, and the temporal/spatial types. (`FOREACH` was the fifth and
+has landed — CYPHER.md §3.6.)
 
 The other three are **decided against**, and the reasons are recorded
 in the same document rather than left as a shrug: subqueries and

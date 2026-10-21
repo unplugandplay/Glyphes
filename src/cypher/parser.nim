@@ -644,7 +644,7 @@ proc parsePropRef(p: var Parser): PropRef =
   if p.atSym("."):
     p.failHere("nested property writes (SET a.m.k) are not supported yet")
 
-proc parseSet(p: var Parser, q: Query) =
+proc parseSetItems(p: var Parser): seq[SetItem] =
   ## `SET a.x = 1, b.y = 2` and the map forms `SET a = {…}` / `SET a += {…}`.
   ## One part, one operator: the assignments apply per row, in the order
   ## written.
@@ -656,7 +656,7 @@ proc parseSet(p: var Parser, q: Query) =
   ## first and backtracking was the first version, and it refused `SET n +=
   ## {…}` for "expected '.', found '+'" — the grammar is not "a path with an
   ## optional suffix", it is four distinct shapes.
-  var part = QueryPart(kind: qpSet, setItems: @[])
+  result = @[]
   while true:
     var item = SetItem()
     if p.cur.kind == tkIdent and p.peekAt(1).kind == tkSym and
@@ -688,15 +688,18 @@ proc parseSet(p: var Parser, q: Query) =
         p.failHere("nested property writes (SET a.m.k) are not supported yet")
       p.expectSym("=")
       item.expr = p.parseExpr()
-    part.setItems.add item
+    result.add item
     if p.atSym(","):
       discard p.advance()
       continue
     break
-  q.addPart(part)
 
-proc parseRemove(p: var Parser, q: Query) =
-  var part = QueryPart(kind: qpRemove, removeItems: @[])
+proc parseSet(p: var Parser, q: Query) =
+  ## `SET a.x = 1, b.y = 2`: one part whose items are the parser's own.
+  q.addPart(QueryPart(kind: qpSet, setItems: p.parseSetItems()))
+
+proc parseRemoveItems(p: var Parser): seq[PropRef] =
+  result = @[]
   while true:
     if p.cur.kind == tkIdent and p.peekAt(1).kind == tkSym and
        p.peekAt(1).text == ":":
@@ -704,11 +707,46 @@ proc parseRemove(p: var Parser, q: Query) =
       ## is no label to remove, and saying so is better than accepting the
       ## parse and quietly doing nothing.
       p.failHere("REMOVE n:Label — a node carries one label (pin C13)")
-    part.removeItems.add p.parsePropRef()
+    result.add p.parsePropRef()
     if p.atSym(","):
       discard p.advance()
       continue
     break
+
+proc parseRemove(p: var Parser, q: Query) =
+  ## `REMOVE a.x, b.y`: one part whose targets are the parser's own.
+  q.addPart(QueryPart(kind: qpRemove, removeItems: p.parseRemoveItems()))
+
+proc parseForeach(p: var Parser, q: Query) =
+  ## `FOREACH ( n IN <list> | SET … )` and `… | REMOVE …`.
+  ##
+  ## The update is SET or REMOVE, which is what openCypher allows inside a
+  ## FOREACH: the write set of a statement is what the transaction logs,
+  ## and a clause that creates or deletes in a loop is a different thing to
+  ## reason about. `CREATE` and `DELETE` here are refused by name rather
+  ## than reusing `rejectWrite`, because the query is valid syntax that is
+  ## wrong *inside this clause* — the refusal should say where.
+  ##
+  ## The items are parsed by the very same code a top-level `SET` runs, so
+  ## the loop's grammar and the clause's cannot drift.
+  var part = QueryPart(kind: qpForeach, foreachSet: @[], foreachRemove: @[])
+  p.expectSym("(")
+  part.foreachVar = p.takeIdent("a FOREACH variable")
+  p.expectKw("in")
+  part.foreachList = p.parseExpr()
+  p.expectSym("|")
+  if p.atKw("set"):
+    discard p.advance()
+    part.foreachSet = p.parseSetItems()
+  elif p.atKw("remove"):
+    discard p.advance()
+    part.foreachRemove = p.parseRemoveItems()
+  elif p.atKw("create") or p.atKw("merge") or p.atKw("delete"):
+    p.failHere("FOREACH updates with SET or REMOVE, not with " &
+               p.cur.text.toUpperAscii)
+  else:
+    p.failHere("expected SET or REMOVE inside FOREACH")
+  p.expectSym(")")
   q.addPart(part)
 
 proc parseDelete(p: var Parser, q: Query, detach: bool) =
@@ -953,7 +991,10 @@ proc parseQuery*(src: string): Query =
     elif p.atKw("merge"):
       discard p.advance()
       p.parseMerge(result)
-    elif p.atKw("foreach") or p.atKw("load") or p.atKw("union"):
+    elif p.atKw("foreach"):
+      discard p.advance()
+      p.parseForeach(result)
+    elif p.atKw("load") or p.atKw("union"):
       rejectWrite(result, p.cur)
     elif p.atKw("call"):
       p.parseTextCall(result)

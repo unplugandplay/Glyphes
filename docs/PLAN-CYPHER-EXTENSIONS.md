@@ -18,7 +18,7 @@ gate.
 
 | # | Construct | Why here |
 |---|---|---|
-| **X1** | `FOREACH` | the cheapest: it reuses the write operators that already exist |
+| **X1** | `FOREACH` — **landed** | the cheapest: it reused the write operators that already exist |
 | **X2** | graph-pattern predicates | a filter over the adjacency the engine already has |
 | **X3** | the type discipline | a *foundation*: a date is a type, and there is no point adding types before the types are named and checked |
 | **X4** | shortest-path functions | a traversal with a real cost, and it must be measured before it is offered |
@@ -69,7 +69,19 @@ N writes, so the plan says what N writes cost).
 
 ---
 
+### X1 — landed (M5.7)
+
+`FOREACH` is in: the parser (`parseForeach`, reusing `parseSetItems` and
+`parseRemoveItems`), the plan (`newForeach`), the operator (`okForeach`),
+the scope check (the loop variable is taken back out of the scope), and
+the tests (the per-element count, the refusals by name, the scope, the
+write door, and a reopen). The TCK row `write-foreach` is an `in` row and
+C1 is 133/133; `limitations.md` no longer lists it.
+
 ### X1's recipe — the five edits, in order
+
+*(Kept as written: it is how the clause was built, and the shape recurs
+for every write clause.)*
 
 The clause is a *write clause* like `SET`, and it is worth spending one
 sentence on why that is the cheap shape: a `FOREACH` applies the **same
