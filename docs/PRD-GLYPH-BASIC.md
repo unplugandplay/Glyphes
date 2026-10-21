@@ -143,7 +143,44 @@ the BASIC's `INPUT`. The alternative (text always) would make
 `input n` then `if n > 5` a *text* comparison, which is quietly wrong
 rather than refused, and quietly wrong is the worst kind.
 
-### 3.3 The session
+### 3.3 The program
+
+A program is **named**, and its subroutines are **named**. There are no
+line numbers anywhere, and no `goto` — a subroutine is called by its
+name and comes back by its `return`, so there is nothing left that a
+line number would be for.
+
+```
+PROGRAM-ID. <name>
+<the main body>
+SUBROUTINE. <name>
+<the body>
+END PROGRAM.
+```
+
+- The **main body ends the program**. There is no falling into the
+  first subroutine — that trap is COBOL's, and a child's language
+  should not inherit it.
+- A subroutine that reaches its end **without a `return` is refused by
+  name**. The same rule, the other side of the call.
+- A subroutine takes **no arguments**: the session's names are global,
+  which is the BASIC's way and COBOL's too.
+- The trailing dot of a declaration is punctuation, not part of the
+  name: `SUBROUTINE. AFFICHER_TOTAL.` and `gosub AFFICHER_TOTAL` are
+  the same name.
+
+The **prompt keeps its immediate mode** — a line runs and prints, as
+before — and a program is a block the prompt collects (`PROGRAM-ID.`
+starts it, `END PROGRAM.` ends it and runs it). The classic BASIC has
+both modes too, and the difference is that this one's program is named
+and structured rather than numbered.
+
+**`while <expr> : <statement>`** is the unbounded loop, and it is what
+`goto` used to be for. It takes the same optional `next` marker `for`
+does, and the same one-million-round cap: a loop that cannot finish
+says so rather than hanging.
+
+### 3.4 The session
 
 The BASIC's variables are 26 single letters; a graph session wants
 *names*. So the session is a **name table**: `p`, `ada`, `friends` — a
@@ -206,11 +243,10 @@ client is what a real user types.
 - **Functions and procedures.** `gosub` is enough for a first language,
   and a call stack in the guest is a lot of memory. The host version may
   add `def`.
-- **The program model, and with it the subroutines and the multi-line
-  bodies.** `goto` / `gosub` / `return` and a loop whose body is the
-  *lines that follow* all need the client to hold a numbered program
-  rather than a session of statements. That is the next cut, and it is
-  the cut that turns the client from a prompt into a program runner.
+- **Multi-line bodies.** The program model (§3.3) is in, with named
+  subroutines and `goto` gone for good — but a loop whose body is the
+  *lines that follow* is not, and needs the indentation or the
+  `END-IF` convention that the one-line bodies avoid.
 - **A `while`.** `for` with a step, and `goto`, cover it; `while` is
   sugar for a `for` over 1..32767 ✗ hmm — the 64-bit host makes it
   trivial ✓ and the guest's 24-bit ADL mode makes it possible ✓✓

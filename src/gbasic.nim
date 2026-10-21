@@ -72,6 +72,20 @@ type
     ## the terminal); the guest would read a port channel. Without one,
     ## `input` is refused by name rather than hanging.
     inputFn*: proc(): string
+    ## The program, when the session is running one: the lines, the
+    ## name, where each subroutine starts, and the call stack.
+    ##
+    ## A program is *named* and its subroutines are *named* — no line
+    ## numbers anywhere, and no `goto`: a subroutine is called by its
+    ## name and comes back by its `return`, so there is nothing left
+    ## that a line number would be for.
+    progLines*: seq[string]     ## the program's lines
+    progName*: string            ## the program's name (its title)
+    progSubs*: Table[string, int]  ## a subroutine's name -> the line its body starts at
+    progPc*: int                ## where the program is
+    progStack*: seq[int]        ## the lines to come back to
+    inProgram*: bool            ## is a program running? (an immediate
+                                ## `gosub` has nothing to call)
 
   GbLoop* = object
     ## One `for` loop's state: the variable, the limit, the step and the
@@ -195,6 +209,14 @@ proc splitWords(line: string): seq[string] =
     else:
       cur.add ch
   if cur.len > 0: result.add cur
+
+proc cleanName(name: string): string =
+  ## A name as it was written. The trailing dot of a COBOL-style
+  ## declaration is punctuation, not part of the name: `SUBROUTINE.
+  ## AFFICHER_TOTAL.` and `gosub AFFICHER_TOTAL` are the same name.
+  result = name
+  if result.len > 0 and result[^1] == '.':
+    result.setLen(result.len - 1)
 
 proc clientParams(s: GbSession, text: string, params: var Table[string, Value]) =
   ## The client's variables inside a `where` clause.
@@ -413,6 +435,61 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     ## Whatever followed the `next` runs once, after the loop.
     for stmt in after:
       discard s.runStatement(t, stmt)
+  of "gosub":
+    ## gosub <name>
+    ##
+    ## The call. A subroutine is called by its *name*: there are no line
+    ## numbers in this language, and no `goto` — the name is the only
+    ## thing a call can mean.
+    if words.len != 2:
+      gbFail("gosub needs a subroutine name")
+    if not s.inProgram:
+      gbFail("there is no program to call")
+    let name = cleanName(words[1])
+    let at = s.progSubs.getOrDefault(name, -1)
+    if at < 0:
+      gbFail("no subroutine '" & name & "'")
+    s.progStack.add s.progPc
+    s.progPc = at
+  of "return":
+    ## return
+    ##
+    ## The way back. A subroutine that reaches its end without a
+    ## `return` is refused by name: falling off the end is the trap
+    ## COBOL's paragraphs have, and a child's language should not
+    ## inherit it.
+    if words.len != 1:
+      gbFail("return needs nothing")
+    if s.progStack.len == 0:
+      gbFail("return outside a subroutine")
+    s.progPc = s.progStack[^1]
+    s.progStack.setLen(s.progStack.len - 1)
+  of "while":
+    ## while <expr> : <statement>
+    ##
+    ## The unbounded loop, which is what `goto` used to be for. The
+    ## same cap as `for`: a loop that cannot finish says so rather
+    ## than hanging.
+    let rest = line[5 .. ^1].strip()
+    let parts = splitStatements(rest)
+    if parts.len < 2:
+      gbFail("while needs a condition and a statement")
+    ## The body, and the optional `next` marker — the same shape as
+    ## `for`, so a child who writes one writes the other.
+    var body: seq[string] = @[]
+    for stmt in parts[1 .. ^1]:
+      if stmt.toLowerAscii == "next":
+        continue
+      body.add stmt
+    if body.len == 0:
+      gbFail("while needs a statement")
+    var rounds = 0
+    while condition(s.names, parts[0]):
+      for stmt in body:
+        discard s.runStatement(t, stmt)
+      inc rounds
+      if rounds > 1_000_000:
+        gbFail("the loop did not finish after a million rounds")
   of "input":
     ## input <name>
     ##
@@ -562,3 +639,64 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
   else:
     gbFail("unknown statement '" & words[0] & "'")
   true
+
+
+proc isDeclaration(line: string): bool =
+  ## Is this line structure rather than a statement? `SUBROUTINE. NAME.`
+  ## and `END PROGRAM.` are structure, and the runner must not execute
+  ## them. A bare `end` is not: it is the BASIC's stop, and the
+  ## statement executor answers it.
+  let w = line.strip.splitWhitespace
+  if w.len == 0:
+    return true
+  let first = w[0].toLowerAscii
+  if first == "subroutine.":
+    return true
+  first == "end" and w.len >= 2 and w[1].toLowerAscii == "program."
+
+proc runProgram*(s: var GbSession, t: GbTransport; lines: openArray[string]): bool =
+  ## Run a program: the main body, and the subroutines it calls.
+  ##
+  ## The program's shape (PRD-GLYPH-BASIC.md §3.3):
+  ##
+  ##     PROGRAM-ID. <name>
+  ##     <the main body>
+  ##     SUBROUTINE. <name>
+  ##     <the body>
+  ##     END PROGRAM.
+  ##
+  ## The main body ends the program — there is no falling into the
+  ## first subroutine, which is the trap COBOL's paragraphs have.
+  if lines.len == 0:
+    gbFail("a program needs a line")
+  let first = lines[0].strip.splitWhitespace
+  if first.len < 2 or first[0].toLowerAscii != "program-id.":
+    gbFail("a program starts with PROGRAM-ID. <name>")
+  s.progLines = @[]
+  for l in lines:
+    s.progLines.add l
+  s.inProgram = true
+  s.progName = cleanName(first[1])
+  s.progSubs = initTable[string, int]()
+  s.progStack = @[]
+  s.progPc = 1
+  ## Where each subroutine's body starts: the line after its
+  ## declaration.
+  for i, line in s.progLines:
+    let w = line.strip.splitWhitespace
+    if w.len >= 2 and w[0].toLowerAscii == "subroutine.":
+      s.progSubs[cleanName(w[1])] = i + 1
+  ## The body, statement by statement.
+  while s.progPc < s.progLines.len:
+    let line = s.progLines[s.progPc]
+    s.progPc = s.progPc + 1
+    if isDeclaration(line):
+      ## The main body ended, or a subroutine's body did.
+      if s.progStack.len > 0:
+        gbFail("a subroutine ended without a RETURN")
+      break
+    if not s.runStatement(t, line):
+      break
+  s.inProgram = false
+  true
+

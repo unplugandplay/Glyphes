@@ -330,3 +330,113 @@ suite "GLYPH BASIC — the guest channel":
     let answer = channelAnswer(db, "gq find Person where name = $who\twho=\"Ana\"")
     check answer == "1"
     close(db)
+
+
+suite "GLYPH BASIC — the program":
+
+  test "a program runs its body and calls its subroutines":
+    ## The program's shape: a name, a body, named subroutines, and an
+    ## end. No line numbers anywhere, and no `goto` — a subroutine is
+    ## called by its name and comes back by its `return`.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    discard s.runProgram(t, [
+      "PROGRAM-ID. demo.",
+      "find Person",
+      "gosub AFFICHER_TOTAL",
+      "SUBROUTINE. AFFICHER_TOTAL.",
+      "print \"in the subroutine\"",
+      "return",
+      "END PROGRAM."
+    ])
+    check s.transcript == "2 nodes\nin the subroutine\n"
+    close(db)
+
+  test "a subroutine is called by its name, dot or no dot":
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    discard s.runProgram(t, [
+      "PROGRAM-ID. demo.",
+      "gosub SALUER",
+      "SUBROUTINE. SALUER.",
+      "print \"called\"",
+      "return",
+      "END PROGRAM."
+    ])
+    check s.transcript == "called\n"
+    close(db)
+
+  test "a subroutine that ends without a return is refused by name":
+    ## Falling off the end is the trap COBOL's paragraphs have, and a
+    ## child's language should not inherit it.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runProgram(t, [
+        "PROGRAM-ID. demo.",
+        "gosub SANS_RETOUR",
+        "SUBROUTINE. SANS_RETOUR.",
+        "print \"no return\"",
+        "END PROGRAM."
+      ])
+    except CatchableError as e:
+      msg = e.msg
+    check "RETURN" in msg
+    close(db)
+
+  test "gosub outside a program is refused":
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runStatement(t, "gosub SOMEONE")
+    except CatchableError as e:
+      msg = e.msg
+    check "no program" in msg
+    close(db)
+
+  test "a name that is not a subroutine is refused":
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runProgram(t, [
+        "PROGRAM-ID. demo.",
+        "gosub NOWHERE",
+        "END PROGRAM."
+      ])
+    except CatchableError as e:
+      msg = e.msg
+    check "NOWHERE" in msg
+    close(db)
+
+  test "while loops until its condition is false":
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    discard s.runProgram(t, [
+      "PROGRAM-ID. demo.",
+      "let n = 0",
+      "while n < 3 : print n : n = n + 1 : next",
+      "END PROGRAM."
+    ])
+    check s.transcript == "0\n1\n2\n"
+    close(db)
+
+  test "a program that does not start with PROGRAM-ID is refused":
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runProgram(t, ["find Person"])
+    except CatchableError as e:
+      msg = e.msg
+    check "PROGRAM-ID" in msg
+    close(db)

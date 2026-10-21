@@ -37,8 +37,13 @@ proc main() =
   echo "  let <name> = <value>   print <expr>   input <name>"
   echo "  if <expr> then <stmt>   for <var> = <a> to <b> : <stmt> : next"
   echo "  a name holds a node: p = 1, and $p refers to it in a where clause"
+  var inProgram = false
+  var program: seq[string] = @[]
   while true:
-    stdout.write "ready> "
+    if inProgram:
+      stdout.write "..> "
+    else:
+      stdout.write "ready> "
     stdout.flushFile()
     var line = ""
     try:
@@ -50,6 +55,27 @@ proc main() =
       continue
     if trimmed.toLowerAscii in ["quit", "exit", "bye"]:
       break
+    ## A program: `PROGRAM-ID. <name>` starts one, `END PROGRAM.` ends
+    ## it, and the lines between are collected and run as a program.
+    ## The prompt keeps its immediate mode for everything else — the
+    ## classic BASIC's own two modes, and the reason a child can type
+    ## one line and see one answer.
+    if inProgram:
+      program.add trimmed
+      if trimmed.toLowerAscii == "end program.":
+        inProgram = false
+        try:
+          discard session.runProgram(transport, program)
+        except CatchableError as e:
+          echo "[", e.name, "] ", e.msg
+        if session.transcript.len > 0:
+          stdout.write session.transcript
+          session.transcript.setLen(0)
+      continue
+    if trimmed.toLowerAscii.startsWith("program-id."):
+      inProgram = true
+      program = @[trimmed]
+      continue
     try:
       if not session.runStatement(transport, trimmed):
         break
