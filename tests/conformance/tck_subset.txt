@@ -96,6 +96,8 @@ date-type	in	RETURN typeof(date('2026-10-21')) AS t	[["DATE"]]
 date-string	in	RETURN toString(date('2026-10-21')) AS s	[["2026-10-21"]]
 date-order	in	RETURN date('2026-10-21') < date('2026-10-22') AS b	[[true]]
 date-not-a-string	in	RETURN date('2026-10-21') = '2026-10-21' AS b	[[false]]
+date-year	in	RETURN date('2026-10-21').year AS y, date('2026-10-21').month AS m, date('2026-10-21').day AS d	[[2026,10,21]]
+date-no-hour	out	RETURN date('2026-10-21').hour AS h	year, month and day
 date-invalid	out	RETURN date('2026-02-30') AS d	not a YYYY-MM-DD date
 date-wrong-type	out	RETURN date(1) AS d	not INTEGER
 

@@ -272,8 +272,10 @@ construct that belongs in a report rather than in a prompt.
 `DATE` is in, end to end: the value kind (a count of days since
 1970-01-01), the codec's tag (`GLY_DATE` in the store and the ABI), the
 comparisons (both of them — the expression layer's and ORDER BY's), the
-`date()` and `toString()` functions, the round trip through a reopen, and
-the refusals by name (`date('2026-02-30')` is not a date).
+`date()` and `toString()` functions, the component accessors
+(`d.year`/`d.month`/`d.day`, as properties of the value rather than
+stored keys), the round trip through a reopen, and the refusals by name
+(`date('2026-02-30')` is not a date).
 
 What it cost, measured in edits rather than hours: six `case` arms in the
 value model and the codec, two comparators, one ABI tag, one Ruby
@@ -281,8 +283,8 @@ constant. Which is the point of X3: a new type is a case in a table, not
 a string in every operator.
 
 **Still to come in X5:** `datetime`, `time`, `local datetime`,
-`local time`, `duration`; the date's `year`/`month`/`day`; arithmetic
-between temporal values; and the spatial types (`POINT`, and whether
+`local time`, `duration`; arithmetic between temporal values; and the
+spatial types (`POINT`, and whether
 `LINE`/`POLYGON` are worth it — they are Neo4j extensions, not
 openCypher). The ABI crosses a date as `GLY_DATE` with the day count in
 the cell's payload; a Ruby `Date` class is the next Ruby-side step.

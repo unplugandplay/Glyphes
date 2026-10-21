@@ -1379,6 +1379,20 @@ suite "M6.5 DATE":
       e = err
     check e != nil and "not INTEGER" in e.msg
 
+  test "a date's components are properties of the value":
+    let s = seedStore()
+    check plain(column(run(s, "RETURN date('2026-10-21').year AS y"), "y")) == @["2026"]
+    check plain(column(run(s, "RETURN date('2026-10-21').month AS m"), "m")) == @["10"]
+    check plain(column(run(s, "RETURN date('2026-10-21').day AS d"), "d")) == @["21"]
+    ## A key a date does not have is refused by name, not answered null:
+    ## a typo in an accessor is not a missing property.
+    var e: CypherError
+    try:
+      discard run(s, "RETURN date('2026-10-21').hour AS h")
+    except CypherError as err:
+      e = err
+    check e != nil and "year, month and day" in e.msg
+
   test "a date sorts with the dates":
     let s = newStore()
     for text in ["2026-10-21", "1970-01-01", "2000-02-29"]:

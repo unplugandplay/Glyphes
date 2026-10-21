@@ -819,13 +819,18 @@ days is the smallest thing that compares and stores. It has its own tag in
 the store (`GLY_DATE`, the day count in the cell's payload), so a date
 never becomes text — pin C19.
 
+A date's components are **properties of the value**, not stored keys:
+`d.year`, `d.month`, `d.day`. A key a date does not have —
+`d.hour` — is refused by name rather than answered `null`, because a typo
+in an accessor is not a missing property.
+
 `date('2026-02-30')` is **refused by name**. The validation is the round
 trip: a date that does not come back the same is not a date, and
 normalising it silently to March 2nd would be a wrong answer dressed as a
 date.
 
-What is *not* here yet: `datetime`, `time`, `duration`, the date's
-`year`/`month`/`day` accessors, and date arithmetic. They are X5's next
+What is *not* here yet: `datetime`, `time`, `duration`, and date
+arithmetic. They are X5's next
 stages, and they are the reason `date` came first: a second type is a
 case in `typeName`, the codec and the two comparators; the *arithmetic*
 between two temporal types is the work.

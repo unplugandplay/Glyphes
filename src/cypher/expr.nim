@@ -247,6 +247,20 @@ proc eqValues*(a, b: Value): Value =
 # ------------------------------------------------------------- accessors
 
 proc propertyOf(ctx: QueryCtx, target: Value, key: string): Value {.gcsafe.} =
+  ## A **date** answers its components here rather than in a function:
+  ## `d.year` is not a stored key of anything, and looking it up in the
+  ## property dictionary would answer null for every date — the shape of
+  ## bug that reads as "the property is missing" rather than "the type is
+  ## not what you think".
+  if target.kind == vkDate:
+    let (y, m, d) = civilOf(target.d)
+    case key
+    of "year": return Value(kind: vkInt, i: int64(y))
+    of "month": return Value(kind: vkInt, i: int64(m))
+    of "day": return Value(kind: vkInt, i: int64(d))
+    else:
+      cypherFail(int32(glyErrSql),
+        "a date has year, month and day, not '" & key & "'")
   case target.kind
   of vkNode:
     var v: Value
