@@ -46,6 +46,11 @@ var
 proc err(line: int, msg: string) =
   quit &"{srcFile}:{line}: error: {msg}"
 
+proc symbols*(): seq[tuple[name: string, value: int]] =
+  ## The symbol table of the last assembly.
+  for s in syms:
+    result.add (s.name, s.val)
+
 proc symLookup(n: string): int =
   for s in syms:
     if s.name == n:
@@ -713,7 +718,10 @@ proc processLine(raw: string, line: int) =
     outp.add code
     inc pc, code.len
 
-proc assemble(inPath, outPath: string) =
+proc assemble*(inPath, outPath: string) =
+  ## Assemble a file. The symbol table is left in `symbols()` afterwards, so
+  ## a caller that needs a value the source computed (a benchmark's loop
+  ## counts, say) can read it rather than repeat it.
   srcFile = inPath
   let lines = readFile(inPath).splitLines()
   for p in 1 .. 2:

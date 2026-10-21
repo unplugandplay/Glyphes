@@ -74,7 +74,53 @@ console.
 ```
 nim c -r tests/test_ez80.nim          # the test suite
 nim c -r ez80asm.nim -- basic.z80 out.bin
+nimble ez80Bench                      # the interpreter's speed
 ```
+
+## The benchmark
+
+`bench/loop.bas` is a BASIC program the interpreter runs, and
+`bench/bench.nim` times it:
+
+```
+10 REM ** eZ80 BASIC benchmark: 1000 x 1000 = 1,000,000 loop iterations **
+20 FOR I = 1 TO 1000
+30 FOR J = 1 TO 1000
+40 NEXT
+50 NEXT
+60 PRINT "DONE"
+```
+
+The harness takes the clock **before the interpreter starts** and
+**after it ends**, and reports the delta — so the number is the
+interpreter's own time, not a measurement of the harness:
+
+```
+iterations  : 1000000
+wall clock  : 13.733 s
+cpu time    : 13.605 s
+rate        : 72816. iterations/s (wall)
+finished    : yes
+```
+
+The iteration count is read out of the program (the product of its `FOR`
+limits) rather than repeated in the harness, so the report cannot claim a
+million iterations for a program that does fewer. The program prints
+`DONE` when it arrives at the end, and the harness checks for that
+*printed* line — the echo of the program text contains the word too.
+
+**Why two loops.** A single loop cannot count to a million here: the
+BASIC's integers are 16-bit signed, so a counter tops out at 32767. Two
+nested loops do it honestly, and they also stand on the `FOR` stack,
+which is the part of the interpreter a benchmark should be measuring.
+
+The number is worth reading for what it says about the interpreter rather
+than about the CPU: a million iterations of `NEXT` cost about 3900
+T-states each, and most of that is the **keyword dispatch** — every
+statement is matched by walking a seventeen-entry table of keywords, so
+`NEXT` is the seventeenth one tried. An interpreter with a hashed
+dispatch would be several times faster, and this is the measurement that
+would show it.
 
 ## The BASIC
 

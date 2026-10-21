@@ -320,3 +320,8 @@ task ez80Test, "eZ80: the CPU's test suite (Z80 compatibility + the eZ80's own f
 task ez80Asm, "eZ80: assemble basic.z80":
   exec "nim c -d:release -o:tmp/ez80asm ez80/ez80asm.nim"
   exec "./tmp/ez80asm ez80/basic.z80 ez80/basic.bin"
+
+task ez80Bench, "eZ80: how fast is the BASIC interpreter? (a million loop iterations)":
+  ## The benchmark is a BASIC program fed to GLYPHE BASIC; the harness
+  ## takes the clock before the interpreter starts and after it ends.
+  exec "nim c -r -d:release --mm:atomicArc --threads:on -o:tmp/ez80_bench ez80/bench/bench.nim"

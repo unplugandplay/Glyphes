@@ -1,0 +1,6 @@
+10 REM ** eZ80 BASIC benchmark: 1000 x 1000 = 1,000,000 loop iterations **
+20 FOR I = 1 TO 1000
+30 FOR J = 1 TO 1000
+40 NEXT
+50 NEXT
+60 PRINT "DONE"

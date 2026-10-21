@@ -3440,3 +3440,36 @@ The gaps are written down rather than guessed: the `INI2`/`IND2`/`OUTI2`
 family is left out because the manual's two opcode tables disagree about
 its encoding, the `RS` prefix is not implemented, and the T-state counts
 are the Z80's rather than the eZ80's.
+
+### A benchmark for the interpreter
+
+`ez80/bench/loop.bas` is a BASIC program — a million `NEXT` iterations —
+and `ez80/bench/bench.nim` takes the clock **before the interpreter
+starts** and **after it ends**, so the number is the interpreter's own
+time:
+
+```
+iterations  : 1000000
+wall clock  : 13.468 s      cpu time: 13.307 s
+rate        : 74249. iterations/s (wall)
+finished    : yes
+```
+
+Two details worth keeping. The iteration count is *read out of the
+program* — the product of its `FOR` limits — rather than repeated in the
+harness, so the report cannot claim a million iterations for a program
+that does fewer; and the completion check looks for the *printed* `DONE`,
+because the echo of the program text contains the word too (the first
+version of the check was fooled by exactly that and reported success on a
+run that never finished).
+
+And the reason it is two nested loops rather than one: the BASIC's
+integers are 16-bit signed, so a counter tops out at 32767. A million
+iterations honestly need `1000 × 1000`, and they happen to stand on the
+`FOR` stack, which is the part of the interpreter worth measuring.
+
+The number says more about the interpreter than about the CPU: a million
+`NEXT`s cost about 3900 T-states each, and most of that is the **keyword
+dispatch** — every statement is matched by walking a seventeen-entry
+table, so `NEXT` is the seventeenth one tried. A hashed dispatch would be
+several times faster, and this is the measurement that would show it.
