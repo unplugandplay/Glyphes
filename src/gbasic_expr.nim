@@ -263,8 +263,16 @@ proc eval(e: Expr; names: Table[string, GbValue]): GbValue =
       of "<=": GbValue(kind: gbvBool, flag: cmp <= 0)
       else: GbValue(kind: gbvBool, flag: cmp >= 0)
     of "+":
-      if l.kind == gbvString or r.kind == gbvString:
+      ## Two strings concatenate; two numbers add; a string and a number
+      ## are refused by name. The mixed case used to read the *wrong*
+      ## union member — `l.text` on a number is not a string, it is
+      ## whatever the eight bytes of the integer happen to be — and a
+      ## language that answers "Ada" & 1 with garbage is worse than one
+      ## that refuses.
+      if l.kind == gbvString and r.kind == gbvString:
         GbValue(kind: gbvString, text: l.text & r.text)
+      elif l.kind == gbvString or r.kind == gbvString:
+        exprFail("'+' needs two strings or two numbers")
       else:
         GbValue(kind: gbvNumber, number: l.number + r.number)
     of "-":

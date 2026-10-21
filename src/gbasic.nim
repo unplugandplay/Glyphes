@@ -328,9 +328,18 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
   of "end":
     return false
   of "let":
+    ## let <name> = <expression>
+    ##
+    ## The right-hand side is an *expression*, like the bare
+    ## assignment's: `let t = t + 1` is a thing, and a `let` that took
+    ## only a literal or a name would be a second, weaker way of
+    ## saying the same thing.
     if words.len < 4 or words[2] != "=":
       gbFail("let needs a name, '=' and a value")
-    let v = s.parseValue(words[3])
+    let eq = line.find('=')
+    if eq < 0:
+      gbFail("let needs a name, '=' and a value")
+    let v = evalExpr(s.names, line[eq + 1 .. ^1].strip())
     s.names[words[1]] = v
   of "print":
     if words.len == 1:

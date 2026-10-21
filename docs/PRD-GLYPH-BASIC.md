@@ -235,11 +235,15 @@ client is what a real user types.
 
 ## 6. What is out of scope
 
-- **Strings as first-class values.** The host has them; the guest's
-  BASIC does not (it has no string variables at all). The first version
-  supports string *literals* in commands and names in the session, and
-  says so. A string *type* is a later version, and it is the guest's
-  largest piece of work.
+- **Strings as first-class values — on the guest.** The *host* has
+  them: a name can hold text, the evaluator compares it and `+`
+  concatenates it, and a string and a number are refused by name. The
+  *guest* has no string type at all (its variables are numeric), so
+  the guest's language is a strict subset of the host's. Giving it a
+  string type — a pointer, a length and a copy, on a machine with
+  24-bit registers — is the guest's largest single piece of work, and
+  it is why the transcript gate (GB-F) cannot be closed until it is
+  done.
 - **Functions and procedures.** `gosub` is enough for a first language,
   and a call stack in the guest is a lot of memory. The host version may
   add `def`.

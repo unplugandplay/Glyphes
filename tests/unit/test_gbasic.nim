@@ -440,3 +440,28 @@ suite "GLYPH BASIC — the program":
       msg = e.msg
     check "PROGRAM-ID" in msg
     close(db)
+
+
+suite "GLYPH BASIC — the values":
+
+  test "two strings concatenate, and a string and a number are refused":
+    ## The mixed case used to read the wrong union member and answer
+    ## with garbage; a language that refuses is better than one that
+    ## guesses.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    discard s.runStatement(t, "let a = \"Ada\"")
+    discard s.runStatement(t, "let b = \" Lovelace\"")
+    check s.names["a"].text == "Ada"
+    check s.names["b"].text == " Lovelace"
+    var msg = ""
+    try:
+      discard s.runStatement(t, "let c = a + 1")
+    except CatchableError as e:
+      msg = e.msg
+    check "two strings or two numbers" in msg
+    ## Two strings do concatenate.
+    discard s.runStatement(t, "let d = a + b")
+    check s.names["d"].text == "Ada Lovelace"
+    close(db)
