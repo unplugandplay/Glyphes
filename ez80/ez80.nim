@@ -127,6 +127,14 @@ type
     inBuf*: string    ## characters queued for IN
     inPos*: int
     interactive*: bool  ## when true and inBuf is empty, read a line from stdin
+    # the port channel to the host (see portIn/portOut):
+    chanOut*: string   ## what the guest has sent, waiting to be answered
+    chanIn*: string    ## what the host has for the guest, waiting to be read
+    chanHandler*: proc(request: string): string
+      ## The host's answer to a request the guest has finished sending.
+      ## It is called from the guest's *poll* of the status port, so the
+      ## exchange is driven by the guest and the host never has to guess
+      ## when the request is complete.
 
 # ---- memory ---------------------------------------------------------------
 
@@ -607,6 +615,14 @@ proc reset*(z: var EZ80, entry: uint32 = 0) =
 
 proc portOut*(z: var EZ80, port: uint8, v: uint8) =
   ## Console: every OUT writes a character (13 = newline).
+  ##
+  ## Port 3 is the *channel* to the host, not the console: a byte
+  ## written there is a byte of a request, and it must not appear on the
+  ## console — the transcript is the transcript, and a request echoed
+  ## into it would be a lie about what the guest said.
+  if port == 3:
+    z.chanOut.add chr(v)
+    return
   z.outBuf.add chr(v)
   if z.interactive:
     if v == 13:
@@ -617,6 +633,34 @@ proc portOut*(z: var EZ80, port: uint8, v: uint8) =
 
 proc portIn*(z: var EZ80, port: uint8): uint8 =
   ## Console: port 1 = next char, port 2 = status (1 = char available).
+  ##
+  ## The channel: port 4 = next byte from the host, port 5 = the
+  ## status (1 = a byte is ready). The status poll is also where the
+  ## host is asked to answer: a request the guest has finished sending
+  ## (it ended with CR) is complete, so the handler is called, and the
+  ## reply is queued for the guest to read.
+  if port == 5:
+    if z.chanIn.len == 0 and z.chanHandler != nil and
+       z.chanOut.len > 0 and z.chanOut[^1] == '\r':
+      let request = z.chanOut[0 ..< z.chanOut.len - 1]
+      z.chanOut = ""
+      var reply = z.chanHandler(request)
+      ## The reply is framed with an *empty line*: the answer may be
+      ## several lines (a node's properties, the labels), and the guest
+      ## has to know where it ends. A request is one line, so it ends
+      ## with a single CR; an answer is a run of lines, so it ends with
+      ## an empty one.
+      if reply.len > 0 and reply[^1] == '\r':
+        reply.add '\r'
+      else:
+        reply.add "\r\r"
+      z.chanIn = reply
+    return (if z.chanIn.len > 0: 1'u8 else: 0'u8)
+  if port == 4:
+    if z.chanIn.len > 0:
+      result = z.chanIn[0].uint8
+      z.chanIn = z.chanIn[1 .. ^1]
+    return
   if port == 2 and z.inPos >= z.inBuf.len and z.interactive:
     if stdin.endOfFile:
       z.inBuf.add "BYE\r"           # EOF: politely stop the interpreter

@@ -317,9 +317,10 @@ task ez80Test, "eZ80: the CPU's test suite (Z80 compatibility + the eZ80's own f
   ## the Z80 emulator it grew out of.
   exec "nim c -r --mm:atomicArc --threads:on -o:tmp/test_ez80 ez80/tests/test_ez80.nim"
 
-task ez80Asm, "eZ80: assemble basic.z80":
+task ez80Asm, "eZ80: assemble basic.z80 and channel.z80":
   exec "nim c -d:release -o:tmp/ez80asm ez80/ez80asm.nim"
   exec "./tmp/ez80asm ez80/basic.z80 ez80/basic.bin"
+  exec "./tmp/ez80asm ez80/channel.z80 ez80/channel.bin"
 
 task ez80Bench, "eZ80: how fast is the BASIC interpreter? (a million loop iterations)":
   ## The benchmark is a BASIC program fed to GLYPHE BASIC; the harness

@@ -18,6 +18,7 @@ import ../../src/gbasic
 import ../../src/gbasic_types
 import ../../src/gbasic_expr
 import ../../src/gbasic_store
+import ../../src/gbasic_channel
 
 import ../../src/database
 import ../../src/abi
@@ -276,4 +277,56 @@ suite "GLYPH BASIC — the values":
     ## parameter: the value travels beside the query, never inside it.
     discard s.runStatement(t, "find Person where name = $who")
     check s.cursor.len == 1
+    close(db)
+
+
+suite "GLYPH BASIC — the guest channel":
+
+  test "a GLYPH QUERY line comes back as the ids it matched":
+    ## The host's end of the channel: the guest sends the line, and the
+    ## answer is the ids — the same rows the host client would have got.
+    let db = freshDb()
+    check channelAnswer(db, "gq find Person") == "1,2"
+    close(db)
+
+  test "the labels come back one per line":
+    let db = freshDb()
+    check channelAnswer(db, "gq labels") == "Person\rCompany"
+    close(db)
+
+  test "a node's properties and edges come back as text":
+    ## The shape the guest's `show` prints: the label and the
+    ## properties, one per line, the value after the first space.
+    let db = freshDb()
+    let props = channelAnswer(db, "props 1")
+    check "label Person" in props
+    check "name Ana" in props
+    check "age 34" in props
+    let edges = channelAnswer(db, "edges 1")
+    check "KNOWS > 2" in edges
+    close(db)
+
+  test "a link comes back as the new edge's id":
+    let db = freshDb()
+    let answer = channelAnswer(db, "link 1 KNOWS 3")
+    check parseInt(answer) > 0
+    close(db)
+
+  test "a refusal comes back as a refusal, and says why":
+    ## The guest's whole job is to show what it was told: a refusal it
+    ## cannot see is a refusal the child never learns about.
+    let db = freshDb()
+    let answer = channelAnswer(db, "gq find nosuchlabel")
+    check answer == ""
+    let bad = channelAnswer(db, "gq nosuchcommand")
+    check bad.startsWith("!")
+    check "nosuchcommand" in bad
+    close(db)
+
+  test "a value travels as a parameter, never as text":
+    ## The channel is a door like any other: the guest's values are
+    ## parameters, so the compiled text is the same whatever they are.
+    let db = freshDb()
+    let answer = channelAnswer(db, "gq find Person where name = $who\twho=\"Ana\"")
+    check answer == "1"
     close(db)

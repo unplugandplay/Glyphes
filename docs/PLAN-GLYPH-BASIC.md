@@ -142,6 +142,37 @@ The second implementation, and the reason pin GB9 exists. Its plan:
 | **E3** | the grammar | the same statements, in Z80 assembly — the interpreter's *other* half |
 | **E4** | the transcript | **the same transcript as the host client**, byte for byte (GB-F) ✓ |
 
+**What E1 and E2 are, as shipped.** The channel is three ports: the
+guest writes a request to port 3 and ends it with CR; the host answers;
+the guest reads the answer from port 4 after polling port 5. The
+*request* is one line, so one CR ends it; the *answer* is a run of
+lines, so it ends with an empty one — a guest that cannot tell where
+an answer stops is a guest that will print the next answer's first
+byte as part of this one.
+
+The host's end is `src/gbasic_channel.nim`, and its vocabulary is
+deliberately small — the guest has to *parse* the answers, and a guest
+that parses JSON is a guest that needs a JSON parser in 3 KB of
+assembly:
+
+| request | answer |
+|---|---|
+| `gq <line>` | the ids it matched, comma-separated |
+| `props <id>` | the label, then `key value` per property |
+| `edges <id>` | `TYPE dir other` per edge |
+| `link <a> <t> <b>` | the new edge's id |
+
+A `gq` request may carry parameters after a TAB, as `name=value`
+fields: the guest's names hold node ids, and a value is a parameter on
+this side of the channel just as it is on every other side (pin GQ4).
+An answer that begins with `!` is a refusal, and the rest is the
+message — the guest's whole job is to show what it was told, and a
+refusal it cannot see is a refusal the child never learns about.
+
+**The guest sends GLYPH QUERY, not Cypher** ✓ — so the guest needs no
+Cypher compiler, and the host compiles ✓ (which is the point ✓: the
+language is small enough to *send*, and the engine's is not).
+
 **E3 is where the size of the language is proved.** If the grammar
 cannot be written in 3 KB of Z80 assembly, it is too big, and the host
 client has taught us that by being too big. That is the honest use of

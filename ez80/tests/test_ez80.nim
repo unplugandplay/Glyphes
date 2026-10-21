@@ -14,6 +14,10 @@
 
 import std/[unittest, strutils, os]
 import ../ez80
+import ../../src/abi
+import ../../src/database
+import ../../src/txn/txn
+import ../../src/gbasic_channel
 
 const
   ## The Z80 transcript of the BASIC demo, captured from the Z80 emulator
@@ -296,3 +300,90 @@ suite "the interrupts":
     check (z.sp and 0xFFFF) == 0xFFFD               ## the stack moved
     check z.mem[0xFFFD] == 0x01                     ## and the NOP's address
                                                     ## is on it
+
+
+suite "the port channel — the guest's way of asking the host":
+
+  test "the guest sends a request and the host's answer comes back":
+    ## The channel in one test: the guest writes a request to port 3,
+    ## the host answers, the guest reads the answer from port 4 and
+    ## shows it. The host's answer is the *host's* — the guest knows
+    ## nothing about what it means.
+    let here = currentSourcePath().parentDir.parentDir
+    let bin = readFile(here / "channel.bin")
+    var z: EZ80
+    z.reset(0)
+    for i, c in bin:
+      z.mem[i] = c.uint8
+    var seen = ""
+    z.chanHandler = proc(request: string): string =
+      seen = request
+      "Person,Company"
+    discard z.run(1_000_000)
+    check seen == "labels"
+    ## The reply's last line has no CR of its own: the CR that ends it
+    ## is the empty line that ends the answer, and the guest consumes
+    ## it.
+    check z.outBuf == "Person,Company"
+
+  test "the request is not on the console":
+    ## The transcript is the transcript: a request echoed into it would
+    ## be a lie about what the guest said.
+    let here = currentSourcePath().parentDir.parentDir
+    let bin = readFile(here / "channel.bin")
+    var z: EZ80
+    z.reset(0)
+    for i, c in bin:
+      z.mem[i] = c.uint8
+    z.chanHandler = proc(request: string): string = "ok"
+    discard z.run(1_000_000)
+    check "labels" notin z.outBuf
+
+  test "the host is asked only when the request is finished":
+    ## A request that has not ended with CR is not a request yet: the
+    ## handler is called from the guest's poll, and the poll is what
+    ## decides the exchange is ready.
+    let here = currentSourcePath().parentDir.parentDir
+    let bin = readFile(here / "channel.bin")
+    var z: EZ80
+    z.reset(0)
+    for i, c in bin:
+      z.mem[i] = c.uint8
+    var calls = 0
+    z.chanHandler = proc(request: string): string =
+      inc calls
+      "ok"
+    discard z.run(1_000_000)
+    ## One request, one answer — the guest polls, and the poll after the
+    ## answer finds the queue empty and does not ask again.
+    check calls == 1
+
+suite "the port channel — the guest and the real host":
+
+  test "the guest asks the real host, and the answer is the graph's":
+    ## The two halves meet: the guest sends a GLYPH QUERY line over the
+    ## channel, the host compiles it and runs it against a real graph,
+    ## and the answer comes back through the same channel.
+    ##
+    ## This is the whole of the transport (PLAN-GLYPH-BASIC.md §5, E2):
+    ## the guest needs no compiler, because the host has one.
+    let path = "tmp" / "ez80-channel.glyph"
+    removeFile(path)
+    removeFile(path & "-wal")
+    let db = openDatabase(path, GLY_OPEN_CREATE)
+    let tx = db.beginTransaction()
+    discard tx.createNode("Person")
+    discard tx.createNode("Company")
+    discard db.commitTransaction(tx)
+
+    let here = currentSourcePath().parentDir.parentDir
+    let bin = readFile(here / "channel.bin")
+    var z: EZ80
+    z.reset(0)
+    for i, c in bin:
+      z.mem[i] = c.uint8
+    z.chanHandler = proc(request: string): string = channelAnswer(db, request)
+    discard z.run(1_000_000)
+    check z.outBuf == "Person\rCompany"
+    close(db)
+

@@ -1,0 +1,68 @@
+; ------------------------------------------------------------------------
+; channel.z80 — the eZ80 guest's side of the port channel.
+;
+; The channel is the guest's way of asking the host something it cannot
+; do itself. The guest writes bytes to port 3 and ends the request with
+; CR (13); the host answers, and the guest reads the answer from port 4
+; after polling port 5 (1 = a byte is ready).
+;
+; This program is the whole discipline in a page: it sends one request,
+; waits for the answer, echoes it to the console, and halts. It is the
+; smallest thing that proves the channel works — and the thing the
+; GLYPH BASIC guest will be built on.
+;
+; Assemble:  nim c -r ez80/ez80asm.nim -- ez80/channel.z80 ez80/channel.bin
+; ------------------------------------------------------------------------
+
+CR      EQU 13
+PENDING EQU 0x0100          ; one byte of state: the byte after a CR
+
+        ORG 0
+
+; ---- startup: send the request, wait for the answer, echo it --------
+START:
+        LD HL,REQUEST
+SEND:
+        LD A,(HL)
+        OR A                  ; a zero byte ends the string
+        JR Z,SENT
+        OUT (3),A
+        INC HL
+        JR SEND
+SENT:
+        LD A,CR
+        OUT (3),A             ; the request is finished: the host may answer
+
+WAIT:
+        IN A,(5)              ; is there a byte?
+        OR A
+        JR Z,WAIT             ; no: ask again
+        IN A,(4)              ; yes: take it
+        CP CR
+        JR NZ,SHOW            ; an ordinary byte: show it
+        ; A CR: the byte after it decides whether the answer is over.
+        ; An answer is a run of lines, and it ends with an empty one.
+NEXT:
+        IN A,(5)
+        OR A
+        JR Z,NEXT             ; no byte yet: ask again
+        IN A,(4)
+        CP CR
+        JR Z,DONE             ; an empty line: the answer is over
+        LD (PENDING),A        ; a real byte: keep it for the next round
+        LD A,CR
+        OUT (1),A             ; show the line's end
+        LD A,(PENDING)
+SHOW:
+        OUT (1),A             ; show it
+        JR WAIT
+DONE:
+        HALT
+
+; ---- the request ------------------------------------------------------
+; The text is a GLYPH QUERY line. For this program it is a label the
+; host knows how to answer; the real guest sends the client's own
+; statements, and the host compiles them (PLAN-GLYPH-BASIC.md §5).
+REQUEST:
+        DB "labels"
+        DB 0
