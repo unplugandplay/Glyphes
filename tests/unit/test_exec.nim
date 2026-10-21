@@ -1325,3 +1325,67 @@ suite "M6.4 shortest paths":
     if e != nil:
       check e.code == int32(glyErrSql)
       check "maxDepth" in e.msg
+
+
+suite "M6.5 DATE":
+  ## The first of X5's value types: a calendar date as a count of days
+  ## since 1970-01-01, proleptic Gregorian, no timezone. It compares, it
+  ## has a name, and it stores — the three things a type has to do before
+  ## the next one is worth adding.
+
+  test "a date is a type, not a string":
+    let s = seedStore()
+    check plain(column(run(s, "RETURN typeof(date('2026-10-21')) AS t"), "t")) ==
+          @["DATE"]
+
+  test "it compares as a date":
+    let s = seedStore()
+    check plain(column(run(s, "RETURN date('2026-10-21') = date('2026-10-21') AS b"), "b")) ==
+          @["true"]
+    check plain(column(run(s, "RETURN date('2026-10-21') < date('2026-10-22') AS b"), "b")) ==
+          @["true"]
+    check plain(column(run(s, "RETURN date('2026-10-21') = '2026-10-21' AS b"), "b")) ==
+          @["false"]
+
+  test "it renders in the standard's spelling":
+    let s = seedStore()
+    for text in ["1970-01-01", "2000-02-29", "2026-10-21", "0001-01-01"]:
+      check plain(column(run(s, "RETURN toString(date('" & text & "')) AS s"), "s")) ==
+            @[text]
+
+  test "a date that does not come back the same is refused":
+    ## 2026-02-30 normalised silently to March 2nd would be a wrong
+    ## answer dressed as a date.
+    let s = seedStore()
+    for text in ["2026-02-30", "2026-13-01", "2026-1-1", "not a date"]:
+      var e: CypherError
+      try:
+        discard run(s, "RETURN date('" & text & "') AS d")
+      except CypherError as err:
+        e = err
+      if e == nil:
+        echo "  accepted: ", text
+      check e != nil
+      if e != nil:
+        check e.code == int32(glyErrSql)
+
+  test "null and a wrong type are answered, not guessed":
+    let s = seedStore()
+    check plain(column(run(s, "RETURN date(null) AS d"), "d")) == @["null"]
+    var e: CypherError
+    try:
+      discard run(s, "RETURN date(1) AS d")
+    except CypherError as err:
+      e = err
+    check e != nil and "not INTEGER" in e.msg
+
+  test "a date sorts with the dates":
+    let s = newStore()
+    for text in ["2026-10-21", "1970-01-01", "2000-02-29"]:
+      var days: int64
+      doAssert parseDateText(text, days)
+      let n = s.createNode("D")
+      discard s.setNodeProp(n, "when", Value(kind: vkDate, d: days))
+    check plain(column(run(s, """
+      MATCH (n:D) RETURN toString(n.when) AS d ORDER BY n.when"""), "d")) ==
+      @["1970-01-01", "2000-02-29", "2026-10-21"]

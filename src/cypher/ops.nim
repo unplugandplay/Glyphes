@@ -1843,6 +1843,10 @@ proc valueKey(ctx: QueryCtx, v: Value): string =
     result = "N" & $v.id
   of vkEdge:
     result = "E" & $v.id
+  of vkDate:
+    ## Its own prefix: a date and an integer holding the same day count
+    ## are different types (pin C17), so they must not collide here.
+    result = "d" & $v.d
   of vkPath:
     result = "p" & $v.path.nodes.len
     for id in v.path.nodes: result.add "N" & $id & ','
@@ -1880,6 +1884,12 @@ proc cmpValues(ctx: QueryCtx, a, b: Value): int =
     return cmp(a.b, b.b)
   if a.kind in {vkNode, vkEdge} and b.kind in {vkNode, vkEdge}:
     return cmp(a.id, b.id)
+  if a.kind == vkDate and b.kind == vkDate:
+    ## The ORDER BY twin of compareValues' date arm; the two comparators
+    ## have been separate since the sort needed a total order over mixed
+    ## kinds and the expression layer needed "not comparable" to mean
+    ## null. A type must be added to both.
+    return cmp(a.d, b.d)
   ## Mixed kinds: order by the tag so the sort is stable and total. A
   ## different tie-break here would be a different documented behaviour.
   cmp(ord(a.kind), ord(b.kind))

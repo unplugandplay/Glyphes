@@ -69,7 +69,8 @@ typedef uintptr_t GlyHandle;  /* opaque; 0 is never valid             */
 typedef enum {
   GLY_NULL = 0, GLY_BOOL, GLY_INT, GLY_FLOAT,
   GLY_STRING, GLY_BYTES, GLY_VECTOR, GLY_NODE, GLY_EDGE,
-  GLY_PATH, GLY_LIST, GLY_MAP, GLY_NULL_TYPE
+  GLY_PATH, GLY_LIST, GLY_MAP, GLY_NULL_TYPE,
+  GLY_DATE = 13   /* days since 1970-01-01, in aux (M6.5) */
 } GlyType;
 
 /* Write-only from the host: the engine fills these, the host reads

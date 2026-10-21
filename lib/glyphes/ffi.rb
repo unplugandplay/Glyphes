@@ -183,6 +183,7 @@ module Glyphes
     GLY_PATH   = 9
     GLY_LIST   = 10
     GLY_MAP    = 11
+    GLY_DATE   = 13   # days since 1970-01-01, in aux
 
     # ---- open modes, from GlyOpenMode ----------------------------
 

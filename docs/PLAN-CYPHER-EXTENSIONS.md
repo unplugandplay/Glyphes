@@ -22,7 +22,7 @@ gate.
 | **X2** | graph-pattern predicates — **landed** | a filter over the adjacency the engine already has |
 | **X3** | the type discipline — **landed** | a *foundation*: a date is a type, and there is no point adding types before the types are named and checked |
 | **X4** | shortest-path functions — **landed** | a traversal with a real cost, and it must be measured before it is offered |
-| **X5** | temporal/spatial types | the largest: new value kinds, new literals, new functions, new storage |
+| **X5** | temporal/spatial types — **X5a landed (DATE)** | the largest: new value kinds, new literals, new functions, new storage |
 
 X3 sits in the middle rather than the start because it touches every
 operator, and touching every operator before anything else exists makes
@@ -266,6 +266,28 @@ and published, because a construct whose cost is unbounded is a
 construct that belongs in a report rather than in a prompt.
 
 ---
+
+## 6. X5 — temporal and spatial types — X5a landed (M6.5)
+
+`DATE` is in, end to end: the value kind (a count of days since
+1970-01-01), the codec's tag (`GLY_DATE` in the store and the ABI), the
+comparisons (both of them — the expression layer's and ORDER BY's), the
+`date()` and `toString()` functions, the round trip through a reopen, and
+the refusals by name (`date('2026-02-30')` is not a date).
+
+What it cost, measured in edits rather than hours: six `case` arms in the
+value model and the codec, two comparators, one ABI tag, one Ruby
+constant. Which is the point of X3: a new type is a case in a table, not
+a string in every operator.
+
+**Still to come in X5:** `datetime`, `time`, `local datetime`,
+`local time`, `duration`; the date's `year`/`month`/`day`; arithmetic
+between temporal values; and the spatial types (`POINT`, and whether
+`LINE`/`POLYGON` are worth it — they are Neo4j extensions, not
+openCypher). The ABI crosses a date as `GLY_DATE` with the day count in
+the cell's payload; a Ruby `Date` class is the next Ruby-side step.
+
+The original section follows:
 
 ## 6. X5 — temporal and spatial types
 

@@ -65,6 +65,7 @@ proc typeName*(v: Value): string =
   of vkNode: "NODE"
   of vkEdge: "RELATIONSHIP"
   of vkPath: "PATH"
+  of vkDate: "DATE"
 
 proc typeOfValue*(ctx: QueryCtx; v: Value): string =
   ## `typeof()`'s answer. A node's **label** is its type and a
@@ -149,6 +150,8 @@ proc compareValues(a, b: Value): (int, bool) =
     discard numOf(b, y)
     let ord = (if x < y: -1 elif x > y: 1 else: 0)
     return (ord, true)
+  if a.kind == vkDate and b.kind == vkDate:
+    return (cmp(a.d, b.d), true)
   if a.kind in {vkString, vkBytes} and b.kind in {vkString, vkBytes}:
     return (cmp(a.s, b.s), true)
   if a.kind == vkBool and b.kind == vkBool:
@@ -164,6 +167,7 @@ proc toCypherString(v: Value): string =
   of vkInt: $v.i
   of vkFloat: $v.f
   of vkString, vkBytes: v.s
+  of vkDate: dateText(v.d)
   else: ""
 
 proc logicFail(op: string, l, r: Value) {.noreturn.} =
@@ -198,6 +202,7 @@ proc eqValues*(a, b: Value): Value =
       Value(kind: vkBool, b: a.f == b.f)
   of vkBool: Value(kind: vkBool, b: a.b == b.b)
   of vkString, vkBytes: Value(kind: vkBool, b: a.s == b.s)
+  of vkDate: Value(kind: vkBool, b: a.d == b.d)
   of vkList:
     if a.items.len != b.items.len:
       return Value(kind: vkBool, b: false)
@@ -518,7 +523,7 @@ proc callFunc(e: Eval, name: string, args: seq[Value]): Value {.gcsafe.} =
     let v = args[0]
     if v.kind == vkNull:
       Value(kind: vkNull)
-    elif v.kind in {vkBool, vkInt, vkFloat, vkString, vkBytes}:
+    elif v.kind in {vkBool, vkInt, vkFloat, vkString, vkBytes, vkDate}:
       Value(kind: vkString, s: toCypherString(v))
     elif v.kind == vkNode:
       Value(kind: vkString, s: "node " & $v.id)
@@ -640,6 +645,23 @@ proc callFunc(e: Eval, name: string, args: seq[Value]): Value {.gcsafe.} =
     if args[0].kind != vkString:
       return Value(kind: vkNull)
     Value(kind: vkString, s: args[0].s.strip())
+  of "date":
+    ## `date('2026-10-21')`. One string in, one date out; `date(null)` is
+    ## null, and a date passed in comes back unchanged, so `date(x)` is
+    ## idempotent the way the standard's cast is.
+    if n != 1: cypherFail(int32(glyErrSql), "date() takes one argument")
+    if args[0].kind == vkNull:
+      return Value(kind: vkNull)
+    if args[0].kind == vkDate:
+      return args[0]
+    if args[0].kind != vkString:
+      cypherFail(int32(glyErrSql),
+        "date() needs a 'YYYY-MM-DD' string, not " & typeName(args[0]))
+    var days: int64
+    if not parseDateText(args[0].s, days):
+      cypherFail(int32(glyErrSql),
+        "date(): '" & args[0].s & "' is not a YYYY-MM-DD date")
+    Value(kind: vkDate, d: days)
   of "typeof":
     if n != 1: cypherFail(int32(glyErrSql), "typeof() takes one argument")
     Value(kind: vkString, s: typeOfValue(e.ctx, args[0]))
@@ -1102,6 +1124,11 @@ proc valueJson*(v: Value): string =
     result = quoteJson(v.s)
   of vkNode, vkEdge:
     result = $v.id
+  of vkDate:
+    ## The standard's spelling, as a JSON string: a date is not a number,
+    ## and a conformance row that rendered it as one would be testing the
+    ## wrong thing.
+    result = quoteJson(dateText(v.d))
   of vkList:
     result = "["
     for i, item in v.items:

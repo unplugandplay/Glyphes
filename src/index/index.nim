@@ -201,6 +201,7 @@ proc valueText(v: Value): string =
   of vkInt: $v.i
   of vkFloat: $v.f
   of vkString, vkBytes: "'" & v.s & "'"
+  of vkDate: "'" & dateText(v.d) & "'"
   else: "<value>"
 
 proc valueKindName(k: ValueKind): string =
@@ -217,6 +218,7 @@ proc valueKindName(k: ValueKind): string =
   of vkNode: "a node"
   of vkEdge: "an edge"
   of vkPath: "a path"
+  of vkDate: "a date"
 
 proc failConstraint(def: IndexDef, detail: string) {.noreturn.} =
   ## TXN.md §5: a violation reports the offending value and the conflicting

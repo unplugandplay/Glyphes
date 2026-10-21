@@ -398,6 +398,12 @@ proc toCell(v: Value, texts: var seq[string]): GlyCell =
     result.aux = cast[uint64](v.i)
   of vkFloat:
     result.aux = cast[uint64](v.f)
+  of vkDate:
+    ## A DATE crosses as its own tag with the day count in `aux` — the
+    ## pin C19 rule that a value crosses without becoming text. The Ruby
+    ## binding reads an unknown tag's `aux` as an integer, so a host gets
+    ## the count until a `Date` class lands with the rest of X5.
+    result.aux = cast[uint64](v.d)
   of vkString, vkBytes:
     texts.add v.s
     let s = addr texts[^1]

@@ -311,6 +311,7 @@ which is why it produces two rows per edge.
 | `startsWith`, `endsWith`, `contains`, `=~` | `=~` is bytewise |
 | `nodes`, `edges`, `relationships` | present for §2.6's path value and return an empty list while paths are refused — a named shape rather than an "unknown function", so a query written for the full surface fails on the *semantics* and not on the spelling |
 | `range(a, b)` / `range(a, b, step)` | inclusive at both ends; with no step the range runs *toward* the end, so `range(3, 1)` is `[3, 2, 1]`. Capped at 10⁷ elements because the list is materialised |
+| `date(s)` | a `YYYY-MM-DD` string to a date (§6.3); invalid input is refused by name |
 | `shortestPath(a, b [, type [, maxDepth]])` | the path between two nodes (§2.7.1) |
 | `shortestPathLength(a, b [, type [, maxDepth]])` | its length in hops |
 | aggregates | §2.8 |
@@ -738,10 +739,13 @@ the three reference kinds, so that a row can bind a node, a relationship or
 a path without a conversion at every literal and every property read:
 
 ```
-null  bool  int (i64)  float (f64)  string  bytes  vector<f32>  list  map
+null  bool  int (i64)  float (f64)  string  bytes  vector<f32>  list  map  date
                                                         ├── the reference kinds
                                                         node  relationship  path
 ```
+
+`date` is the first of the temporal types (§6.3); the spatial types are
+planned (X5) and not here.
 
 A node or relationship cannot become a property: `setProp` and the blob
 codec reject them, so they never reach the snapshot and adding them changed
@@ -766,6 +770,7 @@ answers with them, and a refusal uses the same words.
 | node | **its label** (pin C13: one label per node), or `NODE` when it has none |
 | relationship | **its type name**, or `RELATIONSHIP` when it cannot be read |
 | path | `PATH` |
+| date | `DATE` |
 
 **C17: every operator names the types it accepts and refuses the rest by
 name.** One table, and the refusal messages are generated from it:
@@ -798,6 +803,32 @@ a value that is never evaluated cannot be type-checked.
 must not refuse what it can: equality across kinds is `false` (C8), `int`
 and `float` order (C8), `null` propagates (C6), and `+` concatenates a
 string with anything.
+
+### 6.3 `DATE` (M6.5)
+
+```
+date('2026-10-21')              -- a calendar date
+date('2026-10-21') < date('2026-10-22')     -- true
+toString(date('2026-10-21'))    -- '2026-10-21'
+date(null)                      -- null
+```
+
+A **count of days since 1970-01-01**, proleptic Gregorian, no timezone and
+no leap seconds: the standard's `DATE` is a calendar date, and a count of
+days is the smallest thing that compares and stores. It has its own tag in
+the store (`GLY_DATE`, the day count in the cell's payload), so a date
+never becomes text — pin C19.
+
+`date('2026-02-30')` is **refused by name**. The validation is the round
+trip: a date that does not come back the same is not a date, and
+normalising it silently to March 2nd would be a wrong answer dressed as a
+date.
+
+What is *not* here yet: `datetime`, `time`, `duration`, the date's
+`year`/`month`/`day` accessors, and date arithmetic. They are X5's next
+stages, and they are the reason `date` came first: a second type is a
+case in `typeName`, the codec and the two comparators; the *arithmetic*
+between two temporal types is the work.
 
 **Functions are not operators.** A reading function given a wrong-typed
 argument answers `null` where openCypher says it does (`toUpper(1)`), and

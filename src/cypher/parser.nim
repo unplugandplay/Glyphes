@@ -1064,6 +1064,7 @@ proc render*(e: Expr): string =
     of vkInt: $e.lit.i
     of vkFloat: $e.lit.f
     of vkString, vkBytes: "'" & e.lit.s & "'"
+    of vkDate: "date('" & dateText(e.lit.d) & "')"
     of vkVector: "vector[" & $e.lit.dims.len & "]"
     of vkList: "[" & $e.lit.items.len & " elements]"
     of vkMap: "{" & $e.pairs.len & " keys}"

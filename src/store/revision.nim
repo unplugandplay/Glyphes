@@ -139,6 +139,7 @@ proc sameValue(a, b: Value): bool =
   of vkInt: a.i == b.i
   of vkFloat: a.f == b.f or (isNaN(a.f) and isNaN(b.f))
   of vkString, vkBytes: a.s == b.s
+  of vkDate: a.d == b.d
   of vkVector:
     ## Length first: a 768-dim compare is 3 KB of every call, and most
     ## comparisons are between a changed node and itself.

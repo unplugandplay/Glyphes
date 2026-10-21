@@ -124,6 +124,8 @@ proc writeValue(f: File, v: Value) =
       writeValue(f, item)
   of vkNode, vkEdge:
     writeUvarint(f, cast[uint64](v.id))
+  of vkDate:
+    writeU64(f, cast[uint64](v.d))
   of vkPath:
     writeUvarint(f, uint64(v.path.nodes.len))
     for id in v.path.nodes:
@@ -151,6 +153,8 @@ proc readValue(f: File, v: var Value, path: string) =
     v.i = cast[int64](n)
   of vkFloat:
     v.f = cast[float64](readU64(f))
+  of vkDate:
+    v.d = cast[int64](readU64(f))
   of vkString, vkBytes:
     var n = 0'u64
     readUvarint(f, n)

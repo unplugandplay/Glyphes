@@ -969,3 +969,29 @@ suite "M5.9 the type discipline — a node the transaction made":
     st.close()
     check got == "Widget"
     discard f.tx.rollback()
+
+
+suite "M6.5 DATE — the round trip":
+  test "a date survives a reopen":
+    ## The type is only a type if the store gives it back: the codec has
+    ## a tag for it, and the snapshot keeps the day count.
+    let path = "tmp" / "date-durable.glyph"
+    removeFile(path)
+    removeFile(path & "-wal")
+    let db = openDatabase(path, GLY_OPEN_CREATE)
+    let tx = db.beginTransaction()
+    let n = tx.createNode("D")
+    var days: int64
+    doAssert parseDateText("2026-10-21", days)
+    discard tx.setNodeProp(n, "when", Value(kind: vkDate, d: days))
+    discard db.commitTransaction(tx)
+    close(db)
+
+    let db2 = openDatabase(path, 0)
+    let st = prepare(db2.store, "MATCH (n:D) RETURN n.when AS w")
+    defer: st.close()
+    let rows = st.collectRows()
+    check rows.len == 1
+    let (_, v) = rows[0].lookup("w")
+    check v.kind == vkDate and v.d == days
+    close(db2)

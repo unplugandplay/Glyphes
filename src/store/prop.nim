@@ -14,6 +14,7 @@
 ## `GlyType` ordinal, so there is one value vocabulary across the store,
 ## the ABI, and the snapshot rather than three that must agree.
 
+import std/strutils
 import ./arena
 
 type
@@ -38,7 +39,8 @@ type
     ## adding them changed no stored bytes and no pin.
     vkNull, vkBool, vkInt, vkFloat, vkString, vkBytes,
     vkVector, vkList, vkMap,
-    vkNode, vkEdge, vkPath
+    vkNode, vkEdge, vkPath,
+    vkDate
 
   Value* = object
     case kind*: ValueKind
@@ -52,6 +54,11 @@ type
     of vkMap: pairs*: seq[(string, Value)]
     of vkNode, vkEdge: id*: int64
     of vkPath: path*: PathVal
+    of vkDate:
+      ## Days since 1970-01-01, proleptic Gregorian, no timezone and no
+      ## leap seconds — the standard's DATE is a calendar date, and a
+      ## count of days is the smallest thing that compares and stores.
+      d*: int64
 
   PathVal* = object
     ## A GLY_PATH payload (CYPHER.md §2.6): node ids, edge ids and one
@@ -100,6 +107,8 @@ const
   glyPath* = GlyType(9'u8)
   glyList* = GlyType(10'u8)
   glyMap* = GlyType(11'u8)
+  ## 12 is GLY_NULL_TYPE, the header's sentinel; the date takes the next.
+  glyDate* = GlyType(13'u8)
 
 const
   SlotNull* = 1'u8
@@ -138,6 +147,7 @@ proc propType*(k: ValueKind): GlyType {.inline.} =
   of vkNode: glyNode
   of vkEdge: glyEdge
   of vkPath: glyPath
+  of vkDate: glyDate
 
 proc typeName(t: GlyType): string {.inline.} =
   case t
@@ -234,6 +244,8 @@ proc encode*(b: var Blob, v: Value) {.gcsafe.} =
       b.putUvarint(uint64(k.len))
       if k.len > 0: b.putStr(k)
       b.encode(val)
+  of vkDate:
+    b.putI64(v.d)
 
 type
   Reader = object
@@ -319,6 +331,8 @@ proc decode(r: var Reader): Value {.gcsafe.} =
     var dims = newSeq[float32](n)
     for i in 0 ..< n: dims[i] = r.getF32()
     Value(kind: vkVector, dims: dims)
+  of glyDate:
+    Value(kind: vkDate, d: cast[int64](r.getF64()))
   of glyList:
     let n = int(r.getUvarint())
     var items = newSeq[Value](n)
@@ -364,7 +378,7 @@ proc fitsInline*(v: Value): bool {.gcsafe.} =
   ## matter how small, because an inline container would need its own
   ## header and the payload is already full.
   case v.kind
-  of vkNull, vkBool, vkInt, vkFloat: true
+  of vkNull, vkBool, vkInt, vkFloat, vkDate: true
   of vkString, vkBytes: v.s.len <= InlinePayload
   else: false
 
@@ -395,6 +409,9 @@ proc packInline*(slot: var PropSlot, v: Value) {.gcsafe.} =
   of vkFloat:
     slot.payload = cast[uint64](v.f)
     slot.aux = 0
+  of vkDate:
+    slot.payload = cast[uint64](v.d)
+    slot.aux = 0
   of vkString, vkBytes:
     ## Left-aligned: the length is in aux, so short strings pack into the
     ## payload with no terminator and no header.
@@ -414,6 +431,7 @@ proc unpackInline*(slot: PropSlot): Value {.gcsafe.} =
   of glyBool: Value(kind: vkBool, b: slot.payload != 0'u64)
   of glyInt: Value(kind: vkInt, i: cast[int64](slot.payload))
   of glyFloat: Value(kind: vkFloat, f: cast[float64](slot.payload))
+  of glyDate: Value(kind: vkDate, d: cast[int64](slot.payload))
   of glyString, glyBytes:
     let n = int(slot.aux)
     if n > InlinePayload:
@@ -647,3 +665,70 @@ proc clearProps*(a: var Arena, pv: var PropView) {.gcsafe.} =
   pv.count = 0
 
 proc propCount*(pv: PropView): int {.inline.} = pv.count.int
+
+
+# ---------------------------------------------------------------- dates
+#
+# A DATE is a count of days since 1970-01-01 in the proleptic Gregorian
+# calendar — no timezone, no leap-second table, because the standard's
+# DATE is a calendar date and a count of days is the smallest thing that
+# compares and stores. The two conversions are Howard Hinnant's
+# `days_from_civil` / `civil_from_days`, which are exact for every year
+# the contract allows.
+
+proc daysFromCivil*(y, m, d: int): int64 =
+  let yy = (if m <= 2: y - 1 else: y)
+  let era = (if yy >= 0: yy else: yy - 399) div 400
+  let yoe = yy - era * 400
+  let mp = (if m > 2: m - 3 else: m + 9)
+  let doy = (153 * mp + 2) div 5 + d - 1
+  let doe = yoe * 365 + yoe div 4 - yoe div 100 + doy
+  int64(era * 146097 + doe - 719468)
+
+proc civilOf*(days: int64): (int, int, int) =
+  let z = int(days) + 719468
+  let era = (if z >= 0: z else: z - 146096) div 146097
+  let doe = z - era * 146097
+  let yoe = (doe - doe div 1460 + doe div 36524 - doe div 146096) div 365
+  let y = yoe + era * 400
+  let doy = doe - (365 * yoe + yoe div 4 - yoe div 100)
+  let mp = (5 * doy + 2) div 153
+  let d = doy - (153 * mp + 2) div 5 + 1
+  let m = (if mp < 10: mp + 3 else: mp - 9)
+  ((if m <= 2: y + 1 else: y), m, d)
+
+proc dateText*(days: int64): string =
+  ## `YYYY-MM-DD`, the standard's spelling. Outside years 0000–9999 the
+  ## contract has no spelling, so it renders as a dash rather than a lie.
+  let (y, m, d) = civilOf(days)
+  if y < 0 or y > 9999:
+    return "-"
+  result = $y
+  while result.len < 4: result = "0" & result
+  result.add "-"
+  if m < 10: result.add "0"
+  result.add $m
+  result.add "-"
+  if d < 10: result.add "0"
+  result.add $d
+
+proc parseDateText*(text: string; days: var int64): bool =
+  ## `YYYY-MM-DD`. The validation is the round trip: a date that does not
+  ## come back the same — 2026-02-30, 2026-13-01 — is not a date, and
+  ## parsing it would be a silent normalisation into a different day.
+  if text.len != 10 or text[4] != '-' or text[7] != '-':
+    return false
+  var y, m, d: int
+  try:
+    y = parseInt(text[0 .. 3])
+    m = parseInt(text[5 .. 6])
+    d = parseInt(text[8 .. 9])
+  except ValueError:
+    return false
+  if m < 1 or m > 12 or d < 1 or d > 31:
+    return false
+  let value = daysFromCivil(y, m, d)
+  if civilOf(value) != (y, m, d):
+    return false
+  days = value
+  true

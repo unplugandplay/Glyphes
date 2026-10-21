@@ -27,13 +27,15 @@ deliberate refusals rather than failures):
 - `UNWIND`
 - multiple statements in one call
 
-**Not implemented:** subqueries, `EXISTS { … }` subqueries,
+**Not implemented:** subqueries, `EXISTS { … }` subqueries, most of the
 temporal/spatial types, and multi-database.
 
-One of those is *planned*, with the syntax, the semantics, the pins and
-the order written down in
-[`docs/PLAN-CYPHER-EXTENSIONS.md`](docs/PLAN-CYPHER-EXTENSIONS.md): the
-temporal/spatial types.
+One type has landed: `DATE` at M6.5 (CYPHER.md §6.3) — a count of days
+since 1970-01-01 with its own tag in the store, so it compares as a date,
+sorts as a date, and never becomes text. `datetime`, `time`, `duration`,
+the date accessors, date arithmetic and the spatial types are *planned*,
+with the stages written down in
+[`docs/PLAN-CYPHER-EXTENSIONS.md`](docs/PLAN-CYPHER-EXTENSIONS.md) (X5).
 
 Three of the five have landed. `FOREACH` at M5.7 (CYPHER.md §3.6). The
 graph-pattern predicates at M5.8 (§2.3) — the *filter* form, over

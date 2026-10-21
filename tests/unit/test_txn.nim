@@ -43,6 +43,7 @@ proc renderValue(v: Value): string =
   of vkNode: "node" & $v.id
   of vkEdge: "edge" & $v.id
   of vkPath: "path" & $v.path.nodes.len
+  of vkDate: "date" & $v.d
 
 proc stateHash(s: GraphStore): string =
   ## Every live record and property, in id order (TXN.md T3's oracle).
