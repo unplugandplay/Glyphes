@@ -190,6 +190,70 @@ module Glyphes
       }
     end
 
+    # ---- GLYPH QUERY: the surface a child types --------------------
+    #
+    # A GLYPH QUERY line is compiled by the engine and runs as a
+    # statement — the same statement a Cypher query produces (ABI.md
+    # B11), so the rows come back the same way.
+
+    # Compiles a GLYPH QUERY line *without running it*. Returns
+    # [cypher, params_json] — "what will run" and "with what".
+    def gq_compile(line, params = {})
+      args = JSON.generate(params)
+      out_len = FFI::MemoryPointer.new(:uint64)
+      p_len = FFI::MemoryPointer.new(:uint64)
+      # The cap protocol (ABI.md §7): ask with no buffer, get the
+      # lengths, ask again with buffers of that size. GLY_MORE is the
+      # answer to "the buffer was too small", which here means "you
+      # did not give me one".
+      first = FFI::glyphes_gq_compile(line.to_s, args, nil, 0, out_len,
+                                       nil, 0, p_len)
+      Guard.check!(first == FFI::GLY_MORE ? FFI::GLY_OK : first, "gq_compile")
+      cypher = FFI::MemoryPointer.new(:char, out_len.read_uint64)
+      pjson = FFI::MemoryPointer.new(:char, p_len.read_uint64)
+      Guard.check!(FFI::glyphes_gq_compile(line.to_s, args,
+                                           cypher, out_len.read_uint64, out_len,
+                                           pjson, p_len.read_uint64, p_len),
+                   "gq_compile")
+      [cypher.read_string(out_len.read_uint64 - 1),
+       pjson.read_string(p_len.read_uint64 - 1)]
+    end
+
+    # Prepares a GLYPH QUERY line as a statement: the same `Statement` a
+    # Cypher query gives, with the same cells.
+    def gq(line, params = {})
+      raise ClosedError.new("gq: database is closed",
+                            status: FFI::GLY_ERR_CLOSED) if @closed
+      out = FFI::MemoryPointer.new(:uint64)
+      Guard.check!(FFI::glyphes_gq_prepare(@handle, line.to_s,
+                                          JSON.generate(params), out),
+                   "gq_prepare")
+      st = out.read_uint64
+      # The column names come back NUL-separated in one engine-owned
+      # block, copied here at the only point that reads it (ABI.md §7).
+      out_ptr = FFI::MemoryPointer.new(:pointer)
+      len = FFI::MemoryPointer.new(:uint64)
+      count = FFI::MemoryPointer.new(:uint32)
+      Guard.check!(FFI::glyphes_gq_columns(st, out_ptr, len, count),
+                   "gq_columns")
+      n = count.read_uint32
+      cols = []
+      if n.positive?
+        block = out_ptr.read_pointer
+        cols = block.read_string(len.read_uint64).split("\0", -1)[0...n]
+      end
+      Statement.new(st, cols, @handle, line.to_s, JSON.generate(params))
+    end
+
+    # The one write GLYPH QUERY cannot express: two *existing* nodes,
+    # one relationship. Returns the new edge's id.
+    def link(from_id, type, to_id)
+      out = FFI::MemoryPointer.new(:int64)
+      Guard.check!(FFI::glyphes_link(@handle, from_id, type.to_s, to_id, out),
+                   "link")
+      out.read_int64
+    end
+
     # ---- M4 surface: queries ---------------------------------------
 
     # Prepares a read query. Returns a `Statement`: single-use, `each_slice`

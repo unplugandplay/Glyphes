@@ -677,6 +677,17 @@ ensure
 end
 ```
 
+And the GLYPH QUERY doors, which are the same surface under the names a
+client that speaks the child's language uses:
+
+```ruby
+db.gq_compile("find Person where age > 30")
+# => ["MATCH (n:Person) WHERE n.age > 30 RETURN id(n) AS id", "{}"]
+
+st = db.gq("find Person")          # a Statement, with the same cells
+db.link(1, "KNOWS", 2)             # => the new edge's id
+```
+
 `each_slice` is the primitive, `each` is sugar over it with a fixed
 batch of 256. There is no per-row FFI path in the public API, and there
 will not be one — it would be a trap that looks fast in a microbenchmark

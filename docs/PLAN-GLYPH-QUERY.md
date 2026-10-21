@@ -203,3 +203,6 @@ costs one document ✓.
 - [ ] `docs/ABI.md` and `docs/CYPHER.md` record the new doors ✓
 - [ ] the header in `docs/ABI.md` is the *real* header (`src/glyphes.h`),
       not a copy that has drifted from it ✓
+- [ ] the Ruby side has the doors too — `db.gq_compile`, `db.gq`,
+      `db.link` — because a door that works in Nim and not in Ruby is a
+      door that only half exists ✓

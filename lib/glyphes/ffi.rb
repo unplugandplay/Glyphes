@@ -256,6 +256,23 @@ module Glyphes
     # The write door. Returns rows affected through `out_n`.
     attach_function :glyphes_exec, %i[uint64 string string pointer], :int32
 
+    # ---- GLYPH QUERY: the surface a child types --------------------
+    #
+    # A GLYPH QUERY statement *is* a Cypher statement (ABI.md B11): the
+    # same cells, the same accessors. The doors are here under their own
+    # names so that a client that knows only the child's language need
+    # not learn the engine's to read its rows.
+
+    attach_function :glyphes_gq_compile,
+                    %i[string string pointer uint64 pointer pointer uint64 pointer], :int32
+    attach_function :glyphes_gq_prepare, %i[uint64 string string pointer], :int32
+    attach_function :glyphes_gq_step, %i[uint64 pointer uint64 pointer], :int32
+    attach_function :glyphes_gq_columns, %i[uint64 pointer pointer pointer], :int32
+
+    # The one write GLYPH QUERY cannot express: two existing nodes, one
+    # relationship.
+    attach_function :glyphes_link, %i[uint64 int64 string int64 pointer], :int32
+
     attach_function :glyphes_cell_text, %i[pointer pointer uint64 pointer], :int32
     attach_function :glyphes_cell_id, %i[pointer pointer], :int32
     attach_function :glyphes_cell_len, %i[pointer pointer], :int32
