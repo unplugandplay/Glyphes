@@ -31,6 +31,19 @@ deliberate refusals rather than failures):
 pattern predicates, `EXISTS { … }` subqueries, most of the type system,
 temporal/spatial types, and multi-database.
 
+Five of those are *planned*, with the syntax, the semantics, the pins
+and the order written down in
+[`docs/PLAN-CYPHER-EXTENSIONS.md`](docs/PLAN-CYPHER-EXTENSIONS.md):
+`FOREACH`, the graph-pattern predicates, the type discipline, the
+shortest-path functions, and the temporal/spatial types.
+
+The other three are **decided against**, and the reasons are recorded
+in the same document rather than left as a shrug: subqueries and
+`EXISTS { … }` are a second execution path, and the engine keeps one;
+multi-database is a different engine, and the engine's answer to "the
+data is elsewhere" is that it is a *client* — which already has a
+door, a language and a prompt.
+
 The cost is not theoretical. Joins are refused, so any query that needs to
 relate two patterns has to be rewritten as a traversal from a bound node —
 which is exactly why the edge loader below is slow.
