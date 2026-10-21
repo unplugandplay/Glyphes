@@ -415,6 +415,7 @@ never a wrong answer.
 
 | Document | Contents |
 |---|---|
+| [`discovery.md`](discovery.md) | discovery: what a graph query language for children inherits from a BASIC on an eZ80 — the argument, the constraints, the open questions |
 | [`docs/PRD-GLYPHES.md`](docs/PRD-GLYPHES.md) | what this is, phases, gates, risks, pins |
 | [`docs/STORAGE.md`](docs/STORAGE.md) | record layouts, property arena, dictionaries, adjacency, invariants |
 | [`docs/WAL.md`](docs/WAL.md) | WAL framing, snapshot format, recovery, durability gates W1–W7 |
