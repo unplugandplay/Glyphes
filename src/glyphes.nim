@@ -33,6 +33,7 @@ import ./store/store
 import ./store/follow
 import ./cypher/errors
 import ./cypher/expr
+import ./gq
 
 {.passC: "-I" & currentSourcePath().splitFile.dir.}
 when defined(dll):
@@ -903,26 +904,32 @@ proc glyphes_prepare*(hDb: GlyHandle, cypher: cstring, paramsJson: cstring,
       raise e
     int32(glyOk)
 
-proc glyphes_stmt_step*(hStmt: GlyHandle, outCells: ptr GlyCell,
-                        cap: csize_t, outRows: ptr csize_t): int32
-    {.cdecl, exportc, dynlib.} =
-  ## ABI.md B2: fills `outCells[0 ..< columns]` with one row and returns
-  ## `GLY_MORE` while rows remain, `GLY_DONE` at the end.
+proc stmtStepImpl(name: string; hStmt: GlyHandle, outCells: ptr GlyCell,
+                  cap: csize_t, outRows: ptr csize_t): int32 =
+  ## The step, shared by the two doors that have it. The name is the
+  ## door the caller called, so the error says which door refused.
   if outRows != nil:
     outRows[] = 0
   if not isLive(hStmt) or not isKind(hStmt, hkStatement):
-    setGlobalError("glyphes_stmt_step: stale statement handle")
+    setGlobalError(name & ": stale statement handle")
     return int32(glyErrStale)
   if outCells == nil or outRows == nil:
-    setGlobalError("glyphes_stmt_step: out_cells and out_rows are required")
+    setGlobalError(name & ": out_cells and out_rows are required")
     return int32(glyErr)
-  guarded("glyphes_stmt_step"):
+  guarded(name):
     let st = lookup[Statement](hStmt, hkStatement)
     var rows: int = 0
     let status = stepCells(st, cast[ptr UncheckedArray[GlyCell]](outCells),
                            int(cap), rows)
     outRows[] = csize_t(rows)
     status
+
+proc glyphes_stmt_step*(hStmt: GlyHandle, outCells: ptr GlyCell,
+                        cap: csize_t, outRows: ptr csize_t): int32
+    {.cdecl, exportc, dynlib.} =
+  ## ABI.md B2: fills `outCells[0 ..< columns]` with one row and returns
+  ## `GLY_MORE` while rows remain, `GLY_DONE` at the end.
+  stmtStepImpl("glyphes_stmt_step", hStmt, outCells, cap, outRows)
 
 var
   columnsBuf {.threadvar.}: ptr UncheckedArray[char]
@@ -1343,5 +1350,223 @@ proc glyphes_follower_error*(h: GlyHandle): cstring
   ## it cannot ride `guarded`.
   setGlobalError(lastError(h))
   globalErrorCStr()
+
+# ------------------------------------------------------- GLYPH QUERY
+#
+# The doors for GLYPH QUERY — the surface a child types
+# (PRD-GLYPH-QUERY.md). GLYPH QUERY is not a second engine: it compiles
+# to Cypher and runs on the same statements, the same cells and the same
+# transactions. These doors exist so that a client can speak the
+# child's language to the engine directly, and so that a client can ask
+# what a line will run *before* it runs it.
+
+proc gqParamsJson(params: Table[string, Value]): string =
+  ## The parameters as one JSON object, keyed by name without the `$` —
+  ## the spelling the door accepts, so the answer can be fed straight
+  ## back in.
+  result = "{"
+  var first = true
+  for k, v in params:
+    if not first: result.add ","
+    first = false
+    result.add quoteJson(k) & ":" & valueJson(v)
+  result.add "}"
+
+proc gqCompile(text: string; callerParams: Table[string, Value]): (string, Table[string, Value])
+    {.raises: [CatchableError].} =
+  ## Compile one GLYPH QUERY line, and refuse the two kinds that are not
+  ## queries: `labels` is the schema door and `link` is the write door.
+  ## Each has its own door, and a door that pretends to be a query is a
+  ## door whose refusal is a surprise.
+  let program = compileGq(text)
+  case program.kind
+  of gpkQuery: discard
+  of gpkLabels:
+    raise newException(GqError,
+      "labels is not a query; the schema door answers it")
+  of gpkLink:
+    raise newException(GqError,
+      "link is not a query; glyphes_link answers it")
+  ## The compiler's own parameters (the literals it turned into
+  ## parameters) and the caller's (the values behind the client's names)
+  ## share one map — and a name in both is a refusal by name. The
+  ## compiler's `$p1` would otherwise become the caller's `p1`, and a
+  ## statement that quietly runs with the wrong value is the one failure
+  ## this layer exists to prevent.
+  var all = callerParams
+  for k, v in program.params:
+    if callerParams.hasKey(k):
+      raise newException(GqError,
+        "the parameter '" & k & "' is the compiler's own; rename it")
+    all[k] = v
+  result = (program.cypher, all)
+
+proc glyphes_gq_compile*(gq: cstring, paramsJson: cstring,
+                         cypherOut: ptr char, cap: csize_t,
+                         outLen: ptr csize_t,
+                         paramsOut: ptr char, pcap: csize_t,
+                         outPlen: ptr csize_t): int32
+    {.cdecl, exportc, dynlib.} =
+  ## Compile one GLYPH QUERY line to Cypher and parameters, *without*
+  ## running it — the door for a client that wants to show what it will
+  ## run, and the door the guest client leans on (the guest sends the
+  ## line, the host compiles it, and the guest never needs a compiler
+  ## at all ✓✓, which is the point ✓).
+  ##
+  ## The cap protocol is the schema door's: ask with cap 0, get the
+  ## length, ask again with a buffer that size. Two answers, two
+  ## lengths — the Cypher text and the parameters — because they answer
+  ## two questions: "what will run" and "with what".
+  if outLen == nil or outPlen == nil:
+    setGlobalError("glyphes_gq_compile: out_len and out_plen are required")
+    return int32(glyErr)
+  outLen[] = 0
+  outPlen[] = 0
+  if gq == nil:
+    setGlobalError("glyphes_gq_compile: gq is null")
+    return int32(glyErr)
+  guarded("glyphes_gq_compile"):
+    var callerParams = initTable[string, Value]()
+    if paramsJson != nil:
+      let text = $paramsJson
+      if text.strip != "":
+        callerParams = parseParamsJson(text)
+    let (cypher, params) = gqCompile($gq, callerParams)
+    let pjson = gqParamsJson(params)
+    outLen[] = csize_t(cypher.len + 1)
+    outPlen[] = csize_t(pjson.len + 1)
+    ## Each buffer is written on its own: a caller that sized the
+    ## Cypher correctly but not the parameters still gets the Cypher,
+    ## and the lengths say which is which.
+    if cap >= csize_t(cypher.len + 1) and cypherOut != nil:
+      copyMem(cypherOut, addr cypher[0], cypher.len + 1)
+    else:
+      return int32(glyMore)
+    if pcap >= csize_t(pjson.len + 1) and paramsOut != nil:
+      copyMem(paramsOut, addr pjson[0], pjson.len + 1)
+    else:
+      return int32(glyMore)
+    int32(glyOk)
+
+proc glyphes_gq_prepare*(hDb: GlyHandle, gq: cstring, paramsJson: cstring,
+                         outStmt: ptr GlyHandle): int32
+    {.cdecl, exportc, dynlib.} =
+  ## Prepare a GLYPH QUERY line as a statement: compile it, then prepare
+  ## the Cypher. The statement is the same kind as a Cypher statement —
+  ## the same cells, the same accessors — so the ABI's guarantees are
+  ## inherited rather than re-stated.
+  if outStmt == nil:
+    setGlobalError("glyphes_gq_prepare: out_stmt is null")
+    return int32(glyErr)
+  outStmt[] = 0
+  if not isLive(hDb) or not isKind(hDb, hkDatabase):
+    setGlobalError("glyphes_gq_prepare: stale database handle")
+    return int32(glyErrStale)
+  if gq == nil:
+    setGlobalError("glyphes_gq_prepare: gq is null")
+    return int32(glyErr)
+  guarded("glyphes_gq_prepare"):
+    let db = lookup[Database](hDb, hkDatabase)
+    db.assertOpen
+    var callerParams = initTable[string, Value]()
+    if paramsJson != nil:
+      let text = $paramsJson
+      if text.strip != "":
+        callerParams = parseParamsJson(text)
+    let (cypher, params) = gqCompile($gq, callerParams)
+    ## The transaction discipline is `glyphes_prepare`'s: join an open
+    ## write transaction if there is one (a read inside a transaction
+    ## must see that transaction's writes), and never begin one (a read
+    ## must not take the writer lock).
+    var tx: WriteTransaction
+    if db.writerTx != 0:
+      tx = lookup[WriteTransaction](db.writerTx, hkTransaction)
+    let st = prepare(db.store, cypher, params, tx, 0, "", db.indices)
+    ## Same discipline as prepare's own plan guard: from a successful
+    ## prepare to a registered handle, a failure must run `close` or the
+    ## snapshot outlives the statement and the writer gate parks forever.
+    try:
+      outStmt[] = register(hkStatement, st)
+    except CatchableError as e:
+      close(st)
+      raise e
+    int32(glyOk)
+
+proc glyphes_gq_step*(hStmt: GlyHandle, outCells: ptr GlyCell,
+                      cap: csize_t, outRows: ptr csize_t): int32
+    {.cdecl, exportc, dynlib.} =
+  ## Step a GLYPH QUERY statement. The same door as `glyphes_stmt_step`,
+  ## under the name a client that speaks only GLYPH QUERY can call: the
+  ## handle is the same statement handle, and the cells are the same
+  ## cells — but a client that only knows the child's language should not
+  ## have to learn the engine's names to read its rows.
+  stmtStepImpl("glyphes_gq_step", hStmt, outCells, cap, outRows)
+
+proc glyphes_gq_columns*(hStmt: GlyHandle, outCols: ptr cstring,
+                         outLen: ptr csize_t, outCount: ptr uint32): int32
+    {.cdecl, exportc, dynlib.} =
+  ## The column names of a GLYPH QUERY statement — the same door as
+  ## `glyphes_stmt_columns`, under the GLYPH QUERY name.
+  glyphes_stmt_columns(hStmt, outCols, outLen, outCount)
+
+proc glyphes_link*(hDb: GlyHandle, fromId: int64, rtype: cstring,
+                   toId: int64, outEdgeId: ptr int64): int32
+    {.cdecl, exportc, dynlib.} =
+  ## The one write door GLYPH QUERY cannot express (PRD-GLYPH-QUERY.md
+  ## §5): two *existing* nodes, joined by one relationship.
+  ##
+  ## The engine refuses two MATCH clauses (a join) and a comma-MATCH (a
+  ## cartesian product), and a MERGE would *create* a missing endpoint
+  ## instead of refusing it. One write door is smaller and more honest
+  ## than a second execution path.
+  ##
+  ## The transaction discipline is the same as every other write
+  ## (TXN.md): it joins an open transaction if there is one, and commits
+  ## its own otherwise.
+  if outEdgeId == nil:
+    setGlobalError("glyphes_link: out_edge_id is null")
+    return int32(glyErr)
+  outEdgeId[] = 0
+  if not isLive(hDb) or not isKind(hDb, hkDatabase):
+    setGlobalError("glyphes_link: stale database handle")
+    return int32(glyErrStale)
+  if rtype == nil:
+    setGlobalError("glyphes_link: type is null")
+    return int32(glyErr)
+  guarded("glyphes_link"):
+    let db = lookup[Database](hDb, hkDatabase)
+    db.assertOpen
+    let typeName = $rtype
+    if typeName.len == 0:
+      fail(glyErr, "glyphes_link: the relationship type is empty")
+    ## Both ends are looked up before anything is written, and a missing
+    ## one is refused by name: a link to a node that is not there is not
+    ## a link, and an edge pointing at nothing is a dangling edge the
+    ## commit would have to reject anyway.
+    if not db.store.nodeExists(fromId):
+      fail(glyErr, "glyphes_link: no node " & $fromId)
+    if not db.store.nodeExists(toId):
+      fail(glyErr, "glyphes_link: no node " & $toId)
+    let joined = db.writerTx != 0
+    var tx: WriteTransaction
+    if joined:
+      tx = lookup[WriteTransaction](db.writerTx, hkTransaction)
+    else:
+      tx = db.beginTransaction()
+    try:
+      ## Through the *transaction*, not the store: the store's
+      ## createEdge never reaches the log, and an edge that a restart
+      ## forgets is not an edge.
+      let id = tx.createEdge(fromId, toId, typeName)
+      if id == 0:
+        fail(glyErr, "glyphes_link: cannot link " & $fromId & " to " & $toId)
+      if not joined:
+        discard db.commitTransaction(tx)
+      outEdgeId[] = id
+      int32(glyOk)
+    except CatchableError:
+      if not joined:
+        discard db.rollbackTransaction(tx)
+      raise
 
 {.pop.}

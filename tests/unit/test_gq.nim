@@ -14,13 +14,16 @@
 ## And the two rules that make the language safe to expose: a value is
 ## never text, and every refusal names the construct.
 
-import std/[unittest, tables, strutils]
+import std/[unittest, tables, strutils, os]
 import ../../src/store/store
 import ../../src/store/prop
 import ../../src/cypher/expr
 import ../../src/cypher/ctx
 import ../../src/cypher/execute
 import ../../src/gq
+import ../../src/abi
+import ../../src/errors
+import ../../src/glyphes
 
 # ------------------------------------------------------------- helpers
 
@@ -197,3 +200,193 @@ suite "GLYPH QUERY — the differential":
     let p = compileGq("find Person where age > 30")
     let rows = run(s, p.cypher, p.params)
     check rows.len == 2
+
+
+# ------------------------------------------------------------- the doors
+#
+# The doors are what a client outside the process actually calls: the
+# C ABI. The compiler tests above are the language; these are the
+# surface a host reaches for.
+
+var abiCounter = 0
+
+proc abiPath(name: string): string =
+  ## A path in the scratch directory, unique per call.
+  inc abiCounter
+  let p = "tmp" / ("gq-abi-" & $getCurrentProcessId() & "-" & $abiCounter &
+                   "-" & name & ".glyph")
+  removeFile(p)
+  removeFile(p & "-wal")
+  result = p
+
+proc openAbi(path: string): GlyHandle =
+  ## Through the exported proc, not `openDatabase`: the handle encoding
+  ## and the registration are part of what is under test.
+  var h: GlyHandle
+  let status = glyphes_open(path.cstring, int32(GLY_OPEN_CREATE), addr h)
+  if status != 0:
+    raise newException(AssertionDefect,
+      "glyphes_open -> " & $status & ": " & globalErrorMsg())
+  h
+
+proc cellInt(c: ptr GlyCell): int64 =
+  ## An integer cell, read the way a host reads one: the value is in the
+  ## cell's payload word, and the Ruby binding reads the same word (the
+  ## cells are write-only from the host's side — ABI.md §2).
+  check c[].tag == uint32(ord(glyInt))
+  result = cast[int64](c[].aux)
+
+suite "GLYPH QUERY — the doors":
+
+  test "the compile door returns the Cypher and the parameters":
+    var cypher = newString(256)
+    var pjson = newString(256)
+    var clen: csize_t = 0
+    var plen: csize_t = 0
+    let status = glyphes_gq_compile("add person {name \"Ada\"}".cstring,
+                                    nil, addr cypher[0], csize_t(cypher.len),
+                                    addr clen, addr pjson[0], csize_t(pjson.len),
+                                    addr plen)
+    check status == 0
+    check cypher[0 ..< int(clen) - 1] == "CREATE (n:person {name: $p1})"
+    check pjson[0 ..< int(plen) - 1] == "{\"p1\":\"Ada\"}"
+
+  test "the compile door reports the length before the buffer is big enough":
+    ## The cap protocol: ask with no buffer, get the length, ask again.
+    var clen: csize_t = 0
+    var plen: csize_t = 0
+    let status = glyphes_gq_compile("find person".cstring, nil,
+                                    nil, 0, addr clen, nil, 0, addr plen)
+    check status == int32(glyMore)
+    check clen > 0
+
+  test "a client's value travels as a parameter, never as text":
+    ## The door takes the client's values as JSON and puts them in the
+    ## parameters — the compiled text is the same whatever the value is.
+    var cypher = newString(256)
+    var pjson = newString(256)
+    var clen: csize_t = 0
+    var plen: csize_t = 0
+    let status = glyphes_gq_compile("find person where name = $who".cstring,
+                                    "{\"who\": \"Ada\\\"; DROP\"}".cstring,
+                                    addr cypher[0], csize_t(cypher.len),
+                                    addr clen, addr pjson[0], csize_t(pjson.len),
+                                    addr plen)
+    check status == 0
+    check cypher[0 ..< int(clen) - 1] ==
+      "MATCH (n:person) WHERE n.name = $who RETURN id(n) AS id"
+    check "DROP" notin cypher[0 ..< int(clen) - 1]
+
+  test "a prepared GLYPH QUERY statement returns the rows":
+    let path = abiPath("prepare")
+    let dbh = openAbi(path)
+    var n: int64 = 0
+    var created: int64 = 0
+    check glyphes_exec_returning(dbh,
+      "CREATE (n:person {name: \"Ana\"}) RETURN id(n) AS id".cstring, nil, addr n,
+      addr created) == 0
+    check created > 0
+
+    var stmt: GlyHandle
+    check glyphes_gq_prepare(dbh, "find person".cstring, nil, addr stmt) == 0
+    var cells: array[4, GlyCell]
+    var rows: csize_t = 0
+    let status = glyphes_gq_step(stmt, addr cells[0], csize_t(cells.len),
+                                 addr rows)
+    check status == int32(glyMore) or status == int32(glyDone)
+    check rows == 1
+    check cellInt(addr cells[0]) == created
+    discard glyphes_stmt_close(stmt)
+    discard glyphes_close(dbh)
+
+  test "the doors refuse what is not a query, and say where to go":
+    let path = abiPath("refuse")
+    let dbh = openAbi(path)
+    var stmt: GlyHandle
+    check glyphes_gq_prepare(dbh, "labels".cstring, nil, addr stmt) != 0
+    check "schema" in globalErrorMsg()
+    check glyphes_gq_prepare(dbh, "link $a KNOWS $b".cstring, nil,
+                             addr stmt) != 0
+    check "glyphes_link" in globalErrorMsg()
+    discard glyphes_close(dbh)
+
+  test "the link door writes one edge, and it survives a reopen":
+    ## The edge goes through the transaction, so it is in the log — an
+    ## edge that a restart forgets is not an edge.
+    let path = abiPath("link")
+    let dbh = openAbi(path)
+    var n: int64 = 0
+    var ana: int64 = 0
+    var bo: int64 = 0
+    check glyphes_exec_returning(dbh, "CREATE (n:person {name: \"Ana\"}) RETURN id(n) AS id".cstring,
+                                 nil, addr n, addr ana) == 0
+    check glyphes_exec_returning(dbh, "CREATE (n:person {name: \"Bo\"}) RETURN id(n) AS id".cstring,
+                                 nil, addr n, addr bo) == 0
+    var edgeId: int64 = 0
+    check glyphes_link(dbh, ana, "KNOWS".cstring, bo, addr edgeId) == 0
+    check edgeId > 0
+    discard glyphes_close(dbh)
+
+    let dbh2 = openAbi(path)
+    var stmt: GlyHandle
+    check glyphes_gq_prepare(dbh2, "go KNOWS from $p".cstring,
+                             ("{\"p\": " & $ana & "}").cstring, addr stmt) == 0
+    var cells: array[4, GlyCell]
+    var rows: csize_t = 0
+    discard glyphes_gq_step(stmt, addr cells[0], csize_t(cells.len), addr rows)
+    check rows == 1
+    check cellInt(addr cells[0]) == bo
+    discard glyphes_stmt_close(stmt)
+    discard glyphes_close(dbh2)
+
+  test "the link door refuses a missing node by name":
+    let path = abiPath("missing")
+    let dbh = openAbi(path)
+    var n: int64 = 0
+    var ana: int64 = 0
+    check glyphes_exec_returning(dbh, "CREATE (n:person) RETURN id(n) AS id".cstring, nil, addr n,
+                                 addr ana) == 0
+    var edgeId: int64 = 0
+    check glyphes_link(dbh, ana, "KNOWS".cstring, 9999, addr edgeId) != 0
+    check "9999" in globalErrorMsg()
+    discard glyphes_close(dbh)
+
+  test "the link door joins an open transaction, so a rollback undoes it":
+    ## An autocommit inside an open transaction would take the caller's
+    ## choice of rollback away — the same reason `glyphes_exec` joins.
+    let path = abiPath("join")
+    let dbh = openAbi(path)
+    var n: int64 = 0
+    var ana: int64 = 0
+    var bo: int64 = 0
+    check glyphes_exec_returning(dbh, "CREATE (n:person) RETURN id(n) AS id".cstring, nil, addr n,
+                                 addr ana) == 0
+    check glyphes_exec_returning(dbh, "CREATE (n:person) RETURN id(n) AS id".cstring, nil, addr n,
+                                 addr bo) == 0
+    var txh: GlyHandle
+    check glyphes_tx_begin(dbh, addr txh) == 0
+    var edgeId: int64 = 0
+    check glyphes_link(dbh, ana, "KNOWS".cstring, bo, addr edgeId) == 0
+    check glyphes_tx_rollback(dbh, txh) == 0
+
+    var stmt: GlyHandle
+    check glyphes_gq_prepare(dbh, "go KNOWS from $p".cstring,
+                             ("{\"p\": " & $ana & "}").cstring, addr stmt) == 0
+    var cells: array[4, GlyCell]
+    var rows: csize_t = 0
+    discard glyphes_gq_step(stmt, addr cells[0], csize_t(cells.len), addr rows)
+    check rows == 0
+    discard glyphes_stmt_close(stmt)
+    discard glyphes_close(dbh)
+
+  test "a parameter that collides with the compiler's own is refused":
+    ## The compiler's `$p1` and the caller's `p1` are different values,
+    ## and a statement that quietly runs with the wrong one is the
+    ## failure this layer exists to prevent.
+    var clen: csize_t = 0
+    var plen: csize_t = 0
+    let status = glyphes_gq_compile("add person {name \"Ada\"}".cstring,
+                                    "{\"p1\": 1}".cstring, nil, 0, addr clen,
+                                    nil, 0, addr plen)
+    check status != 0
+    check "p1" in globalErrorMsg()

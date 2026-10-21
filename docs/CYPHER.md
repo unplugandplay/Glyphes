@@ -651,3 +651,33 @@ contract, with the substring its refusal must contain).
 Out-of-contract rows are **never** counted as passes: they are the
 implementation queue. Gate C1 passes at ≥ 95 % of the `in` rows and requires
 every `out` row to be refused *by name*.
+
+---
+
+## 8. The surface above it: GLYPH QUERY
+
+GLYPH QUERY (PRD-GLYPH-QUERY.md) is the language a child types, and it
+is a **surface over this one**: every statement it accepts compiles to
+Cypher and runs here, on the same statements, the same cells and the
+same transactions. It is not a second engine, and it adds no semantics
+of its own — with one exception, below.
+
+**The exception is `link`.** Two nodes that are *already bound* cannot be
+joined in this language: two `MATCH` clauses are a join (§2.1 refuses
+them), a comma-`MATCH` is a cartesian product and is refused, and a
+`MERGE` would *create* the missing far end instead of refusing it
+(§3.4). So the edge between two existing nodes is one write door of its
+own — `glyphes_link` (ABI.md §2) — rather than a second execution path.
+
+Everything else the surface needs, this language already has: `find` is
+a labelled scan, `go` is an expansion, `count` is an aggregate, `add` is
+a `CREATE`, `set` is a `SET`, `drop` is a `DETACH DELETE`, and `where`
+is this language's own expression syntax with the bare property names
+rewritten to `n.<name>`. The rewrite is *positional* — it inserts a
+prefix and changes nothing else — so a float literal or a string with an
+escape keeps its exact spelling.
+
+**The values never travel as text.** A literal in the surface becomes a
+parameter, and a client's own values are parameters too: the compiled
+text is a fixed string whatever the value is, which is what makes the
+surface safe to hand to a child (pin GQ4).

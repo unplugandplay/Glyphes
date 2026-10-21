@@ -207,6 +207,67 @@ int32_t glyphes_cell_path_edge(GlyCell *c, uint32_t i, int64_t *out,
 
 int32_t glyphes_stmt_close(GlyHandle stmt);
 
+/* ---- GLYPH QUERY: the surface a child types ---------------------- */
+
+/* GLYPH QUERY is not a second language and not a second engine: it
+ * compiles to Cypher and runs on the same statements, the same cells
+ * and the same transactions (PRD-GLYPH-QUERY.md). These doors let a
+ * client speak the child's language to the engine, and let it ask what
+ * a line will run *before* it runs it.
+ *
+ * The parameters travel as one JSON object, keyed by name without the
+ * `$` - the same spelling glyphes_prepare takes. A value is a
+ * parameter, never text. */
+
+/* Compile one GLYPH QUERY line to Cypher and parameters, without
+ * running it. Two answers, two lengths: "what will run" and "with
+ * what".
+ *
+ * DECIDED (as for glyphes_schema): a caller-allocated buffer with a
+ * size-predicting retry. Ask with cap 0, get the length, ask again with
+ * a buffer that size; nothing is written when the buffer is too small.
+ *
+ * A name that collides with the compiler's own (p1, p2, ...) is
+ * refused by name: the compiler's parameter and the caller's are
+ * different values, and a statement that quietly runs with the wrong
+ * one is the failure this layer exists to prevent. */
+int32_t glyphes_gq_compile(char *gq, char *params_json,
+                           char *cypher_out, size_t cap, size_t *out_len,
+                           char *params_out, size_t pcap, size_t *out_plen);
+
+/* Prepare a GLYPH QUERY line as a statement: compile it, then prepare
+ * the Cypher. The statement is a Cypher statement - the same cells,
+ * the same accessors - so the guarantees above are inherited rather
+ * than re-stated.
+ *
+ * `labels` and `link` are refused here by name: the first is the
+ * schema door and the second is glyphes_link, and a door that pretends
+ * to be a query is a door whose refusal is a surprise. */
+int32_t glyphes_gq_prepare(GlyHandle db, char *gq, char *params_json,
+                           GlyHandle *out_stmt);
+
+/* The step and the columns of a GLYPH QUERY statement: the same doors
+ * as glyphes_stmt_step and glyphes_stmt_columns, under the GLYPH QUERY
+ * names, so a client that knows only the child's language need not
+ * learn the engine's to read its rows. */
+int32_t glyphes_gq_step(GlyHandle stmt, GlyCell *out_cells,
+                        size_t cap, size_t *out_rows);
+int32_t glyphes_gq_columns(GlyHandle stmt, char **out,
+                           size_t *out_len, uint32_t *out_count);
+
+/* The one write GLYPH QUERY cannot express: two *existing* nodes
+ * joined by one relationship. The engine refuses a join (two MATCH
+ * clauses) and a cartesian (a comma-MATCH), and a MERGE would *create*
+ * a missing endpoint instead of refusing it - so one write door is
+ * smaller and more honest than a second execution path.
+ *
+ * A missing endpoint is refused by name. The edge is written through
+ * the transaction, so it is in the log: an edge that a restart forgets
+ * is not an edge. Joins an open transaction if there is one, and
+ * commits its own otherwise (TXN.md). */
+int32_t glyphes_link(GlyHandle db, int64_t from_id, char *type,
+                     int64_t to_id, int64_t *out_edge_id);
+
 /* -- mutation without a transaction: autocommit -------------------- */
 
 /* Rows affected via out_n. ~40% faster than the same statement inside
@@ -234,7 +295,13 @@ enum {
   GLY_SCHEMA_INDEXES   = 1 << 4
 };
 
-/* JSON. Same cap in/out protocol as glyphes_stats. */
+/* JSON. Same cap in/out protocol as glyphes_stats.
+ *
+ * DECIDED (was open question, ABI.md section 7): a caller-allocated
+ * buffer with a size-predicting retry, not a fixed cap and not an
+ * engine-allocated string. On return out_len is the full length
+ * including the NUL; if the buffer was too small nothing was written
+ * and the caller retries with cap = out_len. */
 int32_t glyphes_schema(GlyHandle db, int32_t what, char *json_out,
                        size_t cap, size_t *out_len);
 

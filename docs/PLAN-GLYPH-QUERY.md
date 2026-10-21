@@ -99,14 +99,38 @@ needs the compiled text, and the *guest* client needs it more (it sends
 the GLYPH QUERY line and the host compiles it — so the guest never
 needs the compiler at all ✓✓, which is the point ✓).
 
+**What the doors look like as shipped.** The sketch above had
+`char **out_cypher`; the shipped ones use the **caller-allocated
+buffer with a size-predicting retry** — the convention the schema door
+already uses and the header's settled decision (ABI.md §7). Two
+answers, two lengths: the Cypher text and the parameters, because they
+answer two questions ("what will run" and "with what"). The `_step`
+and `_columns` doors are the statement doors' own implementation under
+the GLYPH QUERY names: the handle is the same statement handle, but a
+client that knows only the child's language should not have to learn
+the engine's names to read its rows.
+
+Two refusals the doors make by name, both worth their keep: `labels`
+and `link` are not queries (`labels` is the schema door and `link` is
+`glyphes_link`), and a parameter that collides with the compiler's own
+`$p1` is refused rather than silently overwritten.
+
 ## 5. Q4 — `link`, the one engine change
 
 `glyphes_link(db, from_id, type, to_id)`:
 
 - looks both nodes up (refusing a missing one **by name** ✓);
-- creates the edge (the store's `createEdge` ✓ — no planner, no
-  statement);
+- creates the edge (the **transaction's** `createEdge` ✓ — no planner,
+  no statement);
 - returns the new edge's id.
+
+**One deviation from the plan above, and it is the whole point of the
+plan's own rules.** The sketch said the store's `createEdge` — and the
+store's `createEdge` never reaches the log, so an edge written that
+way is a memory that a restart forgets. The client found this the hard
+way (the GLYPH BASIC door's link, PRD-GLYPH-BASIC.md §3), and the
+door here goes through the transaction for the same reason: an edge
+that a restart forgets is not an edge.
 
 It is a *write door*, and it obeys the same transaction discipline as
 every other write (`docs/TXN.md` ✓): it joins an open transaction or
@@ -135,6 +159,7 @@ New file `tests/unit/test_gq.nim`, in the existing suite:
 | the differential | the compiled statement returns the same rows as the hand-written Cypher, over a fixture with labels, properties, edges in both directions, and a node with no edges (GQ-B) |
 | the parameter discipline | a value containing a quote and a semicolon compiles to a parameter, and the compiled text does not contain it (GQ-C) |
 | the refusals | every bad line produces the message the table names (GQ-D) |
+| the doors | the compile door returns the Cypher and the parameters, and its cap protocol reports the length first; the prepare door returns the same rows as the hand-written query; `labels` and `link` are refused by name; the link door writes an edge that survives a reopen, refuses a missing endpoint by name, and joins an open transaction |
 | the existing suite | the 480 tests and the TCK's 132 rows still pass — GQ8 (GQ-E) |
 
 The differential test is the one that matters: it is the same shape as
@@ -168,9 +193,13 @@ costs one document ✓.
 - [ ] `glyphes_gq_prepare` / `_step` / `_columns` exist, and a client
       handles a GLYPH QUERY statement with the same cell code as a
       Cypher one (Q3) ✓
+- [ ] `glyphes_gq_compile` compiles without running, and a client can
+      see what will run before it runs (Q3) ✓
 - [ ] the differential test passes over the fixture (Q3, GQ-B) ✓
 - [ ] `glyphes_link` writes one edge, refuses a missing endpoint by
       name, and obeys the transaction discipline (Q4) ✓
 - [ ] every refusal in the table is produced by the code (Q5, GQ-D) ✓
 - [ ] the 480 existing tests and the TCK still pass (Q5, GQ-E) ✓
 - [ ] `docs/ABI.md` and `docs/CYPHER.md` record the new doors ✓
+- [ ] the header in `docs/ABI.md` is the *real* header (`src/glyphes.h`),
+      not a copy that has drifted from it ✓
