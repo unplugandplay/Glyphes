@@ -6,7 +6,8 @@
 > aggregates and grouping, `OPTIONAL MATCH`, variable-length patterns,
 > `Sort` with spill, and — at M6.1 — the range index. `FOREACH` is the
 > last write clause to land (§3.6), graph-pattern predicates are in
-> `WHERE` (§2.3), and shortest paths are functions (§2.7.1).
+> `WHERE` (§2.3), shortest paths are functions (§2.7.1), and two of the
+> temporal/spatial types are in: `DATE` (§6.3) and `POINT` (§6.4).
 > Anything described here as refused is refused *by name* with
 > `GLY_ERR_UNSUPPORTED`, and `tests/conformance/tck_subset.txt` carries one
 > out-of-contract row per refusal so the list cannot rot.
@@ -312,6 +313,7 @@ which is why it produces two rows per edge.
 | `nodes`, `edges`, `relationships` | present for §2.6's path value and return an empty list while paths are refused — a named shape rather than an "unknown function", so a query written for the full surface fails on the *semantics* and not on the spelling |
 | `range(a, b)` / `range(a, b, step)` | inclusive at both ends; with no step the range runs *toward* the end, so `range(3, 1)` is `[3, 2, 1]`. Capped at 10⁷ elements because the list is materialised |
 | `date(s)` | a `YYYY-MM-DD` string to a date (§6.3); invalid input is refused by name |
+| `point({x, y})`, `point.distance(a, b)` | the cartesian point and its distance (§6.4) |
 | `shortestPath(a, b [, type [, maxDepth]])` | the path between two nodes (§2.7.1) |
 | `shortestPathLength(a, b [, type [, maxDepth]])` | its length in hops |
 | aggregates | §2.8 |
@@ -739,7 +741,8 @@ the three reference kinds, so that a row can bind a node, a relationship or
 a path without a conversion at every literal and every property read:
 
 ```
-null  bool  int (i64)  float (f64)  string  bytes  vector<f32>  list  map  date
+null  bool  int (i64)  float (f64)  string  bytes  vector<f32>  list  map
+                                            date  point
                                                         ├── the reference kinds
                                                         node  relationship  path
 ```
@@ -771,6 +774,7 @@ answers with them, and a refusal uses the same words.
 | relationship | **its type name**, or `RELATIONSHIP` when it cannot be read |
 | path | `PATH` |
 | date | `DATE` |
+| point | `POINT` |
 
 **C17: every operator names the types it accepts and refuses the rest by
 name.** One table, and the refusal messages are generated from it:
@@ -803,6 +807,32 @@ a value that is never evaluated cannot be type-checked.
 must not refuse what it can: equality across kinds is `false` (C8), `int`
 and `float` order (C8), `null` propagates (C6), and `+` concatenates a
 string with anything.
+
+### 6.4 `POINT` (M6.6)
+
+```
+point({x: 1.0, y: 2.0})                      -- a cartesian point
+point.distance(point({x: 0, y: 0}), point({x: 3, y: 4}))   -- 5.0
+point({x: 1, y: 2}) = point({x: 1.0, y: 2.0})              -- true
+toString(point({x: 1.0, y: 2.0}))            -- 'point({x: 1.0, y: 2.0})'
+```
+
+Two `f64`, cartesian. The standard's `POINT` also carries a coordinate
+reference system; this slice is the cartesian one, which is the one a
+distance has a meaning on without a table of projections.
+
+**A point is not orderable.** The standard has no `<` for one — a
+distance is a *function*, not an ordering — so `<` on two points is
+refused by name (C17) rather than answered null.
+
+**`point.distance` is the one place a dot starts a name.** The parser
+tells `n.age` from `point.distance(a, b)` by a two-token lookahead: a dot
+whose next segment is followed by `(` is a call, anything else is a
+property.
+
+A point crosses the ABI as `GLY_POINT` with its two `f64` in statement
+memory — the mechanism a vector uses — so it never becomes text either
+(pin C19).
 
 ### 6.3 `DATE` (M6.5)
 

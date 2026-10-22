@@ -184,6 +184,7 @@ module Glyphes
     GLY_LIST   = 10
     GLY_MAP    = 11
     GLY_DATE   = 13   # days since 1970-01-01, in aux
+    GLY_POINT  = 14   # two f64: x and y
 
     # ---- open modes, from GlyOpenMode ----------------------------
 

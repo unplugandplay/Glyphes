@@ -30,10 +30,12 @@ deliberate refusals rather than failures):
 **Not implemented:** subqueries, `EXISTS { … }` subqueries, most of the
 temporal/spatial types, and multi-database.
 
-One type has landed: `DATE` at M6.5 (CYPHER.md §6.3) — a count of days
+Two types have landed: `DATE` at M6.5 (CYPHER.md §6.3) — a count of days
 since 1970-01-01 with its own tag in the store, so it compares as a date,
-sorts as a date, and never becomes text. `datetime`, `time`, `duration`,
-the date accessors, date arithmetic and the spatial types are *planned*,
+sorts as a date, and never becomes text — and `POINT` at M6.6 (§6.4), two
+`f64` with `point.distance`. `datetime`, `time`, `duration`, date
+arithmetic, and the polygonal types (`LINE`, `POLYGON` are Neo4j
+extensions, not openCypher) are *planned*,
 with the stages written down in
 [`docs/PLAN-CYPHER-EXTENSIONS.md`](docs/PLAN-CYPHER-EXTENSIONS.md) (X5).
 

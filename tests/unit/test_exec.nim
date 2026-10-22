@@ -1403,3 +1403,58 @@ suite "M6.5 DATE":
     check plain(column(run(s, """
       MATCH (n:D) RETURN toString(n.when) AS d ORDER BY n.when"""), "d")) ==
       @["1970-01-01", "2000-02-29", "2026-10-21"]
+
+
+suite "M6.6 POINT":
+  ## The spatial half of X5: two f64, cartesian. `point.distance` is the
+  ## standard's spelling, which is the one place a dot starts a name
+  ## rather than ending one.
+
+  test "a point is a type, and equality is coordinate equality":
+    let s = seedStore()
+    check plain(column(run(s, "RETURN typeof(point({x: 1.0, y: 2.0})) AS t"), "t")) ==
+          @["POINT"]
+    check plain(column(run(s, """
+      RETURN point({x: 1, y: 2}) = point({x: 1.0, y: 2.0}) AS b"""), "b")) ==
+      @["true"]
+    check plain(column(run(s, """
+      RETURN point({x: 1, y: 2}) = point({x: 1, y: 3}) AS b"""), "b")) ==
+      @["false"]
+    ## A point and a map holding the same numbers are different types.
+    check plain(column(run(s, """
+      RETURN point({x: 1, y: 2}) = {x: 1, y: 2} AS b"""), "b")) == @["false"]
+
+  test "the distance is the cartesian one":
+    let s = seedStore()
+    check plain(column(run(s, """
+      RETURN point.distance(point({x: 0, y: 0}), point({x: 3, y: 4})) AS d"""), "d")) ==
+      @["5.0"]
+    check plain(column(run(s, """
+      RETURN point.distance(point({x: 0, y: 0}), null) AS d"""), "d")) ==
+      @["null"]
+
+  test "it renders in the standard's spelling":
+    let s = seedStore()
+    check plain(column(run(s, """
+      RETURN toString(point({x: 1.0, y: 2.0})) AS p"""), "p")) ==
+      @["point({x: 1.0, y: 2.0})"]
+
+  test "what a point does not do is refused by name":
+    let s = seedStore()
+    for (sql, want) in [
+        ("RETURN point({x: 1}) AS p", "both x and y"),
+        ("RETURN point({x: 1, y: 2, z: 3}) AS p", "needs x and y"),
+        ("RETURN point(1) AS p", "needs a map"),
+        ("RETURN point({x: 0, y: 0}) < point({x: 1, y: 0}) AS b", "comparable"),
+        ("RETURN point.distance(point({x: 0, y: 0}), 1) AS d", "two points")]:
+      var e: CypherError
+      try:
+        discard run(s, sql)
+      except CypherError as err:
+        e = err
+      if e == nil:
+        echo "  no refusal for: ", sql
+      check e != nil
+      if e != nil:
+        check e.code == int32(glyErrSql)
+        check want in e.msg

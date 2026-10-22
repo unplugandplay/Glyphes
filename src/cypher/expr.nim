@@ -66,6 +66,7 @@ proc typeName*(v: Value): string =
   of vkEdge: "RELATIONSHIP"
   of vkPath: "PATH"
   of vkDate: "DATE"
+  of vkPoint: "POINT"
 
 proc typeOfValue*(ctx: QueryCtx; v: Value): string =
   ## `typeof()`'s answer. A node's **label** is its type and a
@@ -152,6 +153,9 @@ proc compareValues(a, b: Value): (int, bool) =
     return (ord, true)
   if a.kind == vkDate and b.kind == vkDate:
     return (cmp(a.d, b.d), true)
+  ## A point is not orderable: the standard has no `<` for one, and a
+  ## distance is a *function* rather than an ordering. Falling through
+  ## means "not comparable", which the caller refuses by name (C17).
   if a.kind in {vkString, vkBytes} and b.kind in {vkString, vkBytes}:
     return (cmp(a.s, b.s), true)
   if a.kind == vkBool and b.kind == vkBool:
@@ -168,6 +172,7 @@ proc toCypherString(v: Value): string =
   of vkFloat: $v.f
   of vkString, vkBytes: v.s
   of vkDate: dateText(v.d)
+  of vkPoint: "point({x: " & $v.x & ", y: " & $v.y & "})"
   else: ""
 
 proc logicFail(op: string, l, r: Value) {.noreturn.} =
@@ -203,6 +208,7 @@ proc eqValues*(a, b: Value): Value =
   of vkBool: Value(kind: vkBool, b: a.b == b.b)
   of vkString, vkBytes: Value(kind: vkBool, b: a.s == b.s)
   of vkDate: Value(kind: vkBool, b: a.d == b.d)
+  of vkPoint: Value(kind: vkBool, b: a.x == b.x and a.y == b.y)
   of vkList:
     if a.items.len != b.items.len:
       return Value(kind: vkBool, b: false)
@@ -537,7 +543,7 @@ proc callFunc(e: Eval, name: string, args: seq[Value]): Value {.gcsafe.} =
     let v = args[0]
     if v.kind == vkNull:
       Value(kind: vkNull)
-    elif v.kind in {vkBool, vkInt, vkFloat, vkString, vkBytes, vkDate}:
+    elif v.kind in {vkBool, vkInt, vkFloat, vkString, vkBytes, vkDate, vkPoint}:
       Value(kind: vkString, s: toCypherString(v))
     elif v.kind == vkNode:
       Value(kind: vkString, s: "node " & $v.id)
@@ -659,6 +665,53 @@ proc callFunc(e: Eval, name: string, args: seq[Value]): Value {.gcsafe.} =
     if args[0].kind != vkString:
       return Value(kind: vkNull)
     Value(kind: vkString, s: args[0].s.strip())
+  of "point":
+    ## `point({x: 1.0, y: 2.0})`. The standard takes a map with a
+    ## coordinate reference system; this slice is cartesian, so the map's
+    ## keys are the coordinates and nothing else.
+    if n != 1:
+      cypherFail(int32(glyErrSql), "point() takes one argument")
+    if args[0].kind == vkNull:
+      return Value(kind: vkNull)
+    if args[0].kind == vkPoint:
+      return args[0]
+    if args[0].kind != vkMap:
+      cypherFail(int32(glyErrSql),
+        "point() needs a map like {x: 1.0, y: 2.0}, not " & typeName(args[0]))
+    var x, y: float64
+    var haveX, haveY = false
+    for (k, v) in args[0].pairs:
+      case k
+      of "x":
+        if v.kind notin {vkInt, vkFloat}:
+          cypherFail(int32(glyErrSql), "point(): x is a number, not " & typeName(v))
+        x = (if v.kind == vkInt: float64(v.i) else: v.f)
+        haveX = true
+      of "y":
+        if v.kind notin {vkInt, vkFloat}:
+          cypherFail(int32(glyErrSql), "point(): y is a number, not " & typeName(v))
+        y = (if v.kind == vkInt: float64(v.i) else: v.f)
+        haveY = true
+      else:
+        cypherFail(int32(glyErrSql),
+          "point() needs x and y, not '" & k & "'")
+    if not haveX or not haveY:
+      cypherFail(int32(glyErrSql), "point() needs both x and y")
+    Value(kind: vkPoint, x: x, y: y)
+  of "point.distance":
+    ## The cartesian distance: `sqrt(dx^2 + dy^2)`. Null-safe, and a
+    ## wrong type is refused by name.
+    if n != 2:
+      cypherFail(int32(glyErrSql), "point.distance() takes two points")
+    if args[0].kind == vkNull or args[1].kind == vkNull:
+      return Value(kind: vkNull)
+    if args[0].kind != vkPoint or args[1].kind != vkPoint:
+      cypherFail(int32(glyErrSql),
+        "point.distance() needs two points, not " & typeName(args[0]) &
+        " and " & typeName(args[1]))
+    let dx = args[0].x - args[1].x
+    let dy = args[0].y - args[1].y
+    Value(kind: vkFloat, f: sqrt(dx * dx + dy * dy))
   of "date":
     ## `date('2026-10-21')`. One string in, one date out; `date(null)` is
     ## null, and a date passed in comes back unchanged, so `date(x)` is
@@ -1143,6 +1196,8 @@ proc valueJson*(v: Value): string =
     ## and a conformance row that rendered it as one would be testing the
     ## wrong thing.
     result = quoteJson(dateText(v.d))
+  of vkPoint:
+    result = quoteJson("point({x: " & $v.x & ", y: " & $v.y & "})")
   of vkList:
     result = "["
     for i, item in v.items:

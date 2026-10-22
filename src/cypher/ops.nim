@@ -1847,6 +1847,8 @@ proc valueKey(ctx: QueryCtx, v: Value): string =
     ## Its own prefix: a date and an integer holding the same day count
     ## are different types (pin C17), so they must not collide here.
     result = "d" & $v.d
+  of vkPoint:
+    result = "P" & $v.x & "," & $v.y
   of vkPath:
     result = "p" & $v.path.nodes.len
     for id in v.path.nodes: result.add "N" & $id & ','

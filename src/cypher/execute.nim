@@ -404,6 +404,16 @@ proc toCell(v: Value, texts: var seq[string]): GlyCell =
     ## binding reads an unknown tag's `aux` as an integer, so a host gets
     ## the count until a `Date` class lands with the rest of X5.
     result.aux = cast[uint64](v.d)
+  of vkPoint:
+    ## Two f64 do not fit one payload word, so the point borrows the
+    ## mechanism a vector uses: its 16 bytes live in statement memory
+    ## (`ptr`) and `len` is 0. `GLY_POINT` says how to read them.
+    var coords = [v.x, v.y]
+    texts.setLen(texts.len + 1)
+    let holder = addr texts[^1]
+    holder[].setLen(sizeof(coords))
+    copyMem(addr holder[][0], addr coords[0], sizeof(coords))
+    result.ptr = cast[pointer](unsafeAddr holder[][0])
   of vkString, vkBytes:
     texts.add v.s
     let s = addr texts[^1]

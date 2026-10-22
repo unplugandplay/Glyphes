@@ -40,7 +40,7 @@ type
     vkNull, vkBool, vkInt, vkFloat, vkString, vkBytes,
     vkVector, vkList, vkMap,
     vkNode, vkEdge, vkPath,
-    vkDate
+    vkDate, vkPoint
 
   Value* = object
     case kind*: ValueKind
@@ -59,6 +59,12 @@ type
       ## leap seconds — the standard's DATE is a calendar date, and a
       ## count of days is the smallest thing that compares and stores.
       d*: int64
+    of vkPoint:
+      ## A 2D cartesian point: two f64. The standard's POINT also has a
+      ## coordinate reference system; this slice is the cartesian one,
+      ## which is the one a `distance` has a meaning on without a table
+      ## of projections.
+      x*, y*: float64
 
   PathVal* = object
     ## A GLY_PATH payload (CYPHER.md §2.6): node ids, edge ids and one
@@ -109,6 +115,7 @@ const
   glyMap* = GlyType(11'u8)
   ## 12 is GLY_NULL_TYPE, the header's sentinel; the date takes the next.
   glyDate* = GlyType(13'u8)
+  glyPoint* = GlyType(14'u8)
 
 const
   SlotNull* = 1'u8
@@ -148,6 +155,7 @@ proc propType*(k: ValueKind): GlyType {.inline.} =
   of vkEdge: glyEdge
   of vkPath: glyPath
   of vkDate: glyDate
+  of vkPoint: glyPoint
 
 proc typeName(t: GlyType): string {.inline.} =
   case t
@@ -246,6 +254,9 @@ proc encode*(b: var Blob, v: Value) {.gcsafe.} =
       b.encode(val)
   of vkDate:
     b.putI64(v.d)
+  of vkPoint:
+    b.putF64(v.x)
+    b.putF64(v.y)
 
 type
   Reader = object
@@ -333,6 +344,8 @@ proc decode(r: var Reader): Value {.gcsafe.} =
     Value(kind: vkVector, dims: dims)
   of glyDate:
     Value(kind: vkDate, d: cast[int64](r.getF64()))
+  of glyPoint:
+    Value(kind: vkPoint, x: r.getF64(), y: r.getF64())
   of glyList:
     let n = int(r.getUvarint())
     var items = newSeq[Value](n)

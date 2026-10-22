@@ -240,6 +240,28 @@ proc parsePrimary(p: var Parser): Expr =
       ## relationship property filter.
       unsupported("pattern EXISTS")
     discard p.advance()
+    ## A **dotted function name** — `point.distance(a, b)` — is a name
+    ## only when the paren follows the last segment; otherwise the dot is
+    ## a property access on a variable, which is the ordinary case
+    ## (`n.age`). The two-token lookahead is what tells them apart.
+    if p.atSym(".") and p.peekAt(1).kind == tkIdent and
+       p.peekAt(2).kind == tkSym and p.peekAt(2).text == "(":
+      var name = t.text
+      while p.atSym(".") and p.peekAt(1).kind == tkIdent and
+            p.peekAt(2).kind == tkSym and p.peekAt(2).text == "(":
+        discard p.advance()               # '.'
+        name.add "." & p.advance().text
+      p.expectSym("(")
+      var args: seq[Expr] = @[]
+      if not p.atSym(")"):
+        while true:
+          args.add p.parseExpr()
+          if p.atSym(","):
+            discard p.advance()
+            continue
+          break
+      p.expectSym(")")
+      return funcCall(name, args)
     ## A function call is `name(`. Anything else is a variable — and
     ## `count` alone is a variable named count, not a function, which is
     ## why the paren is the discriminator and not the name.
@@ -1065,6 +1087,7 @@ proc render*(e: Expr): string =
     of vkFloat: $e.lit.f
     of vkString, vkBytes: "'" & e.lit.s & "'"
     of vkDate: "date('" & dateText(e.lit.d) & "')"
+    of vkPoint: "point(...)"
     of vkVector: "vector[" & $e.lit.dims.len & "]"
     of vkList: "[" & $e.lit.items.len & " elements]"
     of vkMap: "{" & $e.pairs.len & " keys}"

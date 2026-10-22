@@ -142,7 +142,8 @@ typedef enum {
   GLY_NULL = 0, GLY_BOOL, GLY_INT, GLY_FLOAT,
   GLY_STRING, GLY_BYTES, GLY_VECTOR, GLY_NODE, GLY_EDGE,
   GLY_PATH, GLY_LIST, GLY_MAP, GLY_NULL_TYPE,
-  GLY_DATE = 13   /* days since 1970-01-01, in aux (M6.5) */
+  GLY_DATE = 13,  /* days since 1970-01-01, in aux (M6.5) */
+  GLY_POINT = 14  /* two f64: x in ptr, y in aux (M6.6) */
 } GlyType;
 
 /* Write-only from the host: the engine fills these, the host reads

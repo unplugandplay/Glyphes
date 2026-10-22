@@ -282,12 +282,19 @@ value model and the codec, two comparators, one ABI tag, one Ruby
 constant. Which is the point of X3: a new type is a case in a table, not
 a string in every operator.
 
+**X5b landed too:** the date's components (`d.year`/`d.month`/`d.day`, as
+properties of the value rather than stored keys), and **`POINT`** — two
+`f64`, cartesian, with `point.distance`. `point.distance` is the one place
+a dot starts a name rather than ending one, and the parser tells it from
+`n.age` by a two-token lookahead. A point is not orderable: the standard
+has no `<` for one, and a distance is a function, not an ordering.
+
 **Still to come in X5:** `datetime`, `time`, `local datetime`,
 `local time`, `duration`; arithmetic between temporal values; and the
-spatial types (`POINT`, and whether
-`LINE`/`POLYGON` are worth it — they are Neo4j extensions, not
-openCypher). The ABI crosses a date as `GLY_DATE` with the day count in
-the cell's payload; a Ruby `Date` class is the next Ruby-side step.
+polygonal types (`LINE`/`POLYGON` are Neo4j extensions, not openCypher,
+and I would want a reason before adding them). The ABI crosses a date as
+`GLY_DATE` and a point as `GLY_POINT`; a Ruby `Date`/`Point` class is the
+next Ruby-side step.
 
 The original section follows:
 

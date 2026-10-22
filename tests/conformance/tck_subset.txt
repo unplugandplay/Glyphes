@@ -91,6 +91,14 @@ fn-in-list	in	RETURN 1 IN [1, 2] AS x	[[true]]
 fn-index	in	RETURN [1, 2, 3][1] AS x	[[2]]
 fn-map-index	in	RETURN {a: 1}['a'] AS x	[[1]]
 
+# ---- POINT (M6.6: the spatial type) ----
+point-type	in	RETURN typeof(point({x: 1.0, y: 2.0})) AS t	[["POINT"]]
+point-distance	in	RETURN point.distance(point({x: 0, y: 0}), point({x: 3, y: 4})) AS d	[[5.0]]
+point-equality	in	RETURN point({x: 1, y: 2}) = point({x: 1.0, y: 2.0}) AS b	[[true]]
+point-string	in	RETURN toString(point({x: 1.0, y: 2.0})) AS p	[["point({x: 1.0, y: 2.0})"]]
+point-order	out	RETURN point({x: 0, y: 0}) < point({x: 1, y: 0}) AS b	comparable
+point-incomplete	out	RETURN point({x: 1}) AS p	both x and y
+
 # ---- DATE (M6.5: the first temporal type) ----
 date-type	in	RETURN typeof(date('2026-10-21')) AS t	[["DATE"]]
 date-string	in	RETURN toString(date('2026-10-21')) AS s	[["2026-10-21"]]
