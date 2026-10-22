@@ -690,6 +690,15 @@ st = db.gq("find Person")          # a Statement, with the same cells
 db.link(1, "KNOWS", 2)             # => the new edge's id
 ```
 
+The two typed values cross as real Ruby objects, not as numbers:
+
+```ruby
+db.query("RETURN date('2026-10-21') AS d").first.first   # => #<Date: 2026-10-21>
+db.query("RETURN point({x: 1.0, y: 2.0}) AS p").first.first
+# => #<Glyphes::Point (1.0, 2.0)>, with p.distance_to(other)
+```
+
+
 `each_slice` is the primitive, `each` is sugar over it with a fixed
 batch of 256. There is no per-row FFI path in the public API, and there
 will not be one — it would be a trap that looks fast in a microbenchmark

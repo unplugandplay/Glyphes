@@ -48,6 +48,32 @@ module Glyphes
     def inspect = "#<Glyphes::Vector [#{@values.join(', ')}]>"
   end
 
+  # A `GLY_POINT` cell: two float64, cartesian (CYPHER.md §6.4).
+  #
+  # A value class rather than a two-element Array, for the same reason
+  # Vector is one: `p.distance_to(q)` is what callers reach for, and an
+  # Array would make it a NoMethodError three frames away.
+  class Point
+    attr_reader :x, :y
+
+    def initialize(x, y)
+      @x = x
+      @y = y
+    end
+
+    def distance_to(other)
+      o = other.is_a?(Point) ? other : Point.new(*other)
+      Math.sqrt((x - o.x)**2 + (y - o.y)**2)
+    end
+
+    def ==(other)
+      other.is_a?(Point) && x == other.x && y == other.y
+    end
+
+    def to_s = "point({x: #{x.to_f}, y: #{y.to_f}})"
+    def inspect = "#<Glyphes::Point (#{x.to_f}, #{y.to_f})>"
+  end
+
   # A `GLY_PATH` cell: the nodes in traversal order, the edges between
   # them, and each edge's direction (0 = src→dst, 1 = dst→src).
   #

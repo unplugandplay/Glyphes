@@ -21,7 +21,8 @@ module Glyphes
       FFI::GLY_STRING => :string, FFI::GLY_BYTES => :bytes,
       FFI::GLY_VECTOR => :vector, FFI::GLY_NODE => :node,
       FFI::GLY_EDGE => :edge,   FFI::GLY_PATH => :path,
-      FFI::GLY_LIST => :list,   FFI::GLY_MAP => :map
+      FFI::GLY_LIST => :list,   FFI::GLY_MAP => :map,
+      FFI::GLY_DATE => :date,   FFI::GLY_POINT => :point
     }.freeze
 
     def initialize(struct, stmt, handle = nil)
@@ -59,6 +60,8 @@ module Glyphes
       when :vector then Glyphes::Vector.new(vector)
       when :list, :map then JSON.parse(text)
       when :path   then path
+      when :date   then date_value
+      when :point  then point_value
       else @raw[:aux]
       end
     end
@@ -94,11 +97,31 @@ module Glyphes
       out.read_string(@len)
     end
 
+    def date_value
+      ## `GLY_DATE`'s payload is the day count since 1970-01-01
+      ## (execute.nim's toCell), which is exactly `Date`'s epoch: the
+      ## binding hands back a real `Date` rather than the integer.
+      ::Date.new(1970, 1, 1) + int_of(@raw[:aux])
+    end
+
+    def point_value
+      ## Two float64 in statement memory, the same mechanism a vector
+      ## uses. Before this arm existed the cell fell through to `else`,
+      ## read `aux` — which is 0 for a point — and answered `0`: a wrong
+      ## answer, silently, which is the one thing the engine refuses to
+      ## do. `len` is 0 for a point, so the count is fixed at two.
+      Glyphes::Point.new(*@raw[:ptr].get_bytes(0, 16).unpack("D2"))
+    end
+
     def vector
       # `len` is the dimension for a vector cell; the payload is that many
       # float64s in statement memory (execute.nim's toCell). The property
       # model stores f32, so this is the f64 widening the ABI promises.
-      @raw[:ptr].read_array_of_float64(@len)
+      ## `get_array_of_float64`, not `read_array_of_float64`: the latter
+      ## is what this said until a point needed the same call, and this
+      ## gem's Pointer has never had it. No test read a vector *cell*,
+      ## so the wrong name was never exercised.
+      @raw[:ptr].get_bytes(0, 8 * @len).unpack("D#{@len}")
     end
 
     # A path crosses as three parallel arrays in statement memory, and the

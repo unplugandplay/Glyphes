@@ -289,12 +289,19 @@ a dot starts a name rather than ending one, and the parser tells it from
 `n.age` by a two-token lookahead. A point is not orderable: the standard
 has no `<` for one, and a distance is a function, not an ordering.
 
+**And the Ruby side of both.** A `GLY_DATE` cell becomes a stdlib
+`Date`, a `GLY_POINT` cell a `Glyphes::Point` with `x`, `y` and
+`distance_to`. The first version of the point arm read the wrong field
+and answered `0` — a wrong answer the engine never gave, produced by the
+binding — which is the failure the `else`-branch shape invites. Fixing it
+also turned up the vector arm's `read_array_of_float64`, a method this
+gem's `Pointer` has never had: no test read a vector *cell*, so the name
+was never exercised.
+
 **Still to come in X5:** `datetime`, `time`, `local datetime`,
 `local time`, `duration`; arithmetic between temporal values; and the
 polygonal types (`LINE`/`POLYGON` are Neo4j extensions, not openCypher,
-and I would want a reason before adding them). The ABI crosses a date as
-`GLY_DATE` and a point as `GLY_POINT`; a Ruby `Date`/`Point` class is the
-next Ruby-side step.
+and I would want a reason before adding them).
 
 The original section follows:
 
