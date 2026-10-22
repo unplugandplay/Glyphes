@@ -131,6 +131,33 @@ suite "GLYPH BASIC — the control flow":
     check text == "yes\na\nb\n"
     close(db)
 
+  test "every comparison operator, and <> is one token":
+    ## `<>` is in the grammar, but the lexer used to hand the parser
+    ## `<` and `>` as two tokens, so `x <> 2` was a syntax error. The
+    ## two-character operators are one word now.
+    let db = freshDb()
+    let text = run(db, ["let x = 2",
+                        "if x = 2 then print 1",
+                        "if x <> 2 then print 2",
+                        "if x <> 3 then print 3",
+                        "if x <= 2 then print 4",
+                        "if x >= 3 then print 5",
+                        "if x > 1 then print 6",
+                        "if x < 2 then print 7"])
+    check text == "1\n3\n4\n6\n"
+    close(db)
+
+  test "a nested if owns only its piece, not the outer body":
+    ## The host's rule, and it is not the obvious one: an `if` at the
+    ## line level owns the rest of the line, but an `if` that is one
+    ## piece of a body owns only its own tail — the outer body keeps
+    ## its remaining pieces.
+    let db = freshDb()
+    let text = run(db, ["if 1 then if 0 then print 1 : print 2",
+                        "for i = 1 to 2 : if i = 2 then print i : print 9 : next"])
+    check text == "2\n9\n2\n9\n"
+    close(db)
+
   test "a condition that is null is false":
     ## Null is not truthy, in the client's language as in the engine's
     ## (C6): a language that treats null as false teaches the wrong

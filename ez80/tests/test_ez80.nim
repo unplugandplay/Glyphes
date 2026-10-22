@@ -413,6 +413,17 @@ const
     "count Person",
     "labels",
     "for i = 1 to 3 : print i : next",
+    "if 1 > 0 then print 7",
+    "if 2 < 1 then print 8",
+    "if 1 then print 10 : print 11",
+    "if 1 then if 0 then print 90 : print 91",
+    "for i = 1 to 2 : if i = 2 then print i : print 99 : next",
+    "let t = 2",
+    "if t then print 12",
+    "if t = 2 then print 13",
+    "if t <> 2 then print 14",
+    "if t >= 2 then print 15",
+    "if t <= 1 then print 16",
     "rem a comment",
     "add Company {name \"Cid\"}",
     "print",
@@ -488,9 +499,10 @@ suite "GLYPH BASIC — the guest and the host client":
   test "the guest is small":
     ## The measuring instrument: the language, in Z80 assembly, in
     ## bytes. The mark was 3 KB for the first half (E3–E5); the writes
-    ## landed at 3,568 bytes, so the published mark moves to 4 KB —
-    ## deliberately, and the plan records it. The remaining half
-    ## (comparisons, text, the program model) will move it again.
+    ## took the guest past it, so the published mark moved to 4 KB —
+    ## deliberately, and the plan records it. The conditional landed at
+    ## 3,956, inside the new mark. The remaining half (text, `input`,
+    ## `while`, the program model) will move it again.
     let here = currentSourcePath().parentDir.parentDir
     let bin = readFile(here / "gbasic.bin")
     check bin.len < 4096
@@ -498,20 +510,23 @@ suite "GLYPH BASIC — the guest and the host client":
   test "what the guest does not have, it refuses":
     ## The other half of the gate: the guest must not half-run. An
     ## unknown statement, a known one with words it cannot read, the
-    ## `step` it has no arithmetic for, a quoted string it has no value
-    ## for, a write with no argument, and a write the *host* refuses all
-    ## print `?` and abandon the line — nothing before the refusal is
-    ## printed, and the body of the refused `for` never runs.
+    ## `step` it has no arithmetic for, a condition with `and` (not in
+    ## its grammar), an `if` with no body, a quoted string it has no
+    ## value for, a write with no argument, and a write the *host*
+    ## refuses all print `?` and abandon the line — nothing before the
+    ## refusal is printed, and the body of the refused `for` never runs.
     let db = guestFixture()
     let guest = guestTranscript(db, [
       "if 1",
       "print 1 2",
       "for i = 1 to 3 step 2 : print i : next",
+      "if 1 and 1 then print 1",
+      "if 1 then",
       "print \"Cid\"",
       "add",
       "add 123",
       "end"
     ])
-    check guest == "?\n?\n?\n?\n?\n?\n"
+    check guest == "?\n?\n?\n?\n?\n?\n?\n?\n"
     close(db)
 

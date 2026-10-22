@@ -57,10 +57,15 @@ proc isSpace(c: char): bool {.inline.} =
   c == ' ' or c == '\t'
 
 proc lexAll(src: string): seq[string] =
-  ## The expression's words. A quoted string is one word.
+  ## The expression's words. A quoted string is one word, and a
+  ## comparison operator of two characters is one word too: `a <> b`
+  ## is three tokens, not four (the parser has always had the operator;
+  ## the lexer used to hand it the two halves).
   var cur = ""
   var inStr = false
-  for ch in src:
+  var i = 0
+  while i < src.len:
+    let ch = src[i]
     if ch == '"':
       inStr = not inStr
       cur.add ch
@@ -70,9 +75,16 @@ proc lexAll(src: string): seq[string] =
         result.add cur
         cur = ""
       if not isSpace(ch):
-        result.add $ch
+        var op = $ch
+        if i + 1 < src.len:
+          let two = ch & src[i + 1]
+          if two in ["<=", ">=", "<>"]:
+            op = two
+            inc i
+        result.add op
     else:
       cur.add ch
+    inc i
   if inStr:
     exprFail("a string with no closing quote")
   if cur.len > 0:

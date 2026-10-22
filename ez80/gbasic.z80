@@ -16,21 +16,23 @@
 ; printing.
 ;
 ; This cut covers: find, count, labels, end, rem, let and bare
-; assignment, print, show, go, for, for each, and the writes add, link,
-; set and drop. The names are the client's, the expressions are the
-; client's, the cursor loop is the client's, and the graph — including
-; every write — still happens on the other side of the channel.
+; assignment, print, show, go, if ... then, for, for each, and the writes
+; add, link, set and drop. The names are the client's, the expressions
+; (arithmetic and comparisons) are the client's, the cursor loop is the
+; client's, and the graph — including every write — still happens on the
+; other side of the channel.
 ;
 ; What it does not cover, and refuses rather than pretending: quoted
-; text, input, if, while, gosub/return and the program model. A quoted
-; string in a value position prints `?` rather than being read as a name
-; with a zero in it, an unknown name is refused rather than created, and
-; an answer the host refuses (it begins with `!`) is printed as the
-; guest's one-word `?` — a refusal the child can see. An expression here
-; is *word-shaped*: `1 + 2` is three words and the operators have to
-; stand alone, because the guest tokenizes the line into words and has
-; no character-by-character parser. That is the price of the budget, and
-; the transcript test only exercises what is here.
+; text, input, while, gosub/return, the program model, and the boolean
+; operators and/or/not in a condition. A quoted string in a value
+; position prints `?` rather than being read as a name with a zero in
+; it, an unknown name is refused rather than created, and an answer the
+; host refuses (it begins with `!`) is printed as the guest's one-word
+; `?` — a refusal the child can see. An expression here is *word-shaped*:
+; `1 + 2` is three words and the operators have to stand alone, because
+; the guest tokenizes the line into words and has no character-by-
+; character parser. That is the price of the budget, and the transcript
+; test only exercises what is here.
 ;
 ; Assemble:  nim c -r ez80/ez80asm.nim -- ez80/gbasic.z80 ez80/gbasic.bin
 ; ------------------------------------------------------------------------
@@ -69,7 +71,9 @@ ANSP     EQU 0xD50D     ; the answer line being printed (2)
 TMP2     EQU 0xD50F     ; a general scratch (2)
 TACC     EQU 0xD511     ; the term's accumulator (2)
 TACC2    EQU 0xD513     ; the term's right-hand side (2)
+LEVEL    EQU 0xD51E     ; how many RUNFROM frames are open (1 = the line)
 MAKE     EQU 0xD51F     ; 1: a name may be created, 0: it must exist
+COPE     EQU 0xD51D     ; the condition's comparison operator
 
 ANSBUF   EQU 0xD520     ; the host's answer (128 bytes)
 CURSOR   EQU 0xD5A0     ; the cursor as text (128 bytes)
@@ -93,6 +97,8 @@ START:
         LD SP,STKTOP
 MAIN:
         LD SP,STKTOP        ; a refusal abandons the line, not the stack
+        XOR A
+        LD (LEVEL),A
         CALL READLINE
         CALL TOKENIZE
         LD B,0
@@ -775,13 +781,108 @@ PRIMARY:
         LD (EXW),A
         RET
 
+; ---- the conditions ----------------------------------------------------
+;
+; cond := add (('='|'<'|'>'|'<='|'>='|'<>') add)?
+;
+; A comparison is *one* comparison, and the operator is a word of its
+; own — the guest's word-shaped rule. `and` and `or` are not here: a
+; condition that used one leaves a word unconsumed, and the caller
+; refuses rather than guessing. A bare value is true when it is not
+; zero, which is the host's `truthy`.
+COND:
+        CALL EXPR
+        LD (VAL),HL
+        CALL PEEKW
+        LD A,(HL)
+        CP '='
+        JR Z,CD_EQ
+        CP '<'
+        JR Z,CD_LT
+        CP '>'
+        JR Z,CD_GT
+        ; no operator: the value itself is the condition
+        LD HL,(VAL)
+        LD A,H
+        OR L
+        JP Z,CD_FALSE
+        JP CD_TRUE
+CD_EQ:  LD A,'='
+        JR CD_OP
+CD_LT:  INC HL
+        LD A,(HL)
+        CP '='
+        JR Z,CD_LE
+        CP '>'
+        JR Z,CD_NE
+        LD A,'<'
+        JR CD_OP
+CD_LE:  LD A,'l'
+        JR CD_OP
+CD_NE:  LD A,'n'
+        JR CD_OP
+CD_GT:  INC HL
+        LD A,(HL)
+        CP '='
+        JR Z,CD_GE
+        LD A,'>'
+        JR CD_OP
+CD_GE:  LD A,'g'
+CD_OP:  LD (COPE),A
+        LD A,(EXW)
+        INC A
+        LD (EXW),A
+        CALL EXPR
+        LD (VAL2),HL
+        LD HL,(VAL)
+        LD DE,(VAL2)
+        LD A,(COPE)
+        CP '='
+        JR Z,CD_C_EQ
+        CP 'n'
+        JR Z,CD_C_NE
+        CP '<'
+        JR Z,CD_C_LT
+        CP 'l'
+        JR Z,CD_C_LE
+        CP '>'
+        JR Z,CD_C_GT
+        ; 'g'
+        CALL CMPHLDE
+        JR C,CD_FALSE
+        JR CD_TRUE
+CD_C_LT: CALL CMPHLDE
+        JR C,CD_TRUE
+        JR CD_FALSE
+CD_C_GT: CALL CMPHLDE
+        JR Z,CD_FALSE
+        JR C,CD_FALSE
+        JR CD_TRUE
+CD_C_EQ: CALL CMPHLDE
+        JR Z,CD_TRUE
+        JR CD_FALSE
+CD_C_NE: CALL CMPHLDE
+        JR NZ,CD_TRUE
+        JR CD_FALSE
+CD_C_LE: CALL CMPHLDE
+        JR Z,CD_TRUE
+        JR C,CD_TRUE
+        JR CD_FALSE
+CD_TRUE: LD HL,1
+        RET
+CD_FALSE: LD HL,0
+        RET
+
 ; ---- the statements ----------------------------------------------------
 
 ; Run the statements [B, C).
 RUNFROM:
         LD A,B
         CP C
-        RET Z                  ; an empty range runs nothing
+        RET NC                 ; an empty (or reversed) range runs nothing
+        LD A,(LEVEL)
+        INC A
+        LD (LEVEL),A
         LD A,(RUNEND)
         PUSH AF
         LD A,C
@@ -800,6 +901,9 @@ RF1:    CALL RUNONE
         JR RF1
 RF2:    POP AF
         LD (RUNEND),A
+        LD A,(LEVEL)
+        DEC A
+        LD (LEVEL),A
         RET
 
 ; Run the statement at CURST.
@@ -892,6 +996,12 @@ RS_KW:
         CALL ISWORD
         OR A
         JP Z,STGO
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGIF
+        CALL ISWORD
+        OR A
+        JP Z,STIF
         LD A,(STMT)
         CALL WORDAI
         LD DE,MSGREM
@@ -1496,6 +1606,97 @@ STDROP:
         OUT (1),A
         RET
 
+; ---- if <cond> then <statement>[: <statement>...] ----------------------
+; The host's rule, which is not the obvious one: at the *line* level the
+; `if` owns the rest of the line, because the host hands it the rest of
+; the string; inside a body the host hands it one piece, so it owns only
+; its own tail. LEVEL is the difference: 1 is the line run.
+STIF:
+        LD A,(STMT)
+        INC A
+        LD (GW),A
+IF_SCAN:
+        LD A,(GW)
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR              ; no `then`
+        JP C,STERR
+        LD A,(GW)
+        CALL WORDAI
+        LD DE,MSGTHEN
+        CALL ISWORD
+        OR A
+        JR Z,IF_FOUND
+        LD A,(GW)
+        INC A
+        LD (GW),A
+        JR IF_SCAN
+IF_FOUND:
+        ; the tail must be there ("if needs a statement after 'then'")
+        LD A,(GW)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        ; the condition must be there
+        LD A,(GW)
+        LD B,A
+        LD A,(STMT)
+        INC A
+        CP B
+        JP Z,STERR
+        LD (EXW),A
+        CALL COND
+        LD (VAL),HL
+        LD A,(EXW)
+        LD B,A
+        LD A,(GW)
+        CP B
+        JP NZ,STERR             ; a word the condition did not use
+        LD HL,(VAL)
+        LD A,H
+        OR L
+        JR Z,IF_FALSE
+        ; run the tail as a statement of its own
+        LD A,(SEND)
+        LD (VAL2),A
+        LD A,(GW)
+        INC A
+        LD (STMT),A
+        LD A,(VAL2)
+        LD (SEND),A
+        LD A,(LEVEL)
+        INC A
+        LD (LEVEL),A
+        CALL RUNSTMT
+        LD A,(LEVEL)
+        DEC A
+        LD (LEVEL),A
+        ; at the line level, the rest of the line follows the if
+        LD A,(LEVEL)
+        CP 1
+        JR NZ,IF_DONE
+        LD A,(CURST)
+        INC A
+        LD B,A
+        LD A,(RUNEND)
+        LD C,A
+        CALL RUNFROM
+        LD A,(RUNEND)
+        LD (CURST),A
+IF_DONE:
+        RET
+IF_FALSE:
+        LD A,(LEVEL)
+        CP 1
+        JR NZ,IF_DONE           ; one piece of a body: skip only this if
+        LD A,(RUNEND)
+        LD (CURST),A
+        RET
+
 ; ---- for ---------------------------------------------------------------
 STFOR:
         LD A,(STMT)
@@ -1957,6 +2158,8 @@ MSGLET:    DB "let", 0
 MSGPRINT:  DB "print", 0
 MSGSHOW:   DB "show", 0
 MSGGO:     DB "go", 0
+MSGIF:     DB "if", 0
+MSGTHEN:   DB "then", 0
 MSGFOR:    DB "for", 0
 MSGREM:    DB "rem", 0
 MSGADD:    DB "add", 0
