@@ -141,6 +141,7 @@ The second implementation, and the reason pin GB9 exists. Its plan:
 | **E2** | the transport | the GLYPH QUERY line goes out; the ids come back ✓ — the guest needs *no* compiler ✓ |
 | **E3** | the grammar | the same statements, in Z80 assembly — the interpreter's *other* half |
 | **E4** | the transcript | **the same transcript as the host client**, byte for byte (GB-F) ✓ |
+| **E5** | the client's own half | the names, the expressions, `show`, `go` and both loops — the grammar the prompt writes ✓ |
 
 **What E1 and E2 are, as shipped.** The channel is three ports: the
 guest writes a request to port 3 and ends it with CR; the host answers;
@@ -159,7 +160,7 @@ assembly:
 |---|---|
 | `gq <line>` | the ids it matched, comma-separated |
 | `props <id>` | the label, then `key value` per property |
-| `edges <id>` | `TYPE dir other` per edge |
+| `edges <id>` | `TYPE -> other` / `TYPE <- other` per edge |
 | `link <a> <t> <b>` | the new edge's id |
 
 A `gq` request may carry parameters after a TAB, as `name=value`
@@ -173,17 +174,47 @@ refusal it cannot see is a refusal the child never learns about.
 Cypher compiler, and the host compiles ✓ (which is the point ✓: the
 language is small enough to *send*, and the engine's is not).
 
-**What E3 and E4 are, as shipped.** The guest is
-`ez80/gbasic.z80` — GLYPH BASIC in Z80 assembly, 615 bytes for the
-statements it covers. It reads a line, splits it into words, sends a
-GLYPH QUERY line over the channel, reads the answer, and prints what
-the host client prints.
+**What E3–E5 are, as shipped.** The guest is `ez80/gbasic.z80` —
+GLYPH BASIC in Z80 assembly, 2,905 bytes for the grammar it covers. It
+reads a line, splits it into words and statements, runs them, and sends
+a GLYPH QUERY line over the channel for the graph work; the answer comes
+back and it prints what the host client prints.
 
-The statements this first cut covers are the ones that reach the graph:
-`find`, `count`, `labels` and `end`. The names, `show`, `go`, the
-expressions and the control flow are the next cut, and the transcript
-test says so by only exercising what is here — a gate that claims more
-than it checks is a gate that rots.
+The statements it covers are `find`, `count`, `labels`, `end`, `let`
+and the bare assignment, `print`, `show`, `go`, `for` and `for each`,
+and the expressions are `+ - * /` over numbers and names. That is the
+grammar the prompt sketch writes — the client's *own* half, as opposed
+to the graph work the host does.
+
+Three things make it the client rather than a remote control, and all
+three are E5's:
+
+- **the name table** — eight names of seven characters, each with a
+  16-bit value; a number in an expression may be a literal or a name;
+- **the statement table** — the line is tokenized once, and a statement
+  is a *range of words* (`STARTS`); the loop body is therefore a range,
+  and re-running the body is re-running the range, with no re-scan and
+  no second copy of the text;
+- **the loop's per-depth state** — the body's range, the cursor's copy
+  and the walking offset are kept per open loop, so a nested loop keeps
+  its own `next` and its own walk (the host's rule).
+
+What the guest still does not have is in PRD §6, and it is *refused*
+rather than ignored: an unknown statement prints `?` and abandons the
+line; a statement with trailing words the guest does not understand is
+refused rather than half-run; an expression is word-shaped (`1 + 2`,
+not `1+2`), because the guest tokenizes into words and has no
+character-by-character parser. The refusal vocabulary is the guest's
+one-word `?` — the host's messages are longer, and that is a documented
+divergence, not an accident.
+
+The transcript gate's script covers exactly this cut: `let` and the
+bare assignment, `print` of a name and of an expression, `find` and
+`print` of the cursor, `for each` walking the cursor with `show`, `go
+... from` a name, `count`, `labels`, and the counting loop. The strings,
+`if`, the writes and the program model are not in it, and the guest
+says so by refusing them — a gate that claims more than it checks is a
+gate that rots.
 
 **E4 is the gate, and it is a byte-for-byte comparison**: the same
 script runs on the host client and on the guest, and the two transcripts

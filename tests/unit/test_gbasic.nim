@@ -303,7 +303,7 @@ suite "GLYPH BASIC — the guest channel":
     check "name Ana" in props
     check "age 34" in props
     let edges = channelAnswer(db, "edges 1")
-    check "KNOWS > 2" in edges
+    check "KNOWS -> 2" in edges
     close(db)
 
   test "a link comes back as the new edge's id":

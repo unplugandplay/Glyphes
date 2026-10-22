@@ -261,9 +261,9 @@ client is what a real user types.
   *guest* has no string type at all (its variables are numeric), so
   the guest's language is a strict subset of the host's. Giving it a
   string type — a pointer, a length and a copy, on a machine with
-  24-bit registers — is the guest's largest single piece of work, and
-  it is why the transcript gate (GB-F) cannot be closed until it is
-  done.
+  24-bit registers — is the guest's largest single piece of work. The
+  transcript gate (GB-F) measures the subset the guest has; it cannot
+  measure a string the guest does not have.
 - **Functions and procedures.** `gosub` is enough for a first language,
   and a call stack in the guest is a lot of memory. The host version may
   add `def`.
@@ -271,10 +271,15 @@ client is what a real user types.
   subroutines and `goto` gone for good — but a loop whose body is the
   *lines that follow* is not, and needs the indentation or the
   `END-IF` convention that the one-line bodies avoid.
-- **The eZ80 guest's first cut.** It is the *next* cut, after the host
-  client and the language's grammar have stopped moving. Pin GB9 is the
-  check that the grammar is small enough, and the guest is what proves
-  it.
+- **The eZ80 guest's remaining half.** The guest now has the names,
+  the expressions, `show`, `go` and both loops (§3.1, §3.2), and its
+  transcript matches the host client's byte for byte on the script that
+  covers them (GB-F). Still missing, and refused by name rather than
+  ignored: quoted text, `input`, `if`, `while`, `gosub`/`return` and the
+  program model, and the writing statements (`add`, `link`, `set`,
+  `drop`). Its expressions are word-shaped (`1 + 2`, not `1+2`) and its
+  refusal vocabulary is a single `?` — the two divergences the 3 KB
+  budget buys, documented where the guest is.
 - **Replacing the Ruby model layer.** GLYPH BASIC is a *client*; the
   model layer is a *client*. They are peers, and the model layer stays.
 

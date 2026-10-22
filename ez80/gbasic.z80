@@ -11,29 +11,75 @@
 ; port channel (ez80/channel.z80) and reads the answer back — so the
 ; guest needs no compiler and no graph, and the host does the work.
 ;
-; What is here is the client's *own* part: the line, the words, the
-; request, the answer, and the printing — which is exactly the part the
-; host client has in Nim, and exactly the part that has to be small.
+; What is here is the client's *own* part: the line, the statements, the
+; names, the expressions, the loop, the request, the answer and the
+; printing.
 ;
-; This first cut covers the statements that reach the graph:
-; `find`, `count`, `labels` and `end`. The names, `show`, `go`, the
-; expressions and the control flow are the next cut, and the transcript
-; test says so by only exercising what is here.
+; This cut covers: find, count, labels, end, let and bare assignment,
+; print, show, go, for and for each. The names are the client's, the
+; expressions are the client's, and the cursor loop is the client's —
+; the graph still happens on the other side of the channel.
+;
+; What it does not cover, and refuses rather than pretending: quoted
+; text, input, if, while, gosub/return, the program model, and the
+; writing statements (add, link, set, drop). An expression here is
+; *word-shaped*: `1 + 2` is three words and the operators have to stand
+; alone, because the guest tokenizes the line into words and has no
+; character-by-character parser. That is the price of 2 KB, and the
+; transcript test only exercises what is here.
 ;
 ; Assemble:  nim c -r ez80/ez80asm.nim -- ez80/gbasic.z80 ez80/gbasic.bin
 ; ------------------------------------------------------------------------
 
 CR      EQU 13
+TAB     EQU 9
 
 ; ---- memory map ----------------------------------------------------
-LINEBUF EQU 0xD400      ; the statement line (96 bytes)
-WORDS   EQU 0xD470      ; the word offsets (24 bytes)
-WCOUNT  EQU 0xD490      ; the number of words (1 byte)
-ANSBUF  EQU 0xD4A0      ; the host's answer (128 bytes)
-DIVCNT  EQU 0xD530      ; the division's counter
-PNCNT   EQU 0xD531      ; the printed digits
-SCR     EQU 0xD532      ; scratch
-STKTOP  EQU 0xBFF0
+LINEBUF  EQU 0xD400     ; the line as read (100 bytes)
+WORDS    EQU 0xD470     ; the word offsets (64 bytes)
+STARTS   EQU 0xD4B0     ; the word index each statement starts at (64)
+
+WCOUNT   EQU 0xD4F0     ; the number of words
+SCOUNT   EQU 0xD4F1     ; the number of statement boundaries
+STMT     EQU 0xD4F2     ; the current statement's first word
+SEND     EQU 0xD4F3     ; one past its last word
+CURST    EQU 0xD4F4     ; the statement being run
+RUNEND   EQU 0xD4F5     ; one past the last statement to run
+EXW      EQU 0xD4F6     ; the expression's word cursor
+NAMEI    EQU 0xD4F7     ; the statement's name word
+GW       EQU 0xD4F8     ; `go`'s word cursor
+FI       EQU 0xD4F9     ; the body scan's statement cursor
+DEPTH    EQU 0xD4FA     ; the body scan's nesting depth
+BODYEND  EQU 0xD4FB     ; the statement a body ends at (the `next`)
+NUMCNT   EQU 0xD4FD     ; the digits being formatted
+DIVCNT   EQU 0xD4FE     ; the division's counter
+PNCNT    EQU 0xD4FF     ; the printed digits
+OP       EQU 0xD500     ; the operator being applied
+ACC      EQU 0xD501     ; the expression's accumulator (2)
+ACC2     EQU 0xD503     ; the right-hand side (2)
+VAL      EQU 0xD505     ; a value being moved around (2)
+VAL2     EQU 0xD507     ; a second value (2)
+VAL3     EQU 0xD509     ; a third value (2)
+TXTPTR   EQU 0xD50B     ; the name being looked up (2)
+ANSP     EQU 0xD50D     ; the answer line being printed (2)
+TMP2     EQU 0xD50F     ; a general scratch (2)
+TACC     EQU 0xD511     ; the term's accumulator (2)
+TACC2    EQU 0xD513     ; the term's right-hand side (2)
+
+ANSBUF   EQU 0xD520     ; the host's answer (128 bytes)
+CURSOR   EQU 0xD5A0     ; the cursor as text (128 bytes)
+CURSAVE  EQU 0xD620     ; a walk's copy of the cursor (4 x 128)
+NAMETAB  EQU 0xD820     ; 8 names: 8 bytes of text and 2 of value
+NUMBUF   EQU 0xD870     ; a number as text (16 bytes)
+FSTART   EQU 0xD880     ; a loop's first body statement (4)
+FEND     EQU 0xD884     ; a loop's body end (4)
+CURP     EQU 0xD888     ; a walk's offset in its copy (4)
+LDIDX    EQU 0xD88C     ; how many loops are open
+FVAL     EQU 0xD890     ; a numeric loop's first value (4 x 2)
+FLIM     EQU 0xD898     ; its last value (4 x 2)
+FCUR     EQU 0xD8A0     ; where it is (4 x 2)
+
+STKTOP   EQU 0xBFF0
 
         ORG 0
 
@@ -41,28 +87,33 @@ STKTOP  EQU 0xBFF0
 START:
         LD SP,STKTOP
 MAIN:
+        LD SP,STKTOP        ; a refusal abandons the line, not the stack
         CALL READLINE
         CALL TOKENIZE
-        CALL RUNSTMT
+        LD B,0
+        LD A,(SCOUNT)
+        LD C,A
+        CALL RUNFROM
         JR MAIN
 
 ; ---- the console -----------------------------------------------------
 
 ; Print the NUL-terminated string at HL.
-PRSTR:  LD A,(HL)
-         OR A
-         RET Z
-         OUT (1),A
-         INC HL
-         JR PRSTR
+PRSTR:
+        LD A,(HL)
+        OR A
+        RET Z
+        OUT (1),A
+        INC HL
+        JR PRSTR
 
 ; Print a space, then the string at HL.
-PRSP:   LD A,' '
-         OUT (1),A
-         JR PRSTR
+PRSP:
+        LD A,' '
+        OUT (1),A
+        JR PRSTR
 
-; Print the number in HL, unsigned decimal. (Adapted from the eZ80
-; BASIC's PNUMU: the same division, the same digit stack.)
+; Print the number in HL, unsigned decimal.
 PNUMU:
         LD A,H
         OR L
@@ -98,8 +149,7 @@ PUTCHAR:
         OUT (1),A
         RET
 
-; UDIV: HL / DE. The quotient in HL, the remainder in C. (The eZ80
-; BASIC's, unchanged: a shift-and-subtract division.)
+; UDIV: HL / DE. The quotient in HL, the remainder in C.
 UDIV:
         LD A,D
         OR E
@@ -130,19 +180,43 @@ DVSK:
         JP NZ,DVLP
         RET
 DVERR:
-        LD HL,SCR
-        LD (HL),'/'        ; a division by zero: the sign, and no more
-        LD A,(HL)
+        LD A,'?'
         OUT (1),A
+        RET
+
+; MUL16: HL * DE -> HL (the low 16 bits). The multiplicand shifts
+; left, the multiplier shifts right, and the product gathers in BC.
+MUL16:
+        LD BC,0
+        LD A,16
+        LD (DIVCNT),A
+MU1:    LD A,E
+        AND 1
+        JR Z,MU2
+        LD A,C
+        ADD A,L
+        LD C,A
+        LD A,B
+        ADC A,H
+        LD B,A
+MU2:    ADD HL,HL
+        SRL E
+        RR D
+        LD A,(DIVCNT)
+        DEC A
+        LD (DIVCNT),A
+        JR NZ,MU1
+        LD H,B
+        LD L,C
         RET
 
 ; ---- the line and the words ------------------------------------------
 
-; Read a line from the console into LINEBUF. The length comes back in A.
+; Read a line from the console into LINEBUF.
 READLINE:
         LD HL,LINEBUF
         LD B,0
-RL1:    IN A,(2)              ; a character is waiting?
+RL1:    IN A,(2)
         OR A
         JR Z,RL1
         IN A,(1)
@@ -156,43 +230,88 @@ RL2:    LD (HL),0
         LD A,B
         RET
 
-; Split the line into words: the offsets of the words in WORDS, and the
-; count in WCOUNT. Each word is NUL-terminated in place — the space
-; that ended it becomes the terminator.
+; Split the line into words and statements.
+;
+; A word is a run of characters. The space after it becomes its NUL.
+; A colon is a *statement boundary*: it becomes a NUL too, and the word
+; that follows starts a new statement. STARTS[j] is the word index
+; statement j begins at; STARTS[SCOUNT] is WCOUNT (the sentinel), so a
+; statement is the words [STARTS[j], STARTS[j+1]).
 TOKENIZE:
         LD A,0
         LD (WCOUNT),A
+        LD A,1
+        LD (SCOUNT),A          ; the line is at least one statement
+        LD HL,STARTS
+        LD (HL),0
         LD HL,LINEBUF
-        LD DE,WORDS
-        LD C,0              ; the offset in the line
+        LD C,0
 TK1:    LD A,(HL)
         OR A
-        RET Z
+        JP Z,TKEND
         CP ' '
-        JR Z,TKSKIP
-        LD A,C
-        LD (DE),A
-        INC DE
+        JR Z,TKSPACE
+        CP ':'
+        JR Z,TKCOLON
+        ; a word begins here
+        LD A,(WCOUNT)
+        LD E,A
+        LD D,0
+        PUSH HL
+        LD HL,WORDS
+        ADD HL,DE
+        LD (HL),C
+        POP HL
         LD A,(WCOUNT)
         INC A
         LD (WCOUNT),A
-TKEND:  LD A,(HL)
+TK2:    LD A,(HL)
         OR A
-        JR Z,TKDONE          ; the end of the line
+        JP Z,TKEND
         CP ' '
-        JR Z,TKSKIP          ; the end of the word
+        JR Z,TKSPACE
+        CP ':'
+        JR Z,TK1              ; the boundary handler takes it
         INC HL
         INC C
-        JR TKEND
-TKSKIP: LD (HL),0           ; the separator ends the previous word
+        JR TK2
+TKSPACE:
+        LD A,0
+        LD (HL),A
         INC HL
         INC C
         JR TK1
-TKDONE: LD (HL),0
+TKCOLON:
+        LD A,0
+        LD (HL),A
+        INC HL
+        INC C
+        LD A,(SCOUNT)
+        LD E,A
+        LD D,0
+        PUSH HL
+        LD HL,STARTS
+        ADD HL,DE
+        LD A,(WCOUNT)
+        LD (HL),A
+        POP HL
+        LD A,(SCOUNT)
+        INC A
+        LD (SCOUNT),A
+        JR TK1
+TKEND:
+        LD A,(SCOUNT)
+        LD E,A
+        LD D,0
+        LD HL,STARTS
+        ADD HL,DE
+        LD A,(WCOUNT)
+        LD (HL),A
         RET
 
 ; The address of word A (0-based) in HL.
-WORDAI: LD L,A
+WORDAI:
+        LD L,A
         LD H,0
         LD DE,WORDS
         ADD HL,DE
@@ -205,7 +324,6 @@ WORDAI: LD L,A
 ; Is the word at HL the keyword at DE? The case is ignored, and the
 ; answer is in A: 0 for the same, 1 for different.
 ISWORD:
-        LD (SCR),HL          ; the word's address, for the walk
 ISW1:   LD A,(DE)
         OR A
         JR Z,ISW2
@@ -217,7 +335,7 @@ ISW1:   LD A,(DE)
         JR C,ISW3
         CP 123
         JR NC,ISW3
-        SUB 32              ; an upper-case letter
+        SUB 32
 ISW3:   LD B,A
         LD A,(HL)
         CP 'a'
@@ -240,8 +358,7 @@ ISWYES: LD A,0
 
 ; ---- the channel ------------------------------------------------------
 
-; Send the NUL-terminated string at HL to the host, with no terminator:
-; a request is built from parts, and only the last one ends it.
+; Send the NUL-terminated string at HL to the host, with no terminator.
 SENDPART:
         LD A,(HL)
         OR A
@@ -250,12 +367,43 @@ SENDPART:
         INC HL
         JR SENDPART
 
-; Send the NUL-terminated string at HL to the host, then CR — the end
-; of the request.
+; Send the NUL-terminated string at HL to the host, then CR.
 SENDSTR:
         CALL SENDPART
         LD A,CR
         OUT (3),A
+        RET
+
+; Send the number in HL to the host as decimal.
+SENDNUM:
+        CALL NUMTXT
+        JP SENDPART
+
+; The number in HL as decimal text at NUMBUF.
+NUMTXT:
+        LD A,0
+        LD (NUMCNT),A
+NT1:    LD DE,10
+        CALL UDIV
+        LD A,C
+        ADD A,'0'
+        PUSH AF
+        LD A,(NUMCNT)
+        INC A
+        LD (NUMCNT),A
+        LD A,H
+        OR L
+        JR NZ,NT1
+        LD HL,NUMBUF
+NT2:    POP AF
+        LD (HL),A
+        INC HL
+        LD A,(NUMCNT)
+        DEC A
+        LD (NUMCNT),A
+        JR NZ,NT2
+        LD (HL),0
+        LD HL,NUMBUF
         RET
 
 ; Read the host's answer into ANSBUF: the lines are NUL-separated, and
@@ -263,7 +411,7 @@ SENDSTR:
 READANS:
         LD HL,ANSBUF
         LD B,0
-RA1:    IN A,(5)              ; a byte is waiting?
+RA1:    IN A,(5)
         OR A
         JR Z,RA1
         IN A,(4)
@@ -273,15 +421,12 @@ RA1:    IN A,(5)              ; a byte is waiting?
         INC HL
         INC B
         JR RA1
-RA2:    ; a CR: the next byte decides whether the answer is over
-        IN A,(5)
+RA2:    IN A,(5)
         OR A
         JR Z,RA2
         IN A,(4)
         CP CR
-        JR Z,RA3              ; the empty line: the answer is over
-        ; The CR ends this line, and the byte we just read is the
-        ; first of the next one: it must not be dropped.
+        JR Z,RA3
         LD (HL),0
         INC HL
         INC B
@@ -290,18 +435,19 @@ RA2:    ; a CR: the next byte decides whether the answer is over
         INC B
         JR RA1
 RA3:    LD (HL),0
+        INC HL
+        LD (HL),0             ; the empty line: the answer's end
         RET
 
-; Count the ids in the answer's first line. The count comes back in HL.
+; Count the ids (the runs of digits) in the line at HL.
 COUNTIDS:
-        LD HL,ANSBUF
-        LD DE,0              ; the count
+        LD DE,0
 CI1:    LD A,(HL)
         OR A
         JR Z,CIDONE
         CP '0'
         JR C,CINEXT
-        CP 58                ; '9' + 1
+        CP 58
         JR NC,CINEXT
         INC DE
 CI2:    INC HL
@@ -317,10 +463,9 @@ CIDONE: LD H,D
         LD L,E
         RET
 
-; Print the answer's lines, one per line.
+; Print the NUL-separated lines at HL, one per line.
 PRTLINES:
-        LD HL,ANSBUF
-PT1:    LD A,(HL)
+        LD A,(HL)
         OR A
         RET Z
 PT2:    LD A,(HL)
@@ -332,51 +477,430 @@ PT2:    LD A,(HL)
 PT3:    LD A,CR
         OUT (1),A
         INC HL
-        JR PT1
+        JR PRTLINES
+
+; Does the text at HL begin with the prefix at DE? Z if it does.
+PREFIX:
+        LD A,(DE)
+        OR A
+        JR Z,PYES
+        LD B,A
+        LD A,(HL)
+        CP B
+        JR NZ,PNO
+        INC HL
+        INC DE
+        JR PREFIX
+PYES:   XOR A
+        RET
+PNO:    LD A,1
+        OR A
+        RET
+
+; Advance ANSP past the line it points at.
+ANSNEXT:
+        LD HL,(ANSP)
+AN1:    LD A,(HL)
+        OR A
+        JR Z,AN2
+        INC HL
+        JR AN1
+AN2:    INC HL
+        LD (ANSP),HL
+        RET
+
+; Copy the NUL-terminated string at HL to DE.
+COPYSTR:
+        LD A,(HL)
+        LD (DE),A
+        OR A
+        RET Z
+        INC HL
+        INC DE
+        JR COPYSTR
+
+; Clear the 128 bytes at HL.
+CLRSLOT:
+        LD B,128
+        LD A,0
+CL1:    LD (HL),A
+        INC HL
+        DJNZ CL1
+        RET
+
+; ---- the names --------------------------------------------------------
+
+; Are the name at DE and the text at HL the same? Z if they are.
+NAMEEQ:
+        PUSH DE
+NE1:    LD A,(DE)
+        OR A
+        JR Z,NEY
+        LD B,A
+        LD A,(HL)
+        CP B
+        JR NZ,NEN
+        INC HL
+        INC DE
+        JR NE1
+NEY:    LD A,(HL)
+        OR A
+        JR NZ,NEN
+        POP DE
+        XOR A
+        RET
+NEN:    POP DE
+        LD A,1
+        OR A
+        RET
+
+; The slot for the name at HL. A new name is given a slot with a value
+; of zero; a name that does not fit is refused.
+SLOT:
+        LD (TXTPTR),HL
+        LD DE,NAMETAB
+        LD B,8
+SL1:    PUSH BC
+        PUSH DE
+        LD HL,(TXTPTR)
+        CALL NAMEEQ
+        POP DE
+        POP BC
+        JR Z,SLHIT
+        LD A,E
+        ADD A,10
+        LD E,A
+        JR NC,SL2
+        INC D
+SL2:    DJNZ SL1
+        LD DE,NAMETAB
+        LD B,8
+SL3:    LD A,(DE)
+        OR A
+        JR Z,SLNEW
+        LD A,E
+        ADD A,10
+        LD E,A
+        JR NC,SL4
+        INC D
+SL4:    DJNZ SL3
+        JP STERR
+SLHIT:  LD H,D
+        LD L,E
+        RET
+SLNEW:
+        PUSH DE
+        LD HL,(TXTPTR)
+        LD B,7
+SLC1:   LD A,(HL)
+        OR A
+        JR Z,SLC2
+        LD (DE),A
+        INC HL
+        INC DE
+        DEC B
+        JR NZ,SLC1
+SLC2:   LD A,0
+        LD (DE),A
+        POP HL
+        PUSH HL
+        LD DE,8
+        ADD HL,DE
+        LD (HL),0
+        INC HL
+        LD (HL),0
+        POP HL
+        RET
+
+; The value of the word at HL: a number, or a name's value.
+GETVAL:
+        LD (TXTPTR),HL
+GV1:    LD A,(HL)
+        OR A
+        JR Z,GVNUM
+        CP '0'
+        JR C,GVNAME
+        CP 58
+        JR NC,GVNAME
+        INC HL
+        JR GV1
+GVNUM:  LD HL,(TXTPTR)
+        JP PARSENUM
+GVNAME: LD HL,(TXTPTR)
+        CALL SLOT
+        LD DE,8
+        ADD HL,DE
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        LD H,D
+        LD L,E
+        RET
+
+; The decimal number at HL, in HL.
+PARSENUM:
+        LD DE,0
+PN1:    LD A,(HL)
+        OR A
+        JR Z,PN2
+        SUB '0'
+        LD C,A
+        PUSH HL
+        LD H,D
+        LD L,E
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,DE
+        ADD HL,HL
+        LD B,0
+        ADD HL,BC
+        LD D,H
+        LD E,L
+        POP HL
+        INC HL
+        JR PN1
+PN2:    LD H,D
+        LD L,E
+        RET
+
+; ---- the expressions ---------------------------------------------------
+
+; The word at EXW, or the empty string.
+PEEKW:
+        LD A,(EXW)
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JR Z,PKE
+        JR C,PKE
+        LD A,B
+        CALL WORDAI
+        RET
+PKE:    LD HL,MSGEMPTY
+        RET
+
+; expr := term (('+'|'-') term)*
+EXPR:
+        CALL TERM
+        LD (ACC),HL
+EXL:    CALL PEEKW
+        LD A,(HL)
+        CP '+'
+        JR Z,EXOP
+        CP '-'
+        JR Z,EXOP
+        LD HL,(ACC)
+        RET
+EXOP:   LD (OP),A
+        LD A,(EXW)
+        INC A
+        LD (EXW),A
+        CALL TERM
+        LD (ACC2),HL
+        LD HL,(ACC)
+        LD DE,(ACC2)
+        LD A,(OP)
+        CP '+'
+        JR Z,EXADD
+        JR EXSUB
+EXADD:  ADD HL,DE
+        JR EXST
+EXSUB:  CALL SUB16
+EXST:   LD (ACC),HL
+        JR EXL
+
+; term := primary (('*'|'/') primary)*
+TERM:
+        CALL PRIMARY
+        LD (TACC),HL
+TML:    CALL PEEKW
+        LD A,(HL)
+        CP '*'
+        JR Z,TMOP
+        CP '/'
+        JR Z,TMOP
+        LD HL,(TACC)
+        RET
+TMOP:   LD (OP),A
+        LD A,(EXW)
+        INC A
+        LD (EXW),A
+        CALL PRIMARY
+        LD (TACC2),HL
+        LD HL,(TACC)
+        LD DE,(TACC2)
+        LD A,(OP)
+        CP '*'
+        JR NZ,TMDIV
+        CALL MUL16
+        JR TMST
+TMDIV:  CALL UDIV
+TMST:   LD (TACC),HL
+        JR TML
+
+; primary := a number | a name
+PRIMARY:
+        CALL PEEKW
+        LD A,(HL)
+        OR A
+        JP Z,STERR
+        CALL GETVAL
+        LD A,(EXW)
+        INC A
+        LD (EXW),A
+        RET
 
 ; ---- the statements ----------------------------------------------------
 
-RUNSTMT:
-        LD A,(WCOUNT)
-        OR A
-        RET Z
-        LD A,0
-        CALL WORDAI
-        LD (SCR+1),HL         ; the command's address
+; Run the statements [B, C).
+RUNFROM:
+        LD A,B
+        CP C
+        RET Z                  ; an empty range runs nothing
+        LD A,(RUNEND)
+        PUSH AF
+        LD A,C
+        LD (RUNEND),A
+        LD A,B
+        LD (CURST),A
+RF1:    CALL RUNONE
+        LD A,(CURST)
+        INC A
+        LD (CURST),A
+        LD B,A
+        LD A,(RUNEND)
+        CP B
+        JR Z,RF2
+        JR C,RF2
+        JR RF1
+RF2:    POP AF
+        LD (RUNEND),A
+        RET
 
+; Run the statement at CURST.
+RUNONE:
+        LD A,(CURST)
+        CALL BOUNDS
+        LD A,D
+        LD (STMT),A
+        LD A,E
+        LD (SEND),A
+        LD A,E
+        CP D
+        RET Z
+        JP RUNSTMT
+
+; A = statement index -> D = its first word, E = one past its last.
+BOUNDS:
+        LD L,A
+        LD H,0
+        LD DE,STARTS
+        ADD HL,DE
+        LD A,(HL)
+        INC HL
+        LD E,(HL)
+        LD D,A
+        RET
+
+RUNSTMT:
+        ; a bare assignment: word[STMT+1] is "="
+        LD A,(STMT)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JR C,RS_KW
+        JR Z,RS_KW
+        LD A,B
+        LD (EXW),A
+        CALL WORDAI
+        LD DE,MSGEQ
+        CALL ISWORD
+        OR A
+        JP Z,STASSIGN
+RS_KW:
+        LD A,(STMT)
+        CALL WORDAI
         LD DE,MSGFIND
         CALL ISWORD
         OR A
-        JR Z,STFIND
+        JP Z,STFIND
+        LD A,(STMT)
+        CALL WORDAI
         LD DE,MSGCOUNT
         CALL ISWORD
         OR A
-        JR Z,STCOUNT
+        JP Z,STCOUNT
+        LD A,(STMT)
+        CALL WORDAI
         LD DE,MSGLABELS
         CALL ISWORD
         OR A
-        JR Z,STLABELS
+        JP Z,STLABELS
+        LD A,(STMT)
+        CALL WORDAI
         LD DE,MSGEND
         CALL ISWORD
         OR A
-        JR Z,STEND
-        LD DE,MSGFIND
+        JP Z,STEND
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGLET
         CALL ISWORD
         OR A
-        JR Z,STEND
-        RET
+        JP Z,STLET
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGPRINT
+        CALL ISWORD
+        OR A
+        JP Z,STPRINT
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGSHOW
+        CALL ISWORD
+        OR A
+        JP Z,STSHOW
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGGO
+        CALL ISWORD
+        OR A
+        JP Z,STGO
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGFOR
+        CALL ISWORD
+        OR A
+        JP Z,STFOR
+        JP STERR
 
-; find <label>
+; ---- find <label> ------------------------------------------------------
 STFIND:
-        LD A,(WCOUNT)
-        CP 2
-        JR C,STERR
+        LD A,(STMT)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,(STMT)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
         LD HL,MSGQFIND
         CALL SENDPART
-        LD A,1
+        LD A,(STMT)
+        INC A
         CALL WORDAI
         CALL SENDSTR
         CALL READANS
+        LD HL,ANSBUF
+        LD DE,CURSOR
+        CALL COPYSTR
+        LD HL,ANSBUF
         CALL COUNTIDS
         CALL PNUMU
         LD HL,MSGNODES
@@ -385,53 +909,805 @@ STFIND:
         OUT (1),A
         RET
 
-; count <label>
+; ---- count <label> -----------------------------------------------------
 STCOUNT:
-        LD A,(WCOUNT)
-        CP 2
-        JR C,STERR
+        LD A,(STMT)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,(STMT)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
         LD HL,MSGQCOUNT
         CALL SENDPART
-        LD A,1
+        LD A,(STMT)
+        INC A
         CALL WORDAI
         CALL SENDSTR
         CALL READANS
-        ; The answer *is* the count, as text: the guest prints the
-        ; host's own digits rather than counting them again — one less
-        ; thing to get wrong, and one less conversion.
         LD HL,ANSBUF
         CALL PRSTR
         LD A,CR
         OUT (1),A
         RET
 
-; labels
+; ---- labels ------------------------------------------------------------
 STLABELS:
         LD HL,MSGQLABELS
         CALL SENDSTR
         CALL READANS
+        LD HL,ANSBUF
         CALL PRTLINES
         RET
 
-; end
+; ---- end ---------------------------------------------------------------
 STEND:
         HALT
+
+; ---- let <name> = <expr> -----------------------------------------------
+STLET:
+        LD A,(STMT)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,B
+        CALL WORDAI
+        LD DE,MSGEQ
+        CALL ISWORD
+        OR A
+        JP NZ,STERR
+        LD A,(STMT)
+        ADD A,3
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,(STMT)
+        INC A
+        LD (NAMEI),A
+        ADD A,2
+        LD (EXW),A
+        CALL EXPR
+        LD (VAL),HL
+        LD A,(EXW)
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        LD A,(NAMEI)
+        CALL WORDAI
+        CALL SLOT
+        LD DE,8
+        ADD HL,DE
+        LD DE,(VAL)
+        LD (HL),E
+        INC HL
+        LD (HL),D
+        RET
+
+; ---- <name> = <expr> ---------------------------------------------------
+STASSIGN:
+        LD A,(STMT)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,(STMT)
+        LD (NAMEI),A
+        LD A,(STMT)
+        ADD A,2
+        LD (EXW),A
+        CALL EXPR
+        LD (VAL),HL
+        LD A,(EXW)
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        LD A,(NAMEI)
+        CALL WORDAI
+        CALL SLOT
+        LD DE,8
+        ADD HL,DE
+        LD DE,(VAL)
+        LD (HL),E
+        INC HL
+        LD (HL),D
+        RET
+
+; ---- print [<expr>] ----------------------------------------------------
+STPRINT:
+        LD A,(STMT)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JR Z,PRCUR
+        LD A,B
+        LD (EXW),A
+        CALL EXPR
+        LD (VAL),HL
+        LD A,(EXW)
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        LD HL,(VAL)
+        CALL PNUMU
+        LD A,CR
+        OUT (1),A
+        RET
+PRCUR:
+        LD HL,CURSOR
+        CALL COUNTIDS
+        LD A,H
+        OR L
+        JR Z,PR_EMPTY
+        CALL PNUMU
+        LD HL,MSGNODES
+        CALL PRSP
+        LD A,CR
+        OUT (1),A
+        RET
+PR_EMPTY:
+        LD HL,MSGCURSOREMPTY
+        CALL PRSTR
+        LD A,CR
+        OUT (1),A
+        RET
+
+; ---- show <name> -------------------------------------------------------
+STSHOW:
+        LD A,(STMT)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,(STMT)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        LD A,(STMT)
+        INC A
+        CALL WORDAI
+        CALL GETVAL
+        LD (VAL),HL
+        CALL PNUMU
+        ; the label and the properties
+        LD HL,MSGQPROPS
+        CALL SENDPART
+        LD HL,(VAL)
+        CALL SENDNUM
+        LD A,CR
+        OUT (3),A
+        CALL READANS
+        LD HL,ANSBUF
+        LD (ANSP),HL
+        LD HL,(ANSP)
+        LD DE,MSGPROPLABEL
+        CALL PREFIX
+        JR NZ,SH_PROP
+        LD HL,MSGCOLON
+        CALL PRSTR
+        LD HL,(ANSP)
+        LD DE,6
+        ADD HL,DE
+        CALL PRSTR
+        CALL ANSNEXT
+SH_PROP:
+        LD HL,(ANSP)
+        LD A,(HL)
+        OR A
+        JR Z,SH_EDGES
+        LD A,CR
+        OUT (1),A
+        LD HL,MSGINDENT
+        CALL PRSTR
+        LD HL,(ANSP)
+        CALL PRSTR
+        CALL ANSNEXT
+        JR SH_PROP
+SH_EDGES:
+        LD HL,MSGQEDGES
+        CALL SENDPART
+        LD HL,(VAL)
+        CALL SENDNUM
+        LD A,CR
+        OUT (3),A
+        CALL READANS
+        LD HL,ANSBUF
+        LD (ANSP),HL
+SH_E2:
+        LD HL,(ANSP)
+        LD A,(HL)
+        OR A
+        JR Z,SH_DONE
+        LD A,CR
+        OUT (1),A
+        LD HL,MSGINDENT
+        CALL PRSTR
+        LD HL,(ANSP)
+        CALL PRSTR
+        CALL ANSNEXT
+        JR SH_E2
+SH_DONE:
+        LD A,CR
+        OUT (1),A
+        RET
+
+; ---- go [back] <type> [from <name>] ------------------------------------
+STGO:
+        LD A,(STMT)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,B
+        LD (GW),A
+        CALL WORDAI
+        LD DE,MSGBACK
+        CALL ISWORD
+        OR A
+        JR NZ,GO_NB
+        LD A,(GW)
+        INC A
+        LD (GW),A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+GO_NB:
+        LD HL,MSGQGO
+        CALL SENDPART
+        LD A,(GW)
+        CALL WORDAI
+        CALL SENDPART
+        ; "from <name>"?
+        LD A,(GW)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JR Z,GO_SEND
+        JR C,GO_SEND
+        LD A,B
+        LD (GW),A
+        CALL WORDAI
+        LD DE,MSGFROM
+        CALL ISWORD
+        OR A
+        JP NZ,STERR
+        LD A,(GW)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        LD A,B
+        CALL WORDAI
+        CALL GETVAL
+        LD (VAL),HL
+        LD A,(GW)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        LD HL,MSGFROMQ
+        CALL SENDPART
+        LD A,TAB
+        OUT (3),A
+        LD HL,MSGC0
+        CALL SENDPART
+        LD HL,(VAL)
+        CALL SENDNUM
+GO_SEND:
+        LD A,CR
+        OUT (3),A
+        CALL READANS
+        LD HL,ANSBUF
+        LD DE,CURSOR
+        CALL COPYSTR
+        LD HL,ANSBUF
+        CALL COUNTIDS
+        CALL PNUMU
+        LD HL,MSGNODES
+        CALL PRSP
+        LD A,CR
+        OUT (1),A
+        RET
+
+; ---- for ---------------------------------------------------------------
+STFOR:
+        LD A,(STMT)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,B
+        CALL WORDAI
+        LD DE,MSGEACH
+        CALL ISWORD
+        OR A
+        JP Z,STFOREACH
+        ; for <name> = <expr> to <expr>
+        LD A,(STMT)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,B
+        CALL WORDAI
+        LD DE,MSGEQ
+        CALL ISWORD
+        OR A
+        JP NZ,STERR
+        LD A,(STMT)
+        ADD A,3
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,(STMT)
+        INC A
+        LD (NAMEI),A
+        LD A,(STMT)
+        ADD A,3
+        LD (EXW),A
+        CALL EXPR
+        LD (VAL),HL
+        LD A,(EXW)
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        LD A,(EXW)
+        CALL WORDAI
+        LD DE,MSGTO
+        CALL ISWORD
+        OR A
+        JP NZ,STERR
+        LD A,(EXW)
+        INC A
+        LD (EXW),A
+        CALL EXPR
+        LD (VAL2),HL
+        LD A,(EXW)
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        CALL FINDBODY
+        CALL LOOPENTER
+        ; the range, in this loop's own slot
+        LD HL,FVAL
+        CALL FPTR
+        LD DE,(VAL)
+        LD (HL),E
+        INC HL
+        LD (HL),D
+        LD HL,FLIM
+        CALL FPTR
+        LD DE,(VAL2)
+        LD (HL),E
+        INC HL
+        LD (HL),D
+FL_START:
+        ; the current value starts at the first one
+        LD HL,FVAL
+        CALL FPTR
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        PUSH DE
+        LD HL,FCUR
+        CALL FPTR
+        POP DE
+        LD (HL),E
+        INC HL
+        LD (HL),D
+FL_CHECK:
+        ; stop when the current value is past the limit
+        LD HL,FCUR
+        CALL FPTR
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        LD H,D
+        LD L,E
+        LD (VAL3),HL
+        LD HL,FLIM
+        CALL FPTR
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        LD HL,(VAL3)
+        PUSH HL
+        LD H,D
+        LD L,E
+        POP DE
+        CALL CMPHLDE
+        JR C,FL_STOP
+        ; bind the name
+        LD A,(NAMEI)
+        CALL WORDAI
+        CALL SLOT
+        LD DE,8
+        ADD HL,DE
+        LD DE,(VAL3)
+        LD (HL),E
+        INC HL
+        LD (HL),D
+        CALL RUNBODY
+        ; v = v + 1
+        LD HL,FCUR
+        CALL FPTR
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        INC DE
+        LD A,D
+        OR E
+        JR Z,FL_STOP          ; 16 bits cannot count past 65535
+        LD (HL),D
+        DEC HL
+        LD (HL),E
+        JR FL_CHECK
+FL_STOP:
+        CALL LOOPLEAVE
+        RET
+
+; ---- for each <name> [do] ----------------------------------------------
+STFOREACH:
+        LD A,(STMT)
+        ADD A,2
+        LD (NAMEI),A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        ; an optional "do", and nothing else
+        LD A,(NAMEI)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JR Z,FE_NODO
+        LD A,B
+        CALL WORDAI
+        LD DE,MSGDO
+        CALL ISWORD
+        OR A
+        JP NZ,STERR
+        LD A,(NAMEI)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+FE_NODO:
+        CALL FINDBODY
+        CALL LOOPENTER
+        ; the walk uses a copy of the cursor
+        CALL CURSLOT
+        CALL CLRSLOT
+        CALL CURSLOT
+        PUSH HL
+        EX DE,HL
+        LD HL,CURSOR
+        CALL COPYSTR
+        POP HL
+        ; and starts at its beginning
+        LD A,(LDIDX)
+        DEC A
+        LD E,A
+        LD D,0
+        LD HL,CURP
+        ADD HL,DE
+        LD (HL),0
+FE_TOP:
+        CALL NEXTID
+        LD A,H
+        OR L
+        JR Z,FE_DONE
+        LD (VAL),HL
+        LD A,(NAMEI)
+        CALL WORDAI
+        CALL SLOT
+        LD DE,8
+        ADD HL,DE
+        LD DE,(VAL)
+        LD (HL),E
+        INC HL
+        LD (HL),D
+        CALL RUNBODY
+        JR FE_TOP
+FE_DONE:
+        ; the walk leaves the cursor where it found it
+        CALL CURSLOT
+        LD DE,CURSOR
+        CALL COPYSTR
+        CALL LOOPLEAVE
+        RET
+
+; The body's end: the statement of the `next` that closes this loop, or
+; SCOUNT when the loop has none (the one-line form). A nested `for` is
+; counted, so a loop is closed by its own `next`.
+FINDBODY:
+        LD A,(CURST)
+        INC A
+        LD (FI),A
+        LD A,1
+        LD (DEPTH),A
+FB1:    LD A,(FI)
+        LD B,A
+        LD A,(SCOUNT)
+        CP B
+        JR Z,FB_NONE
+        JR C,FB_NONE
+        LD A,(FI)
+        CALL BOUNDS
+        LD A,D
+        LD (STMT),A
+        LD A,E
+        LD (SEND),A
+        LD A,D
+        CALL WORDAI
+        LD DE,MSGFOR
+        CALL ISWORD
+        OR A
+        JR NZ,FB_CHKN
+        LD A,(DEPTH)
+        INC A
+        LD (DEPTH),A
+        JR FB_ADV
+FB_CHKN:
+        LD A,(FI)
+        CALL BOUNDS
+        LD A,D
+        CALL WORDAI
+        LD DE,MSGNEXT
+        CALL ISWORD
+        OR A
+        JR NZ,FB_ADV
+        LD A,(DEPTH)
+        DEC A
+        LD (DEPTH),A
+        JR NZ,FB_ADV
+        LD A,(FI)
+        LD (BODYEND),A
+        RET
+FB_ADV:
+        LD A,(FI)
+        INC A
+        LD (FI),A
+        JR FB1
+FB_NONE:
+        LD A,(SCOUNT)
+        LD (BODYEND),A
+        RET
+
+; Remember a loop's body range for this depth.
+LOOPENTER:
+        LD A,(LDIDX)
+        CP 4
+        JP NC,STERR
+        LD E,A
+        LD D,0
+        LD HL,FSTART
+        ADD HL,DE
+        LD A,(CURST)
+        INC A
+        LD (HL),A
+        LD A,(LDIDX)
+        LD E,A
+        LD D,0
+        LD HL,FEND
+        ADD HL,DE
+        LD A,(BODYEND)
+        LD (HL),A
+        LD A,(LDIDX)
+        INC A
+        LD (LDIDX),A
+        RET
+
+; Close a loop: the rest of the line continues after its `next`.
+LOOPLEAVE:
+        LD A,(LDIDX)
+        DEC A
+        LD (LDIDX),A
+        LD E,A
+        LD D,0
+        LD HL,FEND
+        ADD HL,DE
+        LD A,(HL)
+        LD (CURST),A
+        RET
+
+; Run the body of the open loop.
+RUNBODY:
+        LD A,(LDIDX)
+        DEC A
+        LD E,A
+        LD D,0
+        LD HL,FSTART
+        ADD HL,DE
+        LD B,(HL)
+        LD HL,FEND
+        ADD HL,DE
+        LD C,(HL)
+        JP RUNFROM
+
+; HL = the save slot of the open loop (CURSAVE + depth*128).
+CURSLOT:
+        LD A,(LDIDX)
+        DEC A
+        LD L,A
+        LD H,0
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        LD DE,CURSAVE
+        ADD HL,DE
+        RET
+
+; HL = the address of the open loop's FVAL/FLIM/FCUR entry, given the
+; array's base in HL.
+FPTR:
+        LD A,(LDIDX)
+        DEC A
+        ADD A,A
+        LD E,A
+        LD D,0
+        ADD HL,DE
+        RET
+
+; The next id in the open loop's saved cursor, or 0 at its end.
+NEXTID:
+        CALL CURSLOT
+        LD (TMP2),HL
+        LD A,(LDIDX)
+        DEC A
+        LD E,A
+        LD D,0
+        LD HL,CURP
+        ADD HL,DE
+        LD A,(HL)
+        LD E,A
+        LD D,0
+        LD HL,(TMP2)
+        ADD HL,DE
+        LD A,(HL)
+        OR A
+        JR Z,NI_NONE
+        LD DE,0
+NI1:    LD A,(HL)
+        CP '0'
+        JR C,NI2
+        CP 58
+        JR NC,NI2
+        SUB '0'
+        LD C,A
+        PUSH HL
+        LD H,D
+        LD L,E
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,DE
+        ADD HL,HL
+        LD B,0
+        ADD HL,BC
+        LD D,H
+        LD E,L
+        POP HL
+        INC HL
+        JR NI1
+NI2:    PUSH DE
+        LD DE,(TMP2)
+        CALL SUB16
+        INC HL
+        LD C,L
+        LD A,(LDIDX)
+        DEC A
+        LD E,A
+        LD D,0
+        LD HL,CURP
+        ADD HL,DE
+        LD (HL),C
+        POP DE
+        LD H,D
+        LD L,E
+        RET
+NI_NONE:
+        LD HL,0
+        RET
+
+; HL = HL - DE.
+SUB16:
+        LD A,L
+        SUB E
+        LD L,A
+        LD A,H
+        SBC A,D
+        LD H,A
+        RET
+
+; Compare HL with DE: Z if they are equal, C if HL < DE.
+CMPHLDE:
+        LD A,H
+        CP D
+        RET NZ
+        LD A,L
+        CP E
+        RET
+
+; ---- the refusal -------------------------------------------------------
 
 STERR:
         LD HL,MSGERR
         CALL PRSTR
         LD A,CR
         OUT (1),A
-        RET
+        JP MAIN
 
 ; ---- the strings -------------------------------------------------------
 
 MSGQFIND:  DB "gq find ", 0
 MSGQCOUNT: DB "gq count ", 0
 MSGQLABELS: DB "gq labels", 0
+MSGQGO:    DB "gq go ", 0
+MSGFROMQ:  DB " from $c0", 0
+MSGC0:     DB "c0=", 0
+MSGQPROPS: DB "props ", 0
+MSGQEDGES: DB "edges ", 0
 MSGFIND:   DB "find", 0
 MSGCOUNT:  DB "count", 0
 MSGLABELS: DB "labels", 0
 MSGEND:    DB "end", 0
+MSGLET:    DB "let", 0
+MSGPRINT:  DB "print", 0
+MSGSHOW:   DB "show", 0
+MSGGO:     DB "go", 0
+MSGFOR:    DB "for", 0
+MSGNEXT:   DB "next", 0
+MSGEACH:   DB "each", 0
+MSGDO:     DB "do", 0
+MSGTO:     DB "to", 0
+MSGBACK:   DB "back", 0
+MSGFROM:   DB "from", 0
+MSGEQ:     DB "=", 0
+MSGPROPLABEL: DB "label ", 0
+MSGCOLON:  DB " :", 0
+MSGINDENT: DB "  ", 0
 MSGNODES:  DB "nodes", 0
+MSGCURSOREMPTY: DB "the cursor is empty", 0
 MSGERR:    DB "?", 0
+MSGEMPTY:  DB 0

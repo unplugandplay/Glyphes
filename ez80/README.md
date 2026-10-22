@@ -10,6 +10,10 @@ ez80.nim        the CPU: a Z80 superset
 ez80asm.nim     the assembler: the Z80 instruction set plus the eZ80's
 basic.z80       GLYPHE BASIC 1.0 — a line-numbered BASIC in Z80 assembly
 basic.bin       the assembled BASIC
+channel.z80     the port channel to a host: send a line, read an answer
+channel.bin     the assembled channel
+gbasic.z80      GLYPH BASIC — the client's language, on the eZ80
+gbasic.bin      the assembled GLYPH BASIC (the transcript gate loads it)
 tests/          the test suite
 ```
 
@@ -217,6 +221,50 @@ a whole class of program fail:
 And the `GOSUB` stack itself pushed the words big-endian while `RETURN`
 read them little-endian, so every `RETURN` restored a byte-swapped line
 pointer.
+
+## GLYPH BASIC on the eZ80
+
+`gbasic.z80` is the *second* implementation of GLYPH BASIC — the client's
+language, not the line-numbered BASIC above. The host client is Nim
+(`src/gbasic.nim`); this is Z80 assembly, and the proof that the
+language is small enough to be written twice (pin GB9) is the
+**transcript**: the same script, run on both, must produce the same
+bytes (PLAN-GLYPH-BASIC.md §6, E4).
+
+The graph is not here. The guest sends a GLYPH QUERY line over the port
+channel in `channel.z80`, the host compiles it and runs it against a real
+graph, and the answer comes back through the same channel — so the guest
+needs no compiler and no graph, and 3 KB is enough.
+
+What it has: `find`, `count`, `labels`, `end`, `let` and the bare
+assignment, `print`, `show`, `go`, `for`, `for each`; names (eight of
+seven characters, 16-bit values) and the expressions `+ - * /`.
+
+Three things make it a client rather than a remote control, and they are
+also why it fits:
+
+- **the line is tokenized once** — into words, and into statements: a
+  statement is a *range of words* (`STARTS`), so a loop body is a range
+  and re-running the body re-runs the range, with no re-scan;
+- **the names are a table**, not a dictionary: eight slots of a
+  seven-character name and a 16-bit value;
+- **the loops keep their state per depth** — the body's range, a copy of
+  the cursor and the walking offset — so a nested loop keeps its own
+  `next` and its own walk, exactly as the host's does.
+
+What it refuses, rather than pretending: quoted text, `input`, `if`,
+`while`, `gosub`/`return` and the program model, and the writing
+statements (`add`, `link`, `set`, `drop`). An unknown statement, or one
+with trailing words the guest does not understand, prints `?` and
+abandons the line — it does not half-run. The refusal vocabulary is the
+one-word `?`; the host's messages are longer, and that is a documented
+divergence.
+
+The other divergence is the shape of an expression: the guest works on
+words, so `1 + 2` is three words and the operators have to stand alone —
+`1+2` is one word and is not arithmetic. The 3 KB budget buys that, and
+`ez80/tests/test_ez80.nim` measures both the transcript and the size
+(2,905 bytes, under the plan's 3,072).
 
 ## Known gaps
 

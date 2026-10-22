@@ -401,9 +401,19 @@ suite "the port channel — the guest and the real host":
 
 const
   gbScript = [
+    "let p = 1",
+    "print p",
+    "q = 2 + 3",
+    "print q",
     "find Person",
+    "print",
+    "for each p : show p : next",
+    "let s = 1",
+    "go KNOWS from s",
     "count Person",
-    "labels"
+    "labels",
+    "for i = 1 to 3 : print i : next",
+    "end"
   ]
 
 proc guestFixture(): Database =
@@ -453,8 +463,10 @@ suite "GLYPH BASIC — the guest and the host client":
 
   test "the same script, the same transcript":
     ## The gate (GB-F): the guest's bytes are the host client's bytes.
-    ## The script covers the statements this first cut implements — the
-    ## ones that reach the graph — and says so.
+    ## The script covers the statements this cut implements: the names,
+    ## the expressions, `show`, `go`'s cursor, and both loops. The
+    ## statements the guest does not have (text, `if`, the writes) are
+    ## not in it, and the guest refuses them rather than pretending.
     let db = guestFixture()
     let host = hostTranscript(db, gbScript)
     let guest = guestTranscript(db, gbScript)
@@ -468,4 +480,20 @@ suite "GLYPH BASIC — the guest and the host client":
     let here = currentSourcePath().parentDir.parentDir
     let bin = readFile(here / "gbasic.bin")
     check bin.len < 3072
+
+  test "what the guest does not have, it refuses":
+    ## The other half of the gate: the guest must not half-run. An
+    ## unknown statement, a known one with words it cannot read, and the
+    ## `step` it has no arithmetic for all print `?` and abandon the
+    ## line — nothing before the refusal is printed, and the body of the
+    ## refused `for` never runs.
+    let db = guestFixture()
+    let guest = guestTranscript(db, [
+      "if 1",
+      "print 1 2",
+      "for i = 1 to 3 step 2 : print i : next",
+      "end"
+    ])
+    check guest == "?\n?\n?\n"
+    close(db)
 

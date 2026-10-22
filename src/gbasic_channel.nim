@@ -10,7 +10,7 @@
 ##     gq <line>            a GLYPH QUERY line: the ids it matched
 ##     exec <line>          a GLYPH QUERY write: how many entities landed
 ##     props <id>           a node's label, then "key value" per property
-##     edges <id>           "TYPE dir other" per edge, dir being > or <
+##     edges <id>           "TYPE -> other" / "TYPE <- other" per edge
 ##     link <a> <t> <b>     one edge between two existing nodes
 ##
 ## A request is a verb, a space, and its argument — and a `gq`
@@ -88,6 +88,12 @@ proc gqAnswer(t: GbTransport; line: string;
     return idsAnswer(res.ids)
   if res.labels.len > 0:
     return res.labels.join("\r")
+  ## `count` answers even when the answer is zero: the guest prints the
+  ## digits it was given, and an empty answer would print as nothing
+  ## where the client prints "0".
+  let head = line.splitWhitespace()
+  if head.len > 0 and head[0].toLowerAscii == "count":
+    return $res.count
   if res.count != 0:
     return $res.count
   ""
@@ -105,11 +111,13 @@ proc propsAnswer(t: GbTransport; id: int64): string =
   text
 
 proc edgesAnswer(t: GbTransport; id: int64): string =
-  ## A node's edges: the type, which way it goes, and the far end.
+  ## A node's edges, in the shape the client prints them: the type, the
+  ## arrow, and the far end. The arrow is the client's (`->` / `<-`),
+  ## not a direction code — the guest prints the line as it stands.
   var text = ""
   for (rtype, other, forward) in t.edgesFn(id):
     if text.len > 0: text.add "\r"
-    text.add rtype & (if forward: " > " else: " < ") & $other
+    text.add rtype & (if forward: " -> " else: " <- ") & $other
   text
 
 proc channelAnswer*(db: Database; request: string): string =

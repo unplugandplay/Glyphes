@@ -97,6 +97,8 @@ proc renderValue(v: Value): string =
   of vkNode: "node!" & $v.id
   of vkEdge: "edge!" & $v.id
   of vkPath: "path!" & $v.path.nodes.len
+  of vkDate: "date:" & $v.d
+  of vkPoint: "point:" & $v.x & ":" & $v.y
 
 proc fingerprint(s: GraphStore): string =
   ## Everything a reader can observe, in id order: label, endpoints, and
