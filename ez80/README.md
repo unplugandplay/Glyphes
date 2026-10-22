@@ -236,9 +236,13 @@ channel in `channel.z80`, the host compiles it and runs it against a real
 graph, and the answer comes back through the same channel — so the guest
 needs no compiler and no graph, and 3 KB is enough.
 
-What it has: `find`, `count`, `labels`, `end`, `let` and the bare
-assignment, `print`, `show`, `go`, `for`, `for each`; names (eight of
-seven characters, 16-bit values) and the expressions `+ - * /`.
+What it has: `find`, `count`, `labels`, `end`, `rem`, `let` and the bare
+assignment, `print`, `show`, `go`, `for`, `for each`, and the writes
+`add`, `link`, `set`, `drop`; names (eight of seven characters, 16-bit
+values) and the expressions `+ - * /`. The writes ride the channel the
+reads already use — `add` forwards its property list as the host
+forwards it, `set` and `drop` send parameterised `exec` lines, and
+`link` is the verb the engine's no-joins rule needs.
 
 Three things make it a client rather than a remote control, and they are
 also why it fits:
@@ -252,19 +256,21 @@ also why it fits:
   the cursor and the walking offset — so a nested loop keeps its own
   `next` and its own walk, exactly as the host's does.
 
-What it refuses, rather than pretending: quoted text, `input`, `if`,
-`while`, `gosub`/`return` and the program model, and the writing
-statements (`add`, `link`, `set`, `drop`). An unknown statement, or one
-with trailing words the guest does not understand, prints `?` and
-abandons the line — it does not half-run. The refusal vocabulary is the
-one-word `?`; the host's messages are longer, and that is a documented
-divergence.
+What it refuses, rather than pretending: quoted text (a string in a
+value position), `input`, `if`, `while`, `gosub`/`return` and the
+program model. An unknown statement, or one with trailing words the
+guest does not understand, prints `?` and abandons the line — it does
+not half-run — and an answer the host refuses (`!`) is printed as the
+same one-word `?`. The refusal vocabulary is the one-word `?`; the
+host's messages are longer, and that is a documented divergence.
 
 The other divergence is the shape of an expression: the guest works on
 words, so `1 + 2` is three words and the operators have to stand alone —
-`1+2` is one word and is not arithmetic. The 3 KB budget buys that, and
+`1+2` is one word and is not arithmetic. The budget buys that, and
 `ez80/tests/test_ez80.nim` measures both the transcript and the size
-(2,905 bytes, under the plan's 3,072).
+(3,568 bytes, under the plan's new 4 KB mark; the first half fitted in
+3 KB, and the mark moved deliberately when the writes landed — the
+number is in the plan).
 
 ## Known gaps
 

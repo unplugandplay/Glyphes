@@ -15,18 +15,22 @@
 ; names, the expressions, the loop, the request, the answer and the
 ; printing.
 ;
-; This cut covers: find, count, labels, end, let and bare assignment,
-; print, show, go, for and for each. The names are the client's, the
-; expressions are the client's, and the cursor loop is the client's —
-; the graph still happens on the other side of the channel.
+; This cut covers: find, count, labels, end, rem, let and bare
+; assignment, print, show, go, for, for each, and the writes add, link,
+; set and drop. The names are the client's, the expressions are the
+; client's, the cursor loop is the client's, and the graph — including
+; every write — still happens on the other side of the channel.
 ;
 ; What it does not cover, and refuses rather than pretending: quoted
-; text, input, if, while, gosub/return, the program model, and the
-; writing statements (add, link, set, drop). An expression here is
-; *word-shaped*: `1 + 2` is three words and the operators have to stand
-; alone, because the guest tokenizes the line into words and has no
-; character-by-character parser. That is the price of 2 KB, and the
-; transcript test only exercises what is here.
+; text, input, if, while, gosub/return and the program model. A quoted
+; string in a value position prints `?` rather than being read as a name
+; with a zero in it, an unknown name is refused rather than created, and
+; an answer the host refuses (it begins with `!`) is printed as the
+; guest's one-word `?` — a refusal the child can see. An expression here
+; is *word-shaped*: `1 + 2` is three words and the operators have to
+; stand alone, because the guest tokenizes the line into words and has
+; no character-by-character parser. That is the price of the budget, and
+; the transcript test only exercises what is here.
 ;
 ; Assemble:  nim c -r ez80/ez80asm.nim -- ez80/gbasic.z80 ez80/gbasic.bin
 ; ------------------------------------------------------------------------
@@ -65,6 +69,7 @@ ANSP     EQU 0xD50D     ; the answer line being printed (2)
 TMP2     EQU 0xD50F     ; a general scratch (2)
 TACC     EQU 0xD511     ; the term's accumulator (2)
 TACC2    EQU 0xD513     ; the term's right-hand side (2)
+MAKE     EQU 0xD51F     ; 1: a name may be created, 0: it must exist
 
 ANSBUF   EQU 0xD520     ; the host's answer (128 bytes)
 CURSOR   EQU 0xD5A0     ; the cursor as text (128 bytes)
@@ -437,6 +442,9 @@ RA2:    IN A,(5)
 RA3:    LD (HL),0
         INC HL
         LD (HL),0             ; the empty line: the answer's end
+        LD A,(ANSBUF)
+        CP 33                 ; a refusal: the host says why, the guest
+        JP Z,STERR            ; refuses by name — its one word for it
         RET
 
 ; Count the ids (the runs of digits) in the line at HL.
@@ -554,9 +562,20 @@ NEN:    POP DE
         OR A
         RET
 
+; The slot for the name at HL, and it must already exist: this is the
+; reader's rule (`x` in an expression is a name the program made, and an
+; unknown one is a refusal, not a new name with a zero in it).
+FINDNAME:
+        XOR A
+        LD (MAKE),A
+        JR SLOT0
+
 ; The slot for the name at HL. A new name is given a slot with a value
 ; of zero; a name that does not fit is refused.
 SLOT:
+        LD A,1
+        LD (MAKE),A
+SLOT0:
         LD (TXTPTR),HL
         LD DE,NAMETAB
         LD B,8
@@ -589,6 +608,9 @@ SLHIT:  LD H,D
         LD L,E
         RET
 SLNEW:
+        LD A,(MAKE)
+        OR A
+        JP Z,STERR
         PUSH DE
         LD HL,(TXTPTR)
         LD B,7
@@ -627,7 +649,10 @@ GV1:    LD A,(HL)
 GVNUM:  LD HL,(TXTPTR)
         JP PARSENUM
 GVNAME: LD HL,(TXTPTR)
-        CALL SLOT
+        LD A,(HL)
+        CP 34                 ; a quoted string is not in the guest's
+        JP Z,STERR            ; value model: refused, not read as a name
+        CALL FINDNAME
         LD DE,8
         ADD HL,DE
         LD E,(HL)
@@ -867,6 +892,36 @@ RS_KW:
         CALL ISWORD
         OR A
         JP Z,STGO
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGREM
+        CALL ISWORD
+        OR A
+        JP Z,STREM
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGADD
+        CALL ISWORD
+        OR A
+        JP Z,STADD
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGLINK
+        CALL ISWORD
+        OR A
+        JP Z,STLINK
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGSET
+        CALL ISWORD
+        OR A
+        JP Z,STSET
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGDROP
+        CALL ISWORD
+        OR A
+        JP Z,STDROP
         LD A,(STMT)
         CALL WORDAI
         LD DE,MSGFOR
@@ -1230,6 +1285,212 @@ GO_SEND:
         CALL COUNTIDS
         CALL PNUMU
         LD HL,MSGNODES
+        CALL PRSP
+        LD A,CR
+        OUT (1),A
+        RET
+
+; ---- rem ---------------------------------------------------------------
+; A comment statement: the rest of the statement is ignored, exactly as
+; the host client ignores it.
+STREM:
+        RET
+
+; ---- add <label> [{<prop> <value>}] ------------------------------------
+; The property list is forwarded as it was written, exactly as the host
+; forwards it: the guest has no text values, but `add` is a pass-through
+; and the host is the parser. The answer is the new node's id, which
+; becomes the cursor (PRD §3.1), and the client prints "1 created".
+STADD:
+        LD A,(STMT)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,B
+        LD (GW),A
+        LD HL,MSGQADD
+        CALL SENDPART
+AD1:    LD A,(GW)
+        CALL WORDAI
+        CALL SENDPART
+        LD A,(GW)
+        INC A
+        LD (GW),A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JR Z,AD2
+        JR C,AD2
+        LD A,' '
+        OUT (3),A
+        JR AD1
+AD2:    LD A,CR
+        OUT (3),A
+        CALL READANS
+        LD HL,ANSBUF
+        LD DE,CURSOR
+        CALL COPYSTR
+        LD HL,ANSBUF
+        CALL COUNTIDS
+        CALL PNUMU
+        LD HL,MSGCREATED
+        CALL PRSP
+        LD A,CR
+        OUT (1),A
+        RET
+
+; ---- link <name> <type> <name> -----------------------------------------
+; Two ids and a type, answered with the edge's id — the channel's `link`
+; verb, which exists because the engine refuses joins.
+STLINK:
+        LD A,(STMT)
+        ADD A,4
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        LD A,(STMT)
+        INC A
+        CALL WORDAI
+        CALL GETVAL
+        LD (VAL),HL
+        LD A,(STMT)
+        ADD A,3
+        CALL WORDAI
+        CALL GETVAL
+        LD (VAL2),HL
+        LD HL,MSGLINKQ
+        CALL SENDPART
+        LD HL,(VAL)
+        CALL SENDNUM
+        LD A,' '
+        OUT (3),A
+        LD A,(STMT)
+        ADD A,2
+        CALL WORDAI
+        CALL SENDPART
+        LD A,' '
+        OUT (3),A
+        LD HL,(VAL2)
+        CALL SENDNUM
+        LD A,CR
+        OUT (3),A
+        CALL READANS
+        LD HL,MSGLINKED
+        CALL PRSTR
+        LD HL,ANSBUF
+        CALL PRSTR
+        LD A,CR
+        OUT (1),A
+        RET
+
+; ---- set <name> <prop> = <value> ---------------------------------------
+; The node and the value travel as parameters; the value is the client's
+; own expression, evaluated here. A text value is not in the guest's
+; value model and is refused by GETVAL.
+STSET:
+        LD A,(STMT)
+        ADD A,4
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        LD A,(STMT)
+        ADD A,3
+        CALL WORDAI
+        LD DE,MSGEQ
+        CALL ISWORD
+        OR A
+        JR NZ,SE_PLAIN
+        LD A,(STMT)
+        ADD A,4
+        LD (GW),A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP Z,STERR
+        JP C,STERR
+        JR SE_GO
+SE_PLAIN:
+        LD A,(STMT)
+        ADD A,3
+        LD (GW),A
+SE_GO:  LD A,(GW)
+        LD (EXW),A
+        CALL EXPR
+        LD (VAL),HL
+        LD A,(EXW)
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        LD A,(STMT)
+        INC A
+        CALL WORDAI
+        CALL GETVAL
+        LD (VAL2),HL
+        LD HL,MSGSETQ
+        CALL SENDPART
+        LD A,(STMT)
+        ADD A,2
+        CALL WORDAI
+        CALL SENDPART
+        LD HL,MSGSETV
+        CALL SENDPART
+        LD A,TAB
+        OUT (3),A
+        LD HL,MSGPN
+        CALL SENDPART
+        LD HL,(VAL2)
+        CALL SENDNUM
+        LD A,TAB
+        OUT (3),A
+        LD HL,MSGV0
+        CALL SENDPART
+        LD HL,(VAL)
+        CALL SENDNUM
+        LD A,CR
+        OUT (3),A
+        CALL READANS
+        LD HL,ANSBUF
+        CALL PRSTR
+        LD HL,MSGUPDATED
+        CALL PRSP
+        LD A,CR
+        OUT (1),A
+        RET
+
+; ---- drop <name> -------------------------------------------------------
+STDROP:
+        LD A,(STMT)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        LD A,(STMT)
+        INC A
+        CALL WORDAI
+        CALL GETVAL
+        LD (VAL),HL
+        LD HL,MSGDROPQ
+        CALL SENDPART
+        LD A,TAB
+        OUT (3),A
+        LD HL,MSGPN
+        CALL SENDPART
+        LD HL,(VAL)
+        CALL SENDNUM
+        LD A,CR
+        OUT (3),A
+        CALL READANS
+        LD HL,ANSBUF
+        CALL PRSTR
+        LD HL,MSGDROPPED
         CALL PRSP
         LD A,CR
         OUT (1),A
@@ -1697,6 +1958,22 @@ MSGPRINT:  DB "print", 0
 MSGSHOW:   DB "show", 0
 MSGGO:     DB "go", 0
 MSGFOR:    DB "for", 0
+MSGREM:    DB "rem", 0
+MSGADD:    DB "add", 0
+MSGLINK:   DB "link", 0
+MSGSET:    DB "set", 0
+MSGDROP:   DB "drop", 0
+MSGQADD:   DB "gq add ", 0
+MSGLINKQ:  DB "link ", 0
+MSGSETQ:   DB "exec set $n ", 0
+MSGSETV:   DB " = $v0", 0
+MSGDROPQ:  DB "exec drop $n", 0
+MSGPN:     DB "n=", 0
+MSGV0:     DB "v0=", 0
+MSGCREATED: DB "created", 0
+MSGLINKED: DB "linked ", 0
+MSGUPDATED: DB "updated", 0
+MSGDROPPED: DB "dropped", 0
 MSGNEXT:   DB "next", 0
 MSGEACH:   DB "each", 0
 MSGDO:     DB "do", 0

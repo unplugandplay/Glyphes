@@ -720,7 +720,7 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     ## the braces got lost. GQ turns each literal into a parameter, so
     ## the value still never reaches the Cypher text (pin GQ4).
     let rest = line[3 .. ^1].strip()
-    if rest.len == 0 or rest.find(' ') < 0:
+    if rest.len == 0:
       gbFail("add needs a label")
     let gq = "add " & rest
     let res = t.runFn(gq, initTable[string, Value]())

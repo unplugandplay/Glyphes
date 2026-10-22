@@ -272,14 +272,16 @@ client is what a real user types.
   *lines that follow* is not, and needs the indentation or the
   `END-IF` convention that the one-line bodies avoid.
 - **The eZ80 guest's remaining half.** The guest now has the names,
-  the expressions, `show`, `go` and both loops (§3.1, §3.2), and its
-  transcript matches the host client's byte for byte on the script that
-  covers them (GB-F). Still missing, and refused by name rather than
-  ignored: quoted text, `input`, `if`, `while`, `gosub`/`return` and the
-  program model, and the writing statements (`add`, `link`, `set`,
-  `drop`). Its expressions are word-shaped (`1 + 2`, not `1+2`) and its
-  refusal vocabulary is a single `?` — the two divergences the 3 KB
-  budget buys, documented where the guest is.
+  the expressions, `show`, `go`, both loops (§3.1, §3.2) and the writes
+  `add`, `link`, `set` and `drop`, and its transcript matches the host
+  client's byte for byte on the script that covers them (GB-F). Still
+  missing, and refused by name rather than ignored: quoted text (a
+  string in a value position), `input`, `if`, `while`, `gosub`/`return`
+  and the program model. A write the *host* refuses (`!`) prints the
+  guest's one-word `?`, because that is its whole refusal vocabulary.
+  Its expressions are word-shaped (`1 + 2`, not `1+2`) and its numbers
+  are 16-bit — the divergences the guest's size buys, documented where
+  the guest is.
 - **Replacing the Ruby model layer.** GLYPH BASIC is a *client*; the
   model layer is a *client*. They are peers, and the model layer stays.
 

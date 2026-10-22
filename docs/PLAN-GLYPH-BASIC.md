@@ -142,6 +142,7 @@ The second implementation, and the reason pin GB9 exists. Its plan:
 | **E3** | the grammar | the same statements, in Z80 assembly — the interpreter's *other* half |
 | **E4** | the transcript | **the same transcript as the host client**, byte for byte (GB-F) ✓ |
 | **E5** | the client's own half | the names, the expressions, `show`, `go` and both loops — the grammar the prompt writes ✓ |
+| **E6** | the writes | `add`, `link`, `set`, `drop` and `rem` — the channel's `exec` and `link` verbs, and the mark moves to 4 KB ✓ |
 
 **What E1 and E2 are, as shipped.** The channel is three ports: the
 guest writes a request to port 3 and ends it with CR; the host answers;
@@ -159,6 +160,7 @@ assembly:
 | request | answer |
 |---|---|
 | `gq <line>` | the ids it matched, comma-separated |
+| `exec <line>` | how many entities the write touched |
 | `props <id>` | the label, then `key value` per property |
 | `edges <id>` | `TYPE -> other` / `TYPE <- other` per edge |
 | `link <a> <t> <b>` | the new edge's id |
@@ -167,24 +169,37 @@ A `gq` request may carry parameters after a TAB, as `name=value`
 fields: the guest's names hold node ids, and a value is a parameter on
 this side of the channel just as it is on every other side (pin GQ4).
 An answer that begins with `!` is a refusal, and the rest is the
-message — the guest's whole job is to show what it was told, and a
-refusal it cannot see is a refusal the child never learns about.
+message. The guest does not parse that message: it prints its own `?`
+and abandons the line. A refusal the guest can see is the point; the
+host's words stay the host's, and the one-word vocabulary is one of the
+guest's two documented divergences (the other is the word-shaped
+expression).
 
 **The guest sends GLYPH QUERY, not Cypher** ✓ — so the guest needs no
 Cypher compiler, and the host compiles ✓ (which is the point ✓: the
 language is small enough to *send*, and the engine's is not).
 
-**What E3–E5 are, as shipped.** The guest is `ez80/gbasic.z80` —
-GLYPH BASIC in Z80 assembly, 2,905 bytes for the grammar it covers. It
+**What E3–E6 are, as shipped.** The guest is `ez80/gbasic.z80` —
+GLYPH BASIC in Z80 assembly, 3,568 bytes for the grammar it covers. It
 reads a line, splits it into words and statements, runs them, and sends
 a GLYPH QUERY line over the channel for the graph work; the answer comes
 back and it prints what the host client prints.
 
-The statements it covers are `find`, `count`, `labels`, `end`, `let`
-and the bare assignment, `print`, `show`, `go`, `for` and `for each`,
-and the expressions are `+ - * /` over numbers and names. That is the
-grammar the prompt sketch writes — the client's *own* half, as opposed
-to the graph work the host does.
+The statements it covers are `find`, `count`, `labels`, `end`, `rem`,
+`let` and the bare assignment, `print`, `show`, `go`, `for`, `for each`,
+and the writes `add`, `link`, `set` and `drop`; the expressions are
+`+ - * /` over numbers and names. That is the grammar the prompt sketch
+writes — the client's *own* half, as opposed to the graph work the host
+does.
+
+The writes needed no new channel vocabulary: `add` forwards its
+property list as the host forwards it (`gq add Company {name "Cid"}`,
+the host still the parser), `set` and `drop` send parameterised `exec`
+lines with the id and the value after a TAB, and `link` is the verb the
+engine's no-joins rule has always needed. What the guest cannot evaluate
+it does not pretend to: a quoted string in a value position is refused
+by `?`, and an answer the host refuses (`!`) is a refusal the guest
+prints in its own one word.
 
 Three things make it the client rather than a remote control, and all
 three are E5's:
@@ -202,8 +217,9 @@ three are E5's:
 What the guest still does not have is in PRD §6, and it is *refused*
 rather than ignored: an unknown statement prints `?` and abandons the
 line; a statement with trailing words the guest does not understand is
-refused rather than half-run; an expression is word-shaped (`1 + 2`,
-not `1+2`), because the guest tokenizes into words and has no
+refused rather than half-run; a quoted string is refused rather than
+read as a name with a zero in it; an expression is word-shaped
+(`1 + 2`, not `1+2`), because the guest tokenizes into words and has no
 character-by-character parser. The refusal vocabulary is the guest's
 one-word `?` — the host's messages are longer, and that is a documented
 divergence, not an accident.
@@ -211,10 +227,11 @@ divergence, not an accident.
 The transcript gate's script covers exactly this cut: `let` and the
 bare assignment, `print` of a name and of an expression, `find` and
 `print` of the cursor, `for each` walking the cursor with `show`, `go
-... from` a name, `count`, `labels`, and the counting loop. The strings,
-`if`, the writes and the program model are not in it, and the guest
-says so by refusing them — a gate that claims more than it checks is a
-gate that rots.
+... from` a name, `count`, `labels`, the counting loop, and the writes
+(`add` and its cursor, `link`, `set`, `drop`) with a `rem` in front of
+them. The strings, `input`, `if`, `while` and the program model are not
+in it, and the guest says so by refusing them — a gate that claims more
+than it checks is a gate that rots.
 
 **E4 is the gate, and it is a byte-for-byte comparison**: the same
 script runs on the host client and on the guest, and the two transcripts
@@ -232,10 +249,16 @@ rules rather than the guest's:
 - **The answer's lines are NUL-separated and end with an empty line**,
   because the guest has to know where an answer stops ✓.
 
-**E3 is where the size of the language is proved.** If the grammar
-cannot be written in 3 KB of Z80 assembly, it is too big, and the host
-client has taught us that by being too big. That is the honest use of
-the guest: not a production path, a *measuring instrument* ✓.
+**E3 is where the size of the language is proved.** The first half
+(the names, the expressions, `show`, `go`, both loops) fitted in 3 KB;
+the writes took the guest to 3,568 bytes, so the published mark moved to
+4 KB — deliberately, with the number in the plan and the ceiling in the
+test. The remaining half will move it again when it lands, and each move
+is a measurement, not a silent drift: a mark that never moves is a mark
+nobody measured. The point of the instrument stands — if the grammar
+cannot be written twice, it is too big, and the host client has taught
+us that by being too big. That is the honest use of the guest: not a
+production path, a *measuring instrument* ✓.
 
 ## 7. The tests
 

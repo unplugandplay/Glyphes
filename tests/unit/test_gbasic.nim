@@ -506,6 +506,13 @@ suite "GLYPH BASIC — the cursor loop":
     check text.count("linked ") == 1
     check "KNOWS -> 4" in text
 
+  test "add takes a bare label":
+    ## The property list is optional (PRD §3): `add Company` makes a
+    ## node with its label and nothing else, and the node is the cursor.
+    let db = freshDb()
+    let text = run(db, ["add Company", "print"])
+    check text.endsWith("1 created\n1 nodes\n")
+
   test "set takes the loop's name, and the value is a parameter":
     let db = freshDb()
     let text = run(db, ["find Person",
