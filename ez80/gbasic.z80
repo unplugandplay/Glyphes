@@ -12,18 +12,18 @@
 ; guest needs no compiler and no graph, and the host does the work.
 ;
 ; What is here is the client's *own* part: the line, the statements, the
-; names, the expressions, the loop, the request, the answer and the
+; names, the expressions, the loops, the request, the answer and the
 ; printing.
 ;
 ; This cut covers: find, count, labels, end, rem, let and bare
-; assignment, print, show, go, if ... then, for, for each, and the writes
-; add, link, set and drop. The names are the client's, the expressions
-; (arithmetic and comparisons) are the client's, the cursor loop is the
-; client's, and the graph — including every write — still happens on the
-; other side of the channel.
+; assignment, print, show, go, if ... then, while, for, for each, and
+; the writes add, link, set and drop. The names are the client's, the
+; expressions (arithmetic and comparisons) are the client's, the cursor
+; loop is the client's, and the graph — including every write — still
+; happens on the other side of the channel.
 ;
 ; What it does not cover, and refuses rather than pretending: quoted
-; text, input, while, gosub/return, the program model, and the boolean
+; text, input, gosub/return, the program model, and the boolean
 ; operators and/or/not in a condition. A quoted string in a value
 ; position prints `?` rather than being read as a name with a zero in
 ; it, an unknown name is refused rather than created, and an answer the
@@ -74,6 +74,9 @@ TACC2    EQU 0xD513     ; the term's right-hand side (2)
 LEVEL    EQU 0xD51E     ; how many RUNFROM frames are open (1 = the line)
 MAKE     EQU 0xD51F     ; 1: a name may be created, 0: it must exist
 COPE     EQU 0xD51D     ; the condition's comparison operator
+WHCNT    EQU 0xD51A     ; a while's rounds (2)
+WHEND    EQU 0xD519     ; a while's body end (the `next`, or the line end)
+WHST     EQU 0xD518     ; a while's own statement index
 
 ANSBUF   EQU 0xD520     ; the host's answer (128 bytes)
 CURSOR   EQU 0xD5A0     ; the cursor as text (128 bytes)
@@ -791,6 +794,11 @@ PRIMARY:
 ; refuses rather than guessing. A bare value is true when it is not
 ; zero, which is the host's `truthy`.
 COND:
+        ; a condition starts at the word after its statement; both
+        ; callers (`if` and `while`) want exactly that, so it is set here
+        LD A,(STMT)
+        INC A
+        LD (EXW),A
         CALL EXPR
         LD (VAL),HL
         CALL PEEKW
@@ -909,11 +917,7 @@ RF2:    POP AF
 ; Run the statement at CURST.
 RUNONE:
         LD A,(CURST)
-        CALL BOUNDS
-        LD A,D
-        LD (STMT),A
-        LD A,E
-        LD (SEND),A
+        CALL SETBOUNDS
         LD A,E
         CP D
         RET Z
@@ -929,6 +933,16 @@ BOUNDS:
         INC HL
         LD E,(HL)
         LD D,A
+        RET
+
+; A = statement index -> STMT and SEND set to that statement's words.
+; D and E are left as BOUNDS made them.
+SETBOUNDS:
+        CALL BOUNDS
+        LD A,D
+        LD (STMT),A
+        LD A,E
+        LD (SEND),A
         RET
 
 RUNSTMT:
@@ -1002,6 +1016,12 @@ RS_KW:
         CALL ISWORD
         OR A
         JP Z,STIF
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGWHILE
+        CALL ISWORD
+        OR A
+        JP Z,STWHILE
         LD A,(STMT)
         CALL WORDAI
         LD DE,MSGREM
@@ -1648,7 +1668,6 @@ IF_FOUND:
         INC A
         CP B
         JP Z,STERR
-        LD (EXW),A
         CALL COND
         LD (VAL),HL
         LD A,(EXW)
@@ -1694,6 +1713,72 @@ IF_FALSE:
         CP 1
         JR NZ,IF_DONE           ; one piece of a body: skip only this if
         LD A,(RUNEND)
+        LD (CURST),A
+        RET
+
+; ---- while <cond> [: <statement>... [next]] ----------------------------
+; The unbounded loop, and a line statement by construction: the host
+; splits a line into pieces, and a `while` inside a body is a piece with
+; no colon after its condition, so the host refuses it. The guest
+; refuses it too, by the same LEVEL rule as `if`.
+STWHILE:
+        LD A,(LEVEL)
+        CP 1
+        JP NZ,STERR
+        ; A missing condition is caught by COND (an empty word refuses),
+        ; and a missing body by the empty-range check below: FINDBODY
+        ; answers the line end when there is no statement after `while`.
+        LD A,(CURST)
+        LD (WHST),A
+        CALL FINDBODY
+        ; FINDBODY leaves STMT/SEND at the last statement it looked at,
+        ; and BODYEND is clobbered by a `for` in the body; the while's
+        ; own statement and body end are kept here.
+        LD A,(BODYEND)
+        LD (WHEND),A
+        LD B,A
+        LD A,(WHST)
+        INC A
+        CP B
+        JP Z,STERR              ; an empty body (the host refuses it too)
+        LD HL,0
+        LD (WHCNT),HL
+WH_TOP:
+        LD A,(WHST)
+        CALL SETBOUNDS
+        CALL COND
+        LD A,(EXW)
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR             ; a word the condition did not use
+        LD A,H
+        OR L
+        JR Z,WH_END
+        LD HL,(WHCNT)
+        INC HL
+        LD (WHCNT),HL
+        LD A,H
+        OR L
+        JR NZ,WH_RUN
+        JP STERR                ; 65,536 rounds: the guest's cap
+WH_RUN:
+        LD A,(WHST)
+        INC A
+        LD B,A
+        LD A,(WHEND)
+        LD C,A
+        CALL RUNFROM
+        JR WH_TOP
+WH_END:
+        ; the statements after the `next` run once, as the host's `after`
+        LD A,(WHEND)
+        INC A
+        LD B,A
+        LD A,(SCOUNT)
+        LD C,A
+        CALL RUNFROM
+        LD A,(SCOUNT)
         LD (CURST),A
         RET
 
@@ -1932,11 +2017,7 @@ FB1:    LD A,(FI)
         JR Z,FB_NONE
         JR C,FB_NONE
         LD A,(FI)
-        CALL BOUNDS
-        LD A,D
-        LD (STMT),A
-        LD A,E
-        LD (SEND),A
+        CALL SETBOUNDS
         LD A,D
         CALL WORDAI
         LD DE,MSGFOR
@@ -2160,6 +2241,7 @@ MSGSHOW:   DB "show", 0
 MSGGO:     DB "go", 0
 MSGIF:     DB "if", 0
 MSGTHEN:   DB "then", 0
+MSGWHILE:  DB "while", 0
 MSGFOR:    DB "for", 0
 MSGREM:    DB "rem", 0
 MSGADD:    DB "add", 0

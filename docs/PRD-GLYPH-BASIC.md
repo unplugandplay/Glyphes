@@ -273,17 +273,18 @@ client is what a real user types.
   `END-IF` convention that the one-line bodies avoid.
 - **The eZ80 guest's remaining half.** The guest now has the names,
   the expressions (arithmetic and the comparison operators), `show`,
-  `go`, both loops (§3.1, §3.2), `if … then` with the host's line/piece
-  body rule, and the writes `add`, `link`, `set` and `drop`; its
-  transcript matches the host client's byte for byte on the script that
-  covers them (GB-F). Still missing, and refused by name rather than
-  ignored: quoted text (a string in a value position), `input`, `while`,
-  `gosub`/`return` and the program model, and the boolean operators
-  `and`/`or`/`not` in a condition. A write the *host* refuses (`!`)
-  prints the guest's one-word `?`, because that is its whole refusal
-  vocabulary. Its expressions are word-shaped (`1 + 2`, not `1+2`) and
-  its numbers are 16-bit — the divergences the guest's size buys,
-  documented where the guest is.
+  `go`, the three loops (`for`, `for each`, `while`), `if … then` with
+  the host's line/piece body rule, and the writes `add`, `link`, `set`
+  and `drop`; its transcript matches the host client's byte for byte on
+  the script that covers them (GB-F). Still missing, and refused by name
+  rather than ignored: quoted text (a string in a value position),
+  `input`, `gosub`/`return` and the program model, and the boolean
+  operators `and`/`or`/`not` in a condition. A write the *host* refuses
+  (`!`) prints the guest's one-word `?`, because that is its whole
+  refusal vocabulary. Its expressions are word-shaped (`1 + 2`, not
+  `1+2`) and its numbers are 16-bit, so its `while` guard stops at 65,535
+  rounds rather than the host's million — the divergences the guest's
+  size buys, documented where the guest is.
 - **Replacing the Ruby model layer.** GLYPH BASIC is a *client*; the
   model layer is a *client*. They are peers, and the model layer stays.
 

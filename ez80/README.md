@@ -234,18 +234,20 @@ bytes (PLAN-GLYPH-BASIC.md §6, E4).
 The graph is not here. The guest sends a GLYPH QUERY line over the port
 channel in `channel.z80`, the host compiles it and runs it against a real
 graph, and the answer comes back through the same channel — so the guest
-needs no compiler and no graph, and 3 KB is enough.
+needs no compiler and no graph, and 4 KB is enough.
 
 What it has: `find`, `count`, `labels`, `end`, `rem`, `let` and the bare
-assignment, `print`, `show`, `go`, `if … then`, `for`, `for each`, and
-the writes `add`, `link`, `set`, `drop`; names (eight of seven
-characters, 16-bit values), the arithmetic `+ - * /` and the comparisons
-`= < > <= >= <>`. The writes ride the channel the reads already use —
-`add` forwards its property list as the host forwards it, `set` and
-`drop` send parameterised `exec` lines, and `link` is the verb the
-engine's no-joins rule needs. The conditional implements the host's own
-body rule: at the line level it owns the rest of the line; as one piece
-of a body it owns only its own tail (`LEVEL` is the difference).
+assignment, `print`, `show`, `go`, `if … then`, `while … : … [next]`,
+`for`, `for each`, and the writes `add`, `link`, `set`, `drop`; names
+(eight of seven characters, 16-bit values), the arithmetic `+ - * /` and
+the comparisons `= < > <= >= <>`. The writes ride the channel the reads
+already use — `add` forwards its property list as the host forwards it,
+`set` and `drop` send parameterised `exec` lines, and `link` is the verb
+the engine's no-joins rule needs. The conditional implements the host's
+own body rule: at the line level it owns the rest of the line; as one
+piece of a body it owns only its own tail (`LEVEL` is the difference).
+`while` is line-level by the same rule, and its body takes a `next`,
+with the statements after it run once.
 
 Three things make it a client rather than a remote control, and they are
 also why it fits:
@@ -260,21 +262,23 @@ also why it fits:
   `next` and its own walk, exactly as the host's does.
 
 What it refuses, rather than pretending: quoted text (a string in a
-value position), `input`, `while`, `gosub`/`return`, the program model,
-and `and`/`or`/`not` inside a condition. An unknown statement, or one
-with trailing words the guest does not understand, prints `?` and
-abandons the line — it does not half-run — and an answer the host
-refuses (`!`) is printed as the same one-word `?`. The refusal
-vocabulary is the one-word `?`; the host's messages are longer, and that
-is a documented divergence.
+value position), `input`, `gosub`/`return`, the program model, and
+`and`/`or`/`not` inside a condition. An unknown statement, or one with
+trailing words the guest does not understand, prints `?` and abandons
+the line — it does not half-run — and an answer the host refuses (`!`)
+is printed as the same one-word `?`. The refusal vocabulary is the
+one-word `?`; the host's messages are longer, and that is a documented
+divergence.
 
 The other divergence is the shape of an expression: the guest works on
 words, so `1 + 2` is three words and the operators have to stand alone —
-`1+2` is one word and is not arithmetic. The budget buys that, and
-`ez80/tests/test_ez80.nim` measures both the transcript and the size
-(3,956 bytes, under the plan's 4 KB mark; the first half fitted in 3 KB,
-and the mark moved deliberately when the writes landed — the number is
-in the plan).
+`1+2` is one word and is not arithmetic. The arithmetic is 16-bit, and
+so is `while`'s round guard: it stops at 65,535 rounds where the host
+stops at a million, refusing a runaway loop either way. The budget buys
+that, and `ez80/tests/test_ez80.nim` measures both the transcript and
+the size (4,087 bytes, under the plan's 4 KB mark; the first half fitted
+in 3 KB, the mark moved deliberately when the writes landed, and
+`while` landed inside it — the number is in the plan).
 
 ## Known gaps
 

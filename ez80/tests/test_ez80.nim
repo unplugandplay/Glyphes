@@ -424,6 +424,18 @@ const
     "if t <> 2 then print 14",
     "if t >= 2 then print 15",
     "if t <= 1 then print 16",
+    "let w = 1",
+    "while w <= 3 : print w : w = w + 1",
+    "let w = 5",
+    "while w <= 3 : print 99",
+    "let w = 4",
+    "while w < 5 : print w : w = w + 1 : next",
+    "let w = 5",
+    "while w < 7 : print w : w = w + 1 : next : print 8",
+    "let w = 7",
+    "while w < 9 : for j = 1 to 2 : print j : next : w = w + 1 : next",
+    "let w = 9",
+    "while w < 9 : print 9",
     "rem a comment",
     "add Company {name \"Cid\"}",
     "print",
@@ -483,10 +495,10 @@ suite "GLYPH BASIC — the guest and the host client":
   test "the same script, the same transcript":
     ## The gate (GB-F): the guest's bytes are the host client's bytes.
     ## The script covers the statements this cut implements: the names,
-    ## the expressions, `show`, `go`'s cursor, both loops and the writes.
-    ## Host and guest run against their *own* fixture, because the script
-    ## writes: the same fixture, run twice, would hand the second run a
-    ## different graph.
+    ## the expressions, `show`, `go`'s cursor, the loops (`for`,
+    ## `for each`, `while`) and the writes. Host and guest run against
+    ## their *own* fixture, because the script writes: the same fixture,
+    ## run twice, would hand the second run a different graph.
     let hostDb = guestFixture()
     let host = hostTranscript(hostDb, gbScript)
     close(hostDb)
@@ -501,8 +513,8 @@ suite "GLYPH BASIC — the guest and the host client":
     ## bytes. The mark was 3 KB for the first half (E3–E5); the writes
     ## took the guest past it, so the published mark moved to 4 KB —
     ## deliberately, and the plan records it. The conditional landed at
-    ## 3,956, inside the new mark. The remaining half (text, `input`,
-    ## `while`, the program model) will move it again.
+    ## 3,956 and `while` at 4,087, both inside the mark. The remaining
+    ## half (text, `input`, the program model) will move it again.
     let here = currentSourcePath().parentDir.parentDir
     let bin = readFile(here / "gbasic.bin")
     check bin.len < 4096
@@ -511,10 +523,12 @@ suite "GLYPH BASIC — the guest and the host client":
     ## The other half of the gate: the guest must not half-run. An
     ## unknown statement, a known one with words it cannot read, the
     ## `step` it has no arithmetic for, a condition with `and` (not in
-    ## its grammar), an `if` with no body, a quoted string it has no
-    ## value for, a write with no argument, and a write the *host*
-    ## refuses all print `?` and abandon the line — nothing before the
-    ## refusal is printed, and the body of the refused `for` never runs.
+    ## its grammar), an `if` with no body, a `while` with no condition,
+    ## a `while` with an empty body, a `while` inside a body (line-level
+    ## only), a quoted string it has no value for, a write with no
+    ## argument, and a write the *host* refuses all print `?` and
+    ## abandon the line — nothing before the refusal is printed, and the
+    ## body of the refused `for` never runs.
     let db = guestFixture()
     let guest = guestTranscript(db, [
       "if 1",
@@ -525,8 +539,11 @@ suite "GLYPH BASIC — the guest and the host client":
       "print \"Cid\"",
       "add",
       "add 123",
+      "while : print 1",
+      "while 0 : next",
+      "for i = 1 to 2 : while 1 : print 1 : next",
       "end"
     ])
-    check guest == "?\n?\n?\n?\n?\n?\n?\n?\n"
+    check guest == "?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n"
     close(db)
 

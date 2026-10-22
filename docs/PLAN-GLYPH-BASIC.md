@@ -144,6 +144,7 @@ The second implementation, and the reason pin GB9 exists. Its plan:
 | **E5** | the client's own half | the names, the expressions, `show`, `go` and both loops — the grammar the prompt writes ✓ |
 | **E6** | the writes | `add`, `link`, `set`, `drop` and `rem` — the channel's `exec` and `link` verbs, and the mark moves to 4 KB ✓ |
 | **E7** | the conditional | comparisons (`= < > <= >= <>`) and `if … then`, with the host's line-level-versus-piece body rule ✓ |
+| **E8** | the unbounded loop | `while … : … [next]`, line-level like the host's, with the after-`next` statement and the guest's 16-bit round guard ✓ |
 
 **What E1 and E2 are, as shipped.** The channel is three ports: the
 guest writes a request to port 3 and ends it with CR; the host answers;
@@ -155,7 +156,7 @@ byte as part of this one.
 
 The host's end is `src/gbasic_channel.nim`, and its vocabulary is
 deliberately small — the guest has to *parse* the answers, and a guest
-that parses JSON is a guest that needs a JSON parser in 3 KB of
+that parses JSON is a guest that needs a JSON parser in 4 KB of
 assembly:
 
 | request | answer |
@@ -173,25 +174,26 @@ An answer that begins with `!` is a refusal, and the rest is the
 message. The guest does not parse that message: it prints its own `?`
 and abandons the line. A refusal the guest can see is the point; the
 host's words stay the host's, and the one-word vocabulary is one of the
-guest's two documented divergences (the other is the word-shaped
-expression).
+guest's documented divergences (the others are the word-shaped
+expression and the 16-bit `while` guard).
 
 **The guest sends GLYPH QUERY, not Cypher** ✓ — so the guest needs no
 Cypher compiler, and the host compiles ✓ (which is the point ✓: the
 language is small enough to *send*, and the engine's is not).
 
-**What E3–E7 are, as shipped.** The guest is `ez80/gbasic.z80` —
-GLYPH BASIC in Z80 assembly, 3,956 bytes for the grammar it covers. It
+**What E3–E8 are, as shipped.** The guest is `ez80/gbasic.z80` —
+GLYPH BASIC in Z80 assembly, 4,087 bytes for the grammar it covers. It
 reads a line, splits it into words and statements, runs them, and sends
 a GLYPH QUERY line over the channel for the graph work; the answer comes
 back and it prints what the host client prints.
 
 The statements it covers are `find`, `count`, `labels`, `end`, `rem`,
-`let` and the bare assignment, `print`, `show`, `go`, `if … then`, `for`,
-`for each`, and the writes `add`, `link`, `set` and `drop`; the
-expressions are `+ - * /` and the comparisons `= < > <= >= <>` over
-numbers and names. That is the grammar the prompt sketch writes — the
-client's *own* half, as opposed to the graph work the host does.
+`let` and the bare assignment, `print`, `show`, `go`, `if … then`,
+`while … : … [next]`, `for`, `for each`, and the writes `add`, `link`,
+`set` and `drop`; the expressions are `+ - * /` and the comparisons
+`= < > <= >= <>` over numbers and names. That is the grammar the prompt
+sketch writes — the client's *own* half, as opposed to the graph work
+the host does.
 
 The writes needed no new channel vocabulary: `add` forwards its
 property list as the host forwards it (`gq add Company {name "Cid"}`,
@@ -206,6 +208,16 @@ string; inside a body the host hands it one piece, so it owns only its
 own tail. `LEVEL` (how many `RUNFROM` frames are open) is the
 difference, and the transcript's nested-if and for-body cases are the
 proof.
+
+The unbounded loop reuses the same machinery rather than adding a
+second kind of loop: its condition is a word range and its body another,
+found by the same `FINDBODY` that gives `for` its body, with the
+statement after the `next` run once at the end. It is line-level by
+construction — a `while` piece inside a body has no colon after its
+condition, and the host refuses it; `LEVEL` gives the guest the same
+refusal rather than a second grammar. The round guard is 16 bits (the
+guest's register width) rather than the host's million; the transcript
+reaches neither.
 
 What the guest cannot evaluate it does not pretend to: a quoted string
 in a value position is refused by `?`, an `and`/`or`/`not` leaves a
@@ -235,18 +247,23 @@ condition grammar and a condition that uses one is refused; an
 expression is word-shaped (`1 + 2`, not `1+2`), because the guest
 tokenizes into words and has no character-by-character parser. The
 refusal vocabulary is the guest's one-word `?` — the host's messages are
-longer, and that is a documented divergence, not an accident.
+longer, and that is a documented divergence, not an accident. The
+`while` guard is the guest's 16-bit register: it stops after 65,535
+rounds where the host stops after a million. The number differs because
+the register does; the promise — a runaway loop is refused, not hung —
+is the same.
 
 The transcript gate's script covers exactly this cut: `let` and the
 bare assignment, `print` of a name and of an expression, `find` and
 `print` of the cursor, `for each` walking the cursor with `show`, `go
 ... from` a name, `count`, `labels`, the counting loop, every comparison
 operator, `if` at the line level and inside a body (including the
-nested-if piece rule), and the writes (`add` and its cursor, `link`,
-`set`, `drop`) with a `rem` in front of them. The strings, `input`,
-`while` and the program model are not in it, and the guest says so by
-refusing them — a gate that claims more than it checks is a gate that
-rots.
+nested-if piece rule), `while` with a body, a `next`, statements after
+the `next`, and a `for` inside its body, and the writes (`add` and its
+cursor, `link`, `set`, `drop`) with a `rem` in front of them. The
+strings, `input`, `gosub`/`return` and the program model are not in it,
+and the guest says so by refusing them — a gate that claims more than it
+checks is a gate that rots.
 
 **E4 is the gate, and it is a byte-for-byte comparison**: the same
 script runs on the host client and on the guest, and the two transcripts
@@ -268,8 +285,10 @@ rules rather than the guest's:
 (the names, the expressions, `show`, `go`, both loops) fitted in 3 KB;
 the writes took the guest past it, so the published mark moved to 4 KB —
 deliberately, with the number in the plan and the ceiling in the test.
-The conditional then landed at 3,956 bytes, inside the new mark. The
-remaining half will move it again when it lands, and each move is a
+The conditional then landed at 3,956 bytes, and `while` at 4,087 — both
+inside the new mark, because the body's `BOUNDS`→`STMT`/`SEND` sequence
+was already written three times and became one helper. The remaining
+half will move the mark again when it lands, and each move is a
 measurement, not a silent drift: a mark that never moves is a mark
 nobody measured. The point of the instrument stands — if the grammar
 cannot be written twice, it is too big, and the host client has taught
