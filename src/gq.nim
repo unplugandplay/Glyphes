@@ -215,7 +215,10 @@ proc literal(c: var Compiler; what: string): string =
   of tkInt, tkFloat, tkString:
     "$" & c.addParam(literalValue(t))
   of tkParam:
-    t.text
+    ## A `$name` keeps its sigil: the *name* is what the token holds,
+    ## and a compiled Cypher property value without the `$` would be a
+    ## variable, not the parameter the client passed.
+    "$" & t.text
   else:
     gqFail("expected " & what & ", found " & describeTok(t))
 
@@ -320,6 +323,10 @@ proc compileAdd(c: var Compiler): string =
     if props.len > 0:
       s.add " {" & props.join(", ") & "}"
   s.add ")"
+  ## The id comes back, because the client's next statement is usually
+  ## about the node it just made ("add it, then link it"). The row is
+  ## the ordinary RETURN, which the engine already answers for a write.
+  s.add " RETURN id(n) AS id"
   result = s
 
 proc compileSet(c: var Compiler): string =

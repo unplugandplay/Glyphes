@@ -118,7 +118,7 @@ suite "GLYPH QUERY — the compilation":
 
   test "add compiles to a create, with the values as parameters":
     let p = compileGq("add person {name \"Ada\", age 36}")
-    check p.cypher == "CREATE (n:person {name: $p1, age: $p2})"
+    check p.cypher == "CREATE (n:person {name: $p1, age: $p2}) RETURN id(n) AS id"
     check p.params.len == 2
     check p.params["p1"].kind == vkString
     check p.params["p1"].s == "Ada"
@@ -146,7 +146,7 @@ suite "GLYPH QUERY — the rules that make it safe":
     ## string — and a language whose values land in its text is an
     ## injection waiting for a name.
     let p = compileGq("add person {name \"Ada\\\"; DROP\"}")
-    check p.cypher == "CREATE (n:person {name: $p1})"
+    check p.cypher == "CREATE (n:person {name: $p1}) RETURN id(n) AS id"
     check "DROP" notin p.cypher
     check p.params["p1"].s == "Ada\"; DROP"
 
@@ -248,7 +248,7 @@ suite "GLYPH QUERY — the doors":
                                     addr clen, addr pjson[0], csize_t(pjson.len),
                                     addr plen)
     check status == 0
-    check cypher[0 ..< int(clen) - 1] == "CREATE (n:person {name: $p1})"
+    check cypher[0 ..< int(clen) - 1] == "CREATE (n:person {name: $p1}) RETURN id(n) AS id"
     check pjson[0 ..< int(plen) - 1] == "{\"p1\":\"Ada\"}"
 
   test "the compile door reports the length before the buffer is big enough":

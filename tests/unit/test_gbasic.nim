@@ -465,3 +465,117 @@ suite "GLYPH BASIC — the values":
     discard s.runStatement(t, "let d = a + b")
     check s.names["d"].text == "Ada Lovelace"
     close(db)
+
+
+suite "GLYPH BASIC — the cursor loop":
+  ## The client's other loop: the one the *query* language refuses to
+  ## have (no FOREACH, no UNION), so the client walks the set itself.
+  ## "For each of these, do that" is the first thing a person asks a
+  ## graph prompt for, and until this loop existed the language could
+  ## only ever act on one node at a time.
+
+  test "for each walks the cursor, binding the node's id":
+    let db = freshDb()
+    let text = run(db, ["find Person",
+                        "for each p : print p : next"])
+    check text.endsWith("2 nodes\n1\n2\n")
+
+  test "the name is a node, so show, set, link and drop all take it":
+    let db = freshDb()
+    let text = run(db, ["find Person where name = \"Ana\"",
+                        "for each p : show p : next"])
+    check "1 :Person" in text
+    check "  name Ana" in text
+    check "  age 34" in text
+    check "  KNOWS -> 2" in text
+
+  test "do is the separator the prompt sketch writes":
+    let db = freshDb()
+    let text = run(db, ["find Person",
+                        "for each p do print p"])
+    check text.endsWith("2 nodes\n1\n2\n")
+
+  test "add puts the new node in the cursor, and the loop names it":
+    let db = freshDb()
+    let text = run(db, ["p = 1",
+                        "add Company {name \"Acme\"}",
+                        "for each c : link p KNOWS c : next",
+                        "show 1"])
+    ## "add it, then link it" — the new node is the cursor, and the
+    ## loop is how a person gives it a name to link.
+    check text.count("linked ") == 1
+    check "KNOWS -> 4" in text
+
+  test "set takes the loop's name, and the value is a parameter":
+    let db = freshDb()
+    let text = run(db, ["find Person",
+                        "for each p : set p seen = 1 : next",
+                        "show 1"])
+    check text.count("1 updated") == 2
+    check "  seen 1" in text
+
+  test "drop takes the loop's name":
+    let db = freshDb()
+    let text = run(db, ["find Person",
+                        "for each p : drop p : next",
+                        "count Person"])
+    check text.count("dropped") == 2
+    check text.endsWith("0\n")
+
+  test "a nested loop keeps its own next":
+    let db = freshDb()
+    let text = run(db, ["find Person",
+                        "for each a : for each b : link a KNOWS b : next : next"])
+    ## Two people, so four ordered pairs — and no body run twice, which
+    ## is what a flat split on the first `next` used to do.
+    check text.count("linked ") == 4
+
+  test "a nested count loop gets its body too":
+    let db = freshDb()
+    let text = run(db, ["for i = 1 to 2 : for j = 1 to 2 : print i : next : next"])
+    check text.endsWith("1\n1\n2\n2\n")
+
+  test "a body's go does not disturb the walk, and the cursor comes back":
+    let db = freshDb()
+    let text = run(db, ["find Person",
+                        "for each p : go KNOWS from p : next",
+                        "print"])
+    ## Ana knows Bo and Bo knows nobody, so the body says 1 and 0; the
+    ## walk still visits both, and the cursor is two nodes again.
+    check text.endsWith("2 nodes\n1 nodes\n0 nodes\n2 nodes\n")
+
+  test "an empty cursor runs nothing":
+    let db = freshDb()
+    let text = run(db, ["find Person where age > 100",
+                        "for each p : print \"never\" : next"])
+    check text.endsWith("0 nodes\n")
+    check "never" notin text
+
+  test "end inside the loop stops the program":
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var sess = newSession()
+    let stopped = sess.runProgram(t, ["PROGRAM-ID. STOP",
+                                      "find Person",
+                                      "for each p : print p : end : next",
+                                      "print \"after\""])
+    check stopped
+    check sess.transcript.endsWith("2 nodes\n1\n")
+    check "after" notin sess.transcript
+
+  test "what the loop does not do is refused by name":
+    let db = freshDb()
+    for (line, want) in [
+        ("for each", "needs a name"),
+        ("for each p in team : print p", "there is no 'in'"),
+        ("for each p : next", "needs a body"),
+        ("for each p on p", "expected 'do' or ':'")]:
+      var msg = ""
+      try:
+        discard run(db, [line])
+      except GbError as e:
+        msg = e.msg
+      if msg.len == 0:
+        echo "  no refusal for: ", line
+      check msg.len > 0
+      check want in msg

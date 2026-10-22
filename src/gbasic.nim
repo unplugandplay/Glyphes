@@ -169,8 +169,19 @@ proc parseValue(s: GbSession, text: string): GbValue =
 proc nodeOf(s: GbSession, name: string): int64 =
   ## The node a name holds. A name that holds a number is a node id too:
   ## the client is the one that knows ids are numbers, and a child
-  ## should not have to.
+  ## should not have to. A literal id — `show 1` — is the same thing
+  ## written the other way, so it is accepted for the same reason.
   if not s.names.hasKey(name):
+    if name.len > 0:
+      var literal = 0'i64
+      var allDigits = true
+      for ch in name:
+        if ch notin {'0'..'9'}:
+          allDigits = false
+          break
+        literal = literal * 10 + (ord(ch) - ord('0'))
+      if allDigits:
+        return literal
     gbFail("no such name '" & name & "'")
   let v = s.names[name]
   case v.kind
@@ -300,6 +311,46 @@ proc showNode(s: var GbSession, t: GbTransport, id: int64) =
     let arrow = (if outgoing: "->" else: "<-")
     s.say("  " & rtype & " " & arrow & " " & $other)
 
+proc loopBlocks(parts: seq[string]): tuple[blocks, after: seq[string]] =
+  ## A loop written `... : stmt : ... : next : stmt`. The statements after
+  ## the `next` are the ones that follow the loop; a loop that never
+  ## writes `next` runs to the end of the line, which is the one-line
+  ## form.
+  ##
+  ## **A nested loop is handed its own body.** A `for` inside a body is
+  ## grouped with its matching `next` and run as one line, because
+  ## `runStatement` sees one statement at a time and a nested loop is one
+  ## statement whose body is the lines that follow it. Without the
+  ## grouping, `for a : for b : show a, b : next : next` would hand the
+  ## outer loop the inner one's `next` and the inner loop no body at all.
+  ##
+  ## A nested loop therefore writes its own `next` — the one ambiguity
+  ## the flat line leaves, and the reason the marker exists.
+  var i = 0
+  while i < parts.len:
+    let stmt = parts[i].strip()
+    let w = stmt.splitWhitespace
+    if w.len > 0 and w[0].toLowerAscii == "next":
+      if i + 1 < parts.len:
+        result.after = parts[i + 1 .. ^1]
+      return
+    if w.len > 0 and w[0].toLowerAscii == "for":
+      var piece = @[stmt]
+      var depth = 1
+      inc i
+      while i < parts.len and depth > 0:
+        piece.add parts[i]
+        let bw = parts[i].strip().splitWhitespace
+        if bw.len > 0 and bw[0].toLowerAscii == "for":
+          inc depth
+        elif bw.len > 0 and bw[0].toLowerAscii == "next":
+          dec depth
+        inc i
+      result.blocks.add piece.join(" : ")
+      continue
+    result.blocks.add stmt
+    inc i
+
 proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
   ## Run one client statement. Returns false when the statement asked
   ## the client to stop (`end`).
@@ -371,14 +422,77 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     if bodyText.len == 0:
       gbFail("if needs a statement after 'then'")
     if condition(s.names, condText):
-      for stmt in splitStatements(bodyText):
-        discard s.runStatement(t, stmt)
+      for piece in loopBlocks(splitStatements(bodyText)).blocks:
+        if not s.runStatement(t, piece):
+          return false
   of "for":
     ## for <var> = <a> to <b> [step <s>] : <statement>... : next
+    ## for each <var> [do] : <statement>... : next
     ##
     ## The loop the query language refuses to have: no FOREACH, no UNION.
     ## The body is on the same line, separated by `:` — the first cut's
     ## shape, and a multi-line body is the next cut.
+    if words.len >= 2 and words[1].toLowerAscii == "each":
+      ## **The cursor loop.** The set is the one `find` and `go` leave,
+      ## and the name holds a node id for the body's length — so `show`,
+      ## `link`, `set`, `drop` and `go ... from` all take it, and the
+      ## language needs no second way to name a node.
+      ##
+      ##     find Person
+      ##     for each p : show p : next
+      ##
+      ## The walk uses a *copy* of the cursor and puts the cursor back
+      ## afterwards. A body that runs `go` — the natural way to look at
+      ## a node's neighbours — therefore does not disturb the walk, and
+      ## a nested loop sees the set its own entry found.
+      let parts = splitStatements(line[3 .. ^1].strip())
+      if parts.len == 0 or parts[0].strip().len < 4:
+        gbFail("for each needs a name")
+      var head = parts[0].strip()
+      if head[0 .. 3].toLowerAscii != "each":
+        gbFail("expected 'each' after 'for'")
+      head = head[4 .. ^1].strip()
+      let sp = head.find(' ')
+      let varName = (if sp < 0: head else: head[0 ..< sp]).strip()
+      let tail = (if sp < 0: "" else: head[sp .. ^1].strip())
+      if varName.len == 0:
+        gbFail("for each needs a name")
+      var bodyParts: seq[string] = @[]
+      if tail.len > 0:
+        if tail.toLowerAscii == "in" or tail.toLowerAscii.startsWith("in "):
+          ## There is no list value to walk: the cursor is the client's
+          ## one set (pin GB2), and a second way to name a set would be
+          ## a second language.
+          gbFail("for each walks the cursor; there is no 'in'")
+        if not tail.toLowerAscii.startsWith("do"):
+          gbFail("expected 'do' or ':' after the name, found '" & tail & "'")
+        let firstBody = tail[2 .. ^1].strip()
+        if firstBody.len == 0:
+          gbFail("for each needs a statement after 'do'")
+        bodyParts.add firstBody
+      for i in 1 ..< parts.len:
+        bodyParts.add parts[i]
+      let (blocks, after) = loopBlocks(bodyParts)
+      if blocks.len == 0:
+        gbFail("for each needs a body")
+      let ids = s.cursor
+      var stopped = false
+      for id in ids:
+        s.names[varName] = GbValue(kind: gbvNumber, number: id)
+        for piece in blocks:
+          if not s.runStatement(t, piece):
+            stopped = true
+            break
+        if stopped:
+          break
+      ## The walk leaves the cursor where it found it.
+      s.cursor = ids
+      if stopped:
+        return false
+      for stmt in after:
+        if not s.runStatement(t, stmt):
+          return false
+      return true
     let rest = line[3 .. ^1].strip()
     let parts = splitStatements(rest)
     if parts.len == 0:
@@ -406,19 +520,8 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     ## `next` ends the body: the statements before it are the loop's, and
     ## the statements after it are the ones that follow the loop. The
     ## marker itself is optional — a one-line loop may end without it.
-    var body: seq[string] = @[]
-    var after: seq[string] = @[]
-    var inBody = true
-    for i in 1 ..< parts.len:
-      let stmt = parts[i]
-      if stmt.toLowerAscii == "next":
-        inBody = false
-        continue
-      if inBody:
-        body.add stmt
-      else:
-        after.add stmt
-    if body.len == 0:
+    let (blocks, after) = loopBlocks(parts[1 .. ^1])
+    if blocks.len == 0:
       gbFail("for needs a body")
     let first = evalExpr(s.names, firstText)
     let last = evalExpr(s.names, lastText)
@@ -435,15 +538,17 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     var rounds = 0
     while (if step.number > 0: v <= last.number else: v >= last.number):
       s.names[varName] = GbValue(kind: gbvNumber, number: v)
-      for stmt in body:
-        discard s.runStatement(t, stmt)
+      for piece in blocks:
+        if not s.runStatement(t, piece):
+          return false
       v += step.number
       inc rounds
       if rounds > 1_000_000:
         gbFail("the loop did not finish after a million rounds")
     ## Whatever followed the `next` runs once, after the loop.
-    for stmt in after:
-      discard s.runStatement(t, stmt)
+    for piece in after:
+      if not s.runStatement(t, piece):
+        return false
   of "gosub":
     ## gosub <name>
     ##
@@ -485,20 +590,20 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
       gbFail("while needs a condition and a statement")
     ## The body, and the optional `next` marker — the same shape as
     ## `for`, so a child who writes one writes the other.
-    var body: seq[string] = @[]
-    for stmt in parts[1 .. ^1]:
-      if stmt.toLowerAscii == "next":
-        continue
-      body.add stmt
-    if body.len == 0:
+    let (blocks, after) = loopBlocks(parts[1 .. ^1])
+    if blocks.len == 0:
       gbFail("while needs a statement")
     var rounds = 0
     while condition(s.names, parts[0]):
-      for stmt in body:
-        discard s.runStatement(t, stmt)
+      for piece in blocks:
+        if not s.runStatement(t, piece):
+          return false
       inc rounds
       if rounds > 1_000_000:
         gbFail("the loop did not finish after a million rounds")
+    for piece in after:
+      if not s.runStatement(t, piece):
+        return false
   of "input":
     ## input <name>
     ##
@@ -608,18 +713,22 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
       s.say(l)
   of "add":
     ## add <label> [{<prop> <value>}]
-    if words.len < 2:
+    ##
+    ## The property list is the client's own text, passed through as
+    ## written: `{name "Ada", age 36}` is already the GQ statement's
+    ## syntax, and rebuilding it word by word was how the commas and
+    ## the braces got lost. GQ turns each literal into a parameter, so
+    ## the value still never reaches the Cypher text (pin GQ4).
+    let rest = line[3 .. ^1].strip()
+    if rest.len == 0 or rest.find(' ') < 0:
       gbFail("add needs a label")
-    var gq = "add " & words[1]
-    if words.len > 2:
-      ## the property list is the client's own text: {name "Ada", age 36}
-      var props = ""
-      for w in words[3 .. ^1]:
-        if w == "," or w == "{" or w == "}": continue
-        if props.len > 0: props.add ", "
-        props.add w
-      gq.add " {" & props & "}"
+    let gq = "add " & rest
     let res = t.runFn(gq, initTable[string, Value]())
+    ## The new node is the cursor afterwards (PRD §3.1): the id came
+    ## back with the write, and the client's next statement is usually
+    ## about the node it just made.
+    if res.ids.len > 0:
+      s.setCursor(res.ids)
     s.say($res.affected & " created")
   of "link":
     if words.len != 4:
@@ -629,21 +738,35 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     let id = t.linkFn(a, words[2], b)
     s.say("linked " & $id)
   of "set":
+    ## set <name> <prop> = <value>
+    ##
+    ## Both the node and the value travel as *parameters*: the name is
+    ## resolved here (the engine never sees a client name), and the
+    ## value is the client's own expression, evaluated in the client.
+    ## `set p age 36` and `set p age = 36` are the same statement.
     if words.len < 4:
       gbFail("set needs a name, a property and a value")
-    var gq = "set $" & words[1] & " " & words[2]
-    if words[3] == "=":
-      if words.len < 5:
-        gbFail("set needs a value")
-      gq.add " = " & words[4]
-    else:
-      gq.add " = " & words[3]
-    let res = t.runFn(gq, initTable[string, Value]())
+    var valueWords = (if words[3] == "=": words[4 .. ^1] else: words[3 .. ^1])
+    if valueWords.len == 0:
+      gbFail("set needs a value")
+    let value = evalExpr(s.names, valueWords.join(" "))
+    var params = initTable[string, Value]()
+    params["n"] = Value(kind: vkInt, i: s.nodeOf(words[1]))
+    case value.kind
+    of gbvNode: params["v0"] = Value(kind: vkInt, i: value.nodeId)
+    of gbvNumber: params["v0"] = Value(kind: vkInt, i: value.number)
+    of gbvString: params["v0"] = Value(kind: vkString, s: value.text)
+    of gbvBool: params["v0"] = Value(kind: vkBool, b: value.flag)
+    of gbvNull: params["v0"] = Value(kind: vkNull)
+    let gq = "set $n " & words[2] & " = $v0"
+    let res = t.runFn(gq, params)
     s.say($res.affected & " updated")
   of "drop":
     if words.len != 2:
       gbFail("drop needs a name")
-    let res = t.runFn("drop $" & words[1], initTable[string, Value]())
+    var params = initTable[string, Value]()
+    params["n"] = Value(kind: vkInt, i: s.nodeOf(words[1]))
+    let res = t.runFn("drop $n", params)
     s.say($res.affected & " dropped")
   else:
     gbFail("unknown statement '" & words[0] & "'")

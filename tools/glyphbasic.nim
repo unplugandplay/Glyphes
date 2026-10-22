@@ -36,6 +36,7 @@ proc main() =
   echo "  show <name>   count   add   link   set   drop   labels"
   echo "  let <name> = <value>   print <expr>   input <name>"
   echo "  if <expr> then <stmt>   for <var> = <a> to <b> : <stmt> : next"
+  echo "  for each <name> : <stmt> : next   -- the cursor, one node at a time"
   echo "  a name holds a node: p = 1, and $p refers to it in a where clause"
   var inProgram = false
   var program: seq[string] = @[]

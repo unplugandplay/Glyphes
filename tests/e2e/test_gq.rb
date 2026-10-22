@@ -35,7 +35,7 @@ class GqTest < Minitest::Test
 
   def test_compile_puts_a_literal_in_a_parameter
     cypher, params = @db.gq_compile('add person {name "Ada"}')
-    assert_equal "CREATE (n:person {name: $p1})", cypher
+    assert_equal "CREATE (n:person {name: $p1}) RETURN id(n) AS id", cypher
     assert_equal '{"p1":"Ada"}', params
   end
 

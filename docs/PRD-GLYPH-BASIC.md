@@ -68,19 +68,28 @@ A prompt, one line per statement, and the BASIC's own vocabulary for
 control flow.
 
 ```
-ready> find person
-  2 people
-ready> p = first
-ready> show p
-  3 :Ada
-  age 36
-  knows -> 4 :Bo
-ready> go knows
-  1 :Bo
-ready> if p has age then print "yes"
-ready> for each of friends of p do show it
-ready> add person {name "Bo"}
+ready> find Person
+  2 nodes
+ready> for each p : show p : next
+  1 :Person
+    name Ana
+    age 34
+    KNOWS -> 2
+  2 :Person
+    name Bo
+    age 41
+    KNOWS <- 1
+ready> add Company {name "Acme"}
+  1 created
+ready> for each c : link p KNOWS c : next
+  linked 2
 ```
+
+"For each of these, do that" is the sentence a graph prompt exists to
+answer, and `for each` is how the client says it: the loop walks the
+cursor and the name it binds is a node for the body's length. The
+transcript above is the measured one — the same script is the golden
+transcript test.
 
 ### 3.1 The statements
 
@@ -88,6 +97,7 @@ ready> add person {name "Bo"}
 |---|---|---|
 | `find <label> [where <expr>]` | replaces the cursor with a set of nodes | `find <label> [where <expr>]` |
 | `go [back] <type> [from <name>]` | replaces the cursor with the nodes one hop away | `go [back] <type> [from $n]` |
+| `for each <name> [: ... : next]` | runs the body once per node in the cursor, the name holding its id | — |
 | `count` | prints the size of the cursor | `count` (or the client's own count) |
 | `show <name>` | prints a node: its id, its label, its properties, its edges | the introspection doors |
 | `add <label> [{<prop> <value>}]` | creates a node and puts it in the cursor | `add <label> {...}` |
@@ -104,8 +114,9 @@ The BASIC's, unchanged:
 | statement | what it is |
 |---|---|
 | `if <expr> then <statement>` | the conditional the query language refuses |
-| `for <var> = <a> to <b> [step <s>]` | the loop the query language refuses |
-| `goto <line>` / `gosub` / `return` | the subroutine |
+| `for <var> = <a> to <b> [step <s>]` | the counting loop the query language refuses |
+| `for each <var> [: ... : next]` | the walk over the cursor — "for each of these, do that" |
+| `gosub` / `return` | the subroutine: called by name, never by line |
 | `print <items>` | output, with `,` and `;` as separators |
 | `input` | read a line |
 | `let <var> = <expr>` | assignment |
@@ -121,18 +132,27 @@ with null gives null, and a null condition is false (the engine's
 three-valued logic, CYPHER.md §6, inherited — a language that treats
 null as false teaches the wrong thing quietly).
 
-**What the first cut ships.** The conditional, the loop and `input` are
-in. `goto` / `gosub` / `return` are **not**, and the reason is shape,
-not effort: a subroutine names a *line*, and a client line has no
-number — it has a position in a session. Numbering the client's lines
-means giving the client a **program** (a list of lines and a program
-counter), and that same program model is what makes a *multi-line* loop
-body possible. The two come together, so both wait. Until then the
-bodies are **one line**, separated by `:` — the separator the eZ80
-BASIC already uses:
+**The program model is in.** `goto` is gone for good: a subroutine is
+*named* (`SUBROUTINE. NAME.`) and called with `gosub`; `return` is the
+way back, and a subroutine that falls off its end is refused by name.
+`while` is the unbounded loop. The bodies are still **one line**,
+separated by `:` — the separator the eZ80 BASIC already uses — and a
+**multi-line** body is the next cut:
 
     ready> if x = 1 then print "one" : print "and the rest"
     ready> for i = 1 to 5 : t = t + i : next
+
+**A loop inside a loop writes its own `next`.** The client groups a
+nested `for` with its marker before running the outer body, so
+`for a : for b : show a, b : next : next` is one statement in the outer
+body rather than two — without the grouping the outer loop would take
+the inner one's `next` and the inner loop would have no body at all.
+
+**`for each` walks a copy of the cursor** and puts the cursor back
+afterwards. A body that runs `go` — the natural way to look at a node's
+neighbours — therefore does not disturb the walk, and a nested loop
+sees the set its own entry found. The name keeps the last node
+afterwards, like the counting loop's variable.
 
 A loop that cannot finish **says so** instead of hanging: the client
 is a prompt, and a prompt that hangs is a prompt that is broken.
@@ -251,10 +271,6 @@ client is what a real user types.
   subroutines and `goto` gone for good — but a loop whose body is the
   *lines that follow* is not, and needs the indentation or the
   `END-IF` convention that the one-line bodies avoid.
-- **A `while`.** `for` with a step, and `goto`, cover it; `while` is
-  sugar for a `for` over 1..32767 ✗ hmm — the 64-bit host makes it
-  trivial ✓ and the guest's 24-bit ADL mode makes it possible ✓✓
-  (2¹⁶ iterations ✓ — hmm, 24-bit ✓ 16M ✓ — enough ✓).
 - **The eZ80 guest's first cut.** It is the *next* cut, after the host
   client and the language's grammar have stopped moving. Pin GB9 is the
   check that the grammar is small enough, and the guest is what proves

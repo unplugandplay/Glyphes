@@ -217,8 +217,8 @@ New file `tests/unit/test_gbasic.nim`:
 | the refusals | every bad client line produces the message the table names (GB-C) ✓ |
 | the parameters | a client value never reaches the query text — checked at the transport boundary (GB-D) ✓ |
 | the arithmetic | a node id above 2³¹ round-trips (GB-E) ✓ |
-| the cursor | `find`/`go` replace the cursor; `first`/`last` pick from it; `count` prints its size ✓ |
-| the control flow | the conditional runs the statement that follows it; the loop counts up and down; the loop that cannot finish says so ✓ |
+| the cursor | `find`/`go` replace the cursor; `for each` walks it; `count` prints its size ✓ |
+| the control flow | the conditional runs the statement that follows it; the loop counts up and down; the cursor loop walks the set; a loop that cannot finish says so ✓ |
 | the null | a null condition is false ✓ |
 | the durability | a link survives a reopen, because it went through the log ✓ |
 
