@@ -98,14 +98,13 @@ transcript test.
 | `find <label> [where <expr>]` | replaces the cursor with a set of nodes | `find <label> [where <expr>]` |
 | `go [back] <type> [from <name>]` | replaces the cursor with the nodes one hop away | `go [back] <type> [from $n]` |
 | `for each <name> [: ... : next]` | runs the body once per node in the cursor, the name holding its id | — |
-| `count` | prints the size of the cursor | `count` (or the client's own count) |
+| `count [<label> [where <expr>]]` | with no label, the size of the cursor — the client's own count; with a label, the engine's count of that label | `count <label>`, or the client's own count |
 | `show <name>` | prints a node: its id, its label, its properties, its edges | the introspection doors |
 | `add <label> [{<prop> <value>}]` | creates a node and puts it in the cursor | `add <label> {...}` |
 | `link <name> <type> <name>` | creates a relationship | `link` |
 | `set <name> <prop> = <value>` | sets a property | `set` |
 | `drop <name>` | deletes a node | `drop` |
 | `labels` | prints the labels in the graph | `labels` |
-| `help` / `?` | prints the statements | — |
 
 ### 3.2 The control flow
 
@@ -116,21 +115,29 @@ The BASIC's, unchanged:
 | `if <expr> then <statement>` | the conditional the query language refuses |
 | `for <var> = <a> to <b> [step <s>]` | the counting loop the query language refuses |
 | `for each <var> [: ... : next]` | the walk over the cursor — "for each of these, do that" |
+| `while <expr> : <statement> [next]` | the unbounded loop — what `goto` used to be for, with the same one-million-round cap |
 | `gosub` / `return` | the subroutine: called by name, never by line |
-| `print <items>` | output, with `,` and `;` as separators |
-| `input` | read a line |
+| `print <expression>` | output; with no expression, the size of the cursor |
+| `input <name>` | read a line, knowing what it read: all digits a number, anything else text |
 | `let <var> = <expr>` | assignment |
 | `rem ...` | a comment |
-| `end` | stop the program |
+| `end` | stop the program (at the prompt, stop the session) |
 
 **The expressions are the client's own** (pin GB7): a number, a string, a
-name, a comparison (`=` `<>` `<` `>` `<=` `>=`), `and` / `or` / `not`,
-`+ - * /`, and parentheses. They are evaluated **in the client**, not by
-the engine — the door is for the *graph*, and `1 + 1` is not a graph
-query. Null is a value like any other and it is not true: a comparison
-with null gives null, and a null condition is false (the engine's
-three-valued logic, CYPHER.md §6, inherited — a language that treats
-null as false teaches the wrong thing quietly).
+name — including the two names that pick from the cursor, `first` and
+`last` — a comparison (`=` `<>` `<` `>` `<=` `>=`), `and` / `or` /
+`not`, `+ - * /`, and parentheses. They are evaluated **in the client**,
+not by the engine — the door is for the *graph*, and `1 + 1` is not a
+graph query. Every arithmetic edge refuses rather than overflows: a
+literal past 64 bits, an `*` whose product will not fit, a division by
+zero — each names itself, and the prompt never crashes (pin GB6).
+
+There is no `null` literal to write: a comparison answers yes or no. If
+a session ever holds a null — the host's value model keeps one, and the
+engine's rule for it is inherited — it is **not true**: a condition on a
+null is false, and a comparison against it gives null (the engine's
+three-valued logic, CYPHER.md §6, inherited because a language that
+treats null as false teaches the wrong thing quietly).
 
 **The program model is in.** `goto` is gone for good: a subroutine is
 *named* (`SUBROUTINE. NAME.`) and called with `gosub`; `return` is the
@@ -207,27 +214,30 @@ The BASIC's variables are 26 single letters; a graph session wants
 symbol table, which the engine's own property dictionary
 (`docs/STORAGE.md` §4) is the precedent for.
 
-A name holds a **node id** (i64) or a **number** (i64) or a **string**.
-A name that holds a node id is what `go ... from <name>` and `show
-<name>` take.
+A name holds a **node id** (i64) or a **number** (i64) or a **string**
+or a **yes/no**. A name that holds a node id is what `go ... from
+<name>` and `show <name>` take.
 
 **The cursor.** `find` and `go` leave a *set* of node ids in the
 session, in order, and the client walks it. The cursor is a *client*
 concept: the engine's pull model means the client can stop early
 (`show` only wants the first row) without the engine materialising
-anything.
+anything. Two names pick from it without walking: `p = first` and `p =
+last` hold its two ends — an empty cursor is refused by name, because
+there is no first of nothing. A name the session already holds wins
+over them, so `let first = 5` reads back as 5 on both clients.
 
 ## 4. The pins
 
 | Pin | Rule |
 |---|---|
 | **GB1** | **GLYPH BASIC issues GLYPH QUERY; it never touches the store.** The client's only door is the GLYPH QUERY door (and the read-only introspection doors for `show`). A client's bug cannot corrupt the graph. |
-| **GB2** | **One cursor, one concept.** The session has exactly one cursor — the current set of node ids — and every command that produces a set replaces it. There is no second "current node": the cursor is a set, and `first`/`last`/`nth` pick from it. |
+| **GB2** | **One cursor, one concept.** The session has exactly one cursor — the current set of node ids — and every command that produces a set replaces it. There is no second "current node": the cursor is a set, and `first` and `last` pick its ends. |
 | **GB3** | **The cursor is the client's.** The engine holds no cursor between statements; the client holds the ids. A client that dies holds nothing. |
 | **GB4** | **A statement's writes are visible to the next statement, not to itself** — the engine's pin C4, inherited. So `add person {name "Bo"}` then `show` sees the new node ✓, and a single statement never sees its own write. |
 | **GB5** | **The client is transport-agnostic.** The interpreter talks to a *door* — in-process, or a port channel — and the same grammar runs over both. This is what makes the eZ80 guest possible and what keeps the two implementations honest. |
 | **GB6** | **Errors name the thing and never crash.** An unknown statement says which one; a bad value says which; a refused query passes the engine's refusal through *unchanged*. |
-| **GB7** | **The client's arithmetic is 64-bit** (node ids are i64), and the eZ80 guest uses the ADL mode's 24-bit registers where it can. The host's word size is not the language's data model — the *data* decides. |
+| **GB7** | **The client's arithmetic is 64-bit** (node ids are i64). The host's word size is not the language's data model — the *data* decides. The eZ80 guest keeps its arithmetic at its own register width — **16-bit, unsigned, wrapping** — while its addresses are 24-bit; that divergence is documented where the guest is (§6), never inherited into the language. |
 | **GB8** | **The prompt is the transaction boundary.** Each line is its own statement and its own transaction unless the client holds one open; a write is visible to the next line. |
 | **GB9** | **The language is small enough to be implemented twice.** A grammar that needs a compiler to express is a script. The eZ80 guest is the check. |
 
@@ -278,8 +288,13 @@ client is what a real user types.
   program model (`PROGRAM-ID.`, `SUBROUTINE.`, `END PROGRAM.`,
   `gosub`/`return`); its transcript matches the host client's byte for
   byte on the scripts that cover them (GB-F). Its limits are the
-  machine's, not smaller promises: 16-bit numbers and a word-shaped
-  expression grammar, a 1 KB text arena, a 2 KB/64-line program buffer,
+  machine's, not smaller promises: **16-bit unsigned** numbers — so
+  `print 0 - 7` says `65529` there where the host says `-7`, and a
+  result past 65,535 wraps — and a word-shaped expression grammar with
+  no unary minus: `-5` is one word the guest does not know, and `0 - 5`
+  is how a negative is written there (the host's character-level lexer
+  splits `-5` and accepts it). Then a 1 KB text arena, a 2 KB/64-line
+  program buffer,
   eight subroutines of fifteen characters, and sixteen open calls. A
   bound reached is a refusal (`?`), never a truncation. A write the
   *host* refuses (`!`) prints the guest's one-word `?`, because that is
@@ -297,7 +312,7 @@ client is what a real user types.
 | **GB-B** | The transcript is **identical** whether the client talks to the engine in-process or over the *port channel* — the two transports are the same language. |
 | **GB-C** | Every refusal names the construct: a table of bad client lines and the message each produces. |
 | **GB-D** | A client value never reaches the query text (with GQ-C). |
-| **GB-E** | The client's arithmetic is 64-bit: a node id above 2³¹ round-trips ✓ (the guest's 24-bit limit is documented, not inherited). |
+| **GB-E** | The client's arithmetic is 64-bit: a node id above 2³¹ round-trips ✓ (the guest's 16-bit limit is documented, not inherited). |
 | **GB-F** | The eZ80 guest, when it exists, produces the **same transcript** as the host client (pin GB9). |
 
 ## 8. The risk, stated
@@ -310,7 +325,7 @@ words, it would be a veneer, and the test for that is whether removing
 the control flow would lose anything.
 
 **The other risk is scope creep towards a real programming language.**
-The first version has no functions, no strings-as-values and no
-aggregates, and each of those omissions is deliberate: a language that
-grows a type system stops being a language a child can hold in their
-head, and that is the only property this one is for.
+The first version has no functions with parameters, no aggregates and
+no multi-line bodies, and each of those omissions is deliberate: a
+language that grows a type system stops being a language a child can
+hold in their head, and that is the only property this one is for.

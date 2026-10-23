@@ -672,9 +672,11 @@ DVSK:
         JP NZ,DVLP
         RET
 DVERR:
-        LD A,'?'
-        OUT (1),A
-        RET
+        ; Division by zero is a refusal like any other: the *line* is
+        ; abandoned, not half-printed. This used to put a `?` straight
+        ; on the console and return a quotient anyway, so `print 1 / 0`
+        ; answered `?1` — a refusal that ran the rest of the statement.
+        JP STERR
 
 ; MUL16: HL * DE -> HL (the low 16 bits). The multiplicand shifts
 ; left, the multiplier shifts right, and the product gathers in BC.
@@ -797,6 +799,8 @@ TK1:    LD A,(HL)
         JP Z,TKEND
         CP ' '
         JR Z,TKSPACE
+        CP TAB                ; a tab is a blank, as on the host: one
+        JR Z,TKSPACE          ; line with tabs is one line everywhere
         CP ':'
         JR Z,TKCOLON
         ; a word begins here
@@ -819,6 +823,8 @@ TK2:    LD A,(TKQ)
         JP Z,TKEND
         CP ' '
         JR Z,TKSPACE
+        CP TAB                ; a tab ends a word like a space here;
+        JR Z,TKSPACE          ; the quoted path below keeps its own
         CP ':'
         JR Z,TK1              ; the boundary handler takes it
         CP 34
@@ -869,7 +875,7 @@ TKCOLON:
         LD A,(SCOUNT)
         INC A
         LD (SCOUNT),A
-        JR TK1
+        JP TK1
 TKEND:
         LD A,(SCOUNT)
         LD E,A
@@ -1328,8 +1334,21 @@ GVNUM:  LD HL,(TXTPTR)
         LD (RK),A
         RET
 GVNAME: LD HL,(TXTPTR)
-        CALL FINDNAME
-        PUSH HL
+        CALL TRYNAME          ; the session's own names first — a name
+        JR NC,GVSLOT          ; a child bound is the child's to read
+        ; No such name: the two words that pick from the cursor (pin
+        ; GB2 — the prompt sketch's `p = first`). A text like "first"
+        ; never gets here: the quotes take GVSTR.
+        LD HL,(TXTPTR)
+        LD DE,MSGFIRST
+        CALL NAMEEQ
+        JP Z,CURFIRST
+        LD HL,(TXTPTR)
+        LD DE,MSGLAST
+        CALL NAMEEQ
+        JP Z,CURSLAST
+        JP STERR              ; no such name — refused, not created
+GVSLOT: PUSH HL
         LD HL,(SLOTK)
         LD A,(HL)
         LD (RK),A
@@ -1384,6 +1403,116 @@ GVSEND: LD HL,(VAL3)
         LD A,1
         LD (RK),A
         RET
+
+; The slot for the name at HL, or carry if the session has no such
+; name. FINDNAME refuses instead of answering — right for a value's
+; lookup, wrong for the two words that mean something when no name
+; stands in their way. The search is the same eight slots; only the
+; answer at the end differs.
+TRYNAME:
+        LD (TXTPTR),HL
+        LD DE,NAMETAB
+        LD B,8
+TN1:    PUSH BC
+        PUSH DE
+        LD HL,(TXTPTR)
+        CALL NAMEEQ
+        POP DE
+        POP BC
+        JR Z,TNHIT
+        LD A,E
+        ADD A,10
+        LD E,A
+        JR NC,TN2
+        INC D
+TN2:    DJNZ TN1
+        SCF                   ; carry: there is no such name
+        RET
+TNHIT:  PUSH DE
+        LD A,8
+        SUB B
+        LD E,A
+        LD D,0
+        LD HL,KINDS
+        ADD HL,DE
+        LD (SLOTK),HL
+        POP DE
+        LD H,D
+        LD L,E
+        OR A                  ; no carry: the session holds this name
+        RET
+
+; The first id in the cursor -> HL, kind number. An empty cursor is a
+; refusal — there is no first of nothing (the host's words exactly).
+CURFIRST:
+        LD HL,CURSOR
+CFST1:  LD A,(HL)
+        CP '0'
+        JR C,CFST2
+        CP 58
+        JR NC,CFST2
+        CALL CURPNUM
+        LD H,D
+        LD L,E
+        JR CURKIND
+CFST2:  OR A
+        JP Z,STERR            ; the end of the cursor, no id: empty
+        INC HL
+        JR CFST1
+
+; The last id in the cursor -> HL, kind number. Each digit run
+; overwrites DE, so the run before the NUL is the last one.
+CURSLAST:
+        LD A,(CURSOR)
+        OR A
+        JP Z,STERR
+        LD HL,CURSOR
+        LD DE,0
+CLST1:  LD A,(HL)
+        OR A
+        JR Z,CLST2
+        CP '0'
+        JR C,CLST3
+        CP 58
+        JR NC,CLST3
+        CALL CURPNUM          ; DE = this run, HL just past it
+        JR CLST1
+CLST3:  INC HL
+        JR CLST1
+CLST2:  LD H,D
+        LD L,E
+CURKIND:
+        XOR A
+        LD (RK),A
+        RET
+
+; The number at the digit run HL -> DE, with HL just past the run.
+; PARSENUM would not do: it runs to the NUL, and the cursor's ids are
+; separated by commas ("10,12" would read as one number).
+CURPNUM:
+        LD DE,0
+CPN1:   LD A,(HL)
+        CP '0'
+        JR C,CPN2
+        CP 58
+        JR NC,CPN2
+        SUB '0'
+        LD C,A
+        PUSH HL
+        LD H,D
+        LD L,E
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,DE
+        ADD HL,HL
+        LD B,0
+        ADD HL,BC
+        LD D,H
+        LD E,L
+        POP HL
+        INC HL
+        JR CPN1
+CPN2:   RET
 
 ; The node id in the word at HL. A text or yes/no is refused, as the
 ; host's nodeOf refuses it; a number (and so a node id) is taken.
@@ -2295,15 +2424,15 @@ STFIND:
         OUT (1),A
         RET
 
-; ---- count <label> -----------------------------------------------------
+; ---- count [<label>] ----------------------------------------------------
 STCOUNT:
         LD A,(STMT)
         INC A
         LD B,A
         LD A,(SEND)
         CP B
-        JP Z,STERR
-        JP C,STERR
+        JP Z,STCCUR           ; just "count": the cursor's own size —
+        JP C,STERR            ; the client's count, on both clients
         LD A,(STMT)
         ADD A,2
         LD B,A
@@ -2319,6 +2448,15 @@ STCOUNT:
         CALL READANS
         LD HL,ANSBUF
         CALL PRSTR
+        LD A,CR
+        OUT (1),A
+        RET
+
+; count with no label: how many ids the session is holding, printed
+; the way the engine's count prints — a bare number.
+STCCUR: LD HL,CURSOR
+        CALL COUNTIDS
+        CALL PNUMU
         LD A,CR
         OUT (1),A
         RET
@@ -3596,5 +3734,7 @@ MSGAND:    DB "and", 0
 MSGNOT:    DB "not", 0
 MSGTRUE:   DB "true", 0
 MSGFALSE:  DB "false", 0
+MSGFIRST:  DB "first", 0
+MSGLAST:   DB "last", 0
 MSGERR:    DB "?", 0
 MSGEMPTY:  DB 0

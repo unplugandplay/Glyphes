@@ -84,6 +84,8 @@ proc renderValue(v: Value): string =
   of vkBool: (if v.b: "true" else: "false")
   of vkInt: $v.i
   of vkFloat: $v.f
+  of vkDate: "date:" & $v.d
+  of vkPoint: "point:" & $v.x & ":" & $v.y
   of vkString, vkBytes: $v.s.len & ":" & v.s
   of vkVector: "vec" & $v.dims.len
   of vkList: "list" & $v.items.len

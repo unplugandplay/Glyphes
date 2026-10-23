@@ -21,10 +21,18 @@
 ##     unary   := '-' unary | primary
 ##     primary := number | string | name | '(' expr ')'
 ##
+## Two names belong to the language rather than to the session: `first`
+## and `last` pick the two ends of the cursor (pin GB2 — the prompt
+## sketch's `p = first`). A name the session *holds* wins, so a `let
+## first = 5` still reads back as 5, and the same rule runs on the
+## guest.
+##
 ## `null` is a value like any other, and it is not true: a comparison
 ## with null gives null, and null is not a condition. That is the
 ## engine's three-valued logic (CYPHER.md §6), inherited because a
 ## language that treats null as false teaches the wrong thing quietly.
+## The client has no `null` literal to write; the rule is the session's
+## to keep if a null ever reaches it.
 
 import std/[strutils, tables]
 import ./gbasic_types
@@ -35,6 +43,44 @@ type
 
 proc exprFail(msg: string) {.noreturn.} =
   raise newException(GbExprError, "glyph basic: " & msg)
+
+# ------------------------------------------------- checked 64-bit arithmetic
+#
+# The client's numbers are i64 (pin GB7), and *every* arithmetic edge
+# refuses rather than overflows: an overflow is a Defect, and pin GB6
+# says a bad line names itself and never crashes. The checks are
+# written without doing the sum, so they answer the same whether or
+# not the compiler's own overflow checks are switched on.
+
+proc overAdd*(a, b: int64): bool {.inline.} =
+  (b > 0 and a > high(int64) - b) or (b < 0 and a < low(int64) - b)
+
+proc overSub*(a, b: int64): bool {.inline.} =
+  (b < 0 and a > high(int64) + b) or (b > 0 and a < low(int64) + b)
+
+proc overMul*(a, b: int64): bool =
+  if a == 0 or b == 0: false
+  elif a > 0:
+    if b > 0: a > high(int64) div b
+    else: b < low(int64) div a
+  else:
+    if b > 0: a < low(int64) div b
+    else: a < high(int64) div b
+
+proc overNeg(a: int64): bool {.inline.} =
+  a == low(int64)
+
+proc parseDigits(t: string): int64 =
+  ## An all-digit token as a number, refusing a token that will not
+  ## fit — the biggest number the language can hold is a fact about the
+  ## language, and a token past it is a refusal rather than a wrap.
+  var n: int64 = 0
+  for ch in t:
+    let d = ord(ch) - ord('0')
+    if n > (high(int64) - d) div 10:
+      exprFail("the number '" & t & "' is too big to hold")
+    n = n * 10 + d
+  n
 
 type
   ExprKind = enum
@@ -121,13 +167,12 @@ proc parsePrimary(p: var Parser): Expr =
     if t.len < 2 or t[^1] != '"':
       exprFail("a string with no closing quote")
     return Expr(kind: ekStr, text: t[1 .. ^2])
-  var n: int64 = 0
   var allDigits = t.len > 0
   for ch in t:
-    if ch in {'0'..'9'}: n = n * 10 + (ord(ch) - ord('0'))
-    else: allDigits = false
+    if ch notin {'0'..'9'}:
+      allDigits = false
   if allDigits:
-    return Expr(kind: ekNum, num: n)
+    return Expr(kind: ekNum, num: parseDigits(t))
   for ch in t:
     if not (ch in {'a'..'z'} or ch in {'A'..'Z'} or ch in {'0'..'9'} or
             ch == '_'):
@@ -202,29 +247,43 @@ proc truthy(v: GbValue): bool =
   of gbvString: v.text.len > 0
   of gbvNode: v.nodeId != 0
 
-proc eval(e: Expr; names: Table[string, GbValue]): GbValue =
+proc eval(e: Expr; names: Table[string, GbValue];
+          cursor: seq[int64]): GbValue =
   case e.kind
   of ekNum: GbValue(kind: gbvNumber, number: e.num)
   of ekStr: GbValue(kind: gbvString, text: e.text)
   of ekName:
-    if not names.hasKey(e.text):
+    ## The session's names first — a name may hold any value, including
+    ## one bound to `first` itself — and then the two words that pick
+    ## from the cursor (pin GB2). `show first` is the same rule in the
+    ## client's `nodeOf`.
+    if names.hasKey(e.text):
+      names[e.text]
+    elif e.text == "first" or e.text == "last":
+      if cursor.len == 0:
+        exprFail("the cursor is empty")
+      GbValue(kind: gbvNumber,
+              number: (if e.text == "first": cursor[0] else: cursor[^1]))
+    else:
       exprFail("no such name '" & e.text & "'")
-    names[e.text]
   of ekNeg:
-    let v = eval(e.left, names)
+    let v = eval(e.left, names, cursor)
     case v.kind
-    of gbvNumber: GbValue(kind: gbvNumber, number: -v.number)
+    of gbvNumber:
+      if overNeg(v.number):
+        exprFail("the result is too big to hold")
+      GbValue(kind: gbvNumber, number: -v.number)
     else: exprFail("'-' needs a number")
   of ekNot:
-    let v = eval(e.left, names)
+    let v = eval(e.left, names, cursor)
     GbValue(kind: gbvBool, flag: not truthy(v))
   of ekBin:
-    let l = eval(e.left, names)
-    let r = eval(e.right, names)
+    let l = eval(e.left, names, cursor)
+    let r = eval(e.right, names, cursor)
     case e.op
     of "and":
-      ## Short-circuit, and three-valued: false and null is false, and
-      ## the other combinations are null.
+      ## Eager, as the guest's evaluator is, and three-valued: false
+      ## and null is false, and the other combinations are null.
       if l.kind == gbvBool and not l.flag:
         return GbValue(kind: gbvBool, flag: false)
       if r.kind == gbvBool and not r.flag:
@@ -277,40 +336,51 @@ proc eval(e: Expr; names: Table[string, GbValue]): GbValue =
       of "<=": GbValue(kind: gbvBool, flag: cmp <= 0)
       else: GbValue(kind: gbvBool, flag: cmp >= 0)
     of "+":
-      ## Two strings concatenate; two numbers add; a string and a number
-      ## are refused by name. The mixed case used to read the *wrong*
-      ## union member — `l.text` on a number is not a string, it is
-      ## whatever the eight bytes of the integer happen to be — and a
-      ## language that answers "Ada" & 1 with garbage is worse than one
-      ## that refuses.
+      ## Two strings concatenate; two numbers add; anything else — a
+      ## text against a number, a yes/no, a node, null — is refused by
+      ## name. The mixed case used to read the *wrong* union member:
+      ## `l.number` on a yes/no is not a number, it is whichever byte
+      ## the object happened to hold, and a language that answers with
+      ## garbage (or crashes, pin GB6) is worse than one that refuses.
       if l.kind == gbvString and r.kind == gbvString:
         GbValue(kind: gbvString, text: l.text & r.text)
-      elif l.kind == gbvString or r.kind == gbvString:
-        exprFail("'+' needs two strings or two numbers")
-      else:
+      elif l.kind == gbvNumber and r.kind == gbvNumber:
+        if overAdd(l.number, r.number):
+          exprFail("the result is too big to hold")
         GbValue(kind: gbvNumber, number: l.number + r.number)
+      else:
+        exprFail("'+' needs two strings or two numbers")
     of "-":
       if l.kind != gbvNumber or r.kind != gbvNumber:
         exprFail("'-' needs two numbers")
+      if overSub(l.number, r.number):
+        exprFail("the result is too big to hold")
       GbValue(kind: gbvNumber, number: l.number - r.number)
     of "*":
       if l.kind != gbvNumber or r.kind != gbvNumber:
         exprFail("'*' needs two numbers")
+      if overMul(l.number, r.number):
+        exprFail("the result is too big to hold")
       GbValue(kind: gbvNumber, number: l.number * r.number)
     of "/":
       if l.kind != gbvNumber or r.kind != gbvNumber:
         exprFail("'/' needs two numbers")
       if r.number == 0:
         exprFail("division by zero")
+      if l.number == low(int64) and r.number == -1:
+        exprFail("the result is too big to hold")
       GbValue(kind: gbvNumber, number: l.number div r.number)
     else:
       exprFail("unknown operator '" & e.op & "'")
 
-proc evalExpr*(names: Table[string, GbValue]; text: string): GbValue =
-  ## Evaluate an expression against a session's names.
-  eval(parseExpr(text), names)
+proc evalExpr*(names: Table[string, GbValue]; text: string;
+               cursor: seq[int64] = @[]): GbValue =
+  ## Evaluate an expression against a session's names — and, for the
+  ## two names that pick from it, against the cursor (pin GB2).
+  eval(parseExpr(text), names, cursor)
 
-proc condition*(names: Table[string, GbValue]; text: string): bool =
+proc condition*(names: Table[string, GbValue]; text: string;
+                cursor: seq[int64] = @[]): bool =
   ## An expression as a condition. A null condition is *false*: the
   ## engine's rule (C6) that null is not truthy, inherited so that the
   ## two languages cannot disagree about what "no" means.

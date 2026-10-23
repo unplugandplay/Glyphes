@@ -96,6 +96,19 @@ suite "GLYPH BASIC — the transcript":
     check text == "2 nodes\n1 nodes\n"
     close(db)
 
+  test "blanks in front are not a different line":
+    ## The guest's tokenizer skips spaces *and tabs* while it splits, so
+    ## `  find Person` is `find Person` there. The host sliced some
+    ## statements by keyword length — `line[4 ..]` on `  find Person`
+    ## reads `nd Person`, so the label came out as `nd` and the clause
+    ## as `Person`, and `  print 1` refused outright. One line, one
+    ## meaning, whichever blanks it arrived with.
+    let db = freshDb()
+    let text = run(db, ["  print 1", "\tprint 2",
+                        "  find Person", "  count", "find\tPerson"])
+    check text == "1\n2\n2 nodes\n2\n2 nodes\n"
+    close(db)
+
   test "a name holds a node, and the chase follows it":
     let db = freshDb()
     let text = run(db, ["find Person", "p = 1", "go KNOWS from p"])
@@ -186,7 +199,9 @@ suite "GLYPH BASIC — the control flow":
 
   test "a loop that cannot finish says so instead of hanging":
     ## The client is a prompt, and a prompt that hangs is a prompt that
-    ## is broken.
+    ## is broken. The cap is counted *before* the body: a million
+    ## rounds run, and the million-and-first is refused without
+    ## executing — the transcript proves how many actually ran.
     let db = freshDb()
     let t = newStoreTransport(db)
     var s = newSession()
@@ -196,6 +211,7 @@ suite "GLYPH BASIC — the control flow":
     except CatchableError as e:
       msg = e.msg
     check "did not finish" in msg
+    check s.transcript.count('\n') == 1_000_000
     close(db)
 
   test "input reads a line into a name":
@@ -289,6 +305,25 @@ suite "GLYPH BASIC — the refusals":
     except GbError as e:
       msg = e.msg
     check "no such name 'nobody'" in msg
+    close(db)
+
+  test "words a statement does not take are refused, not dropped":
+    ## `go KNOWS from p extra` used to *ignore* the extra word and
+    ## answer as if it had not been there; the guest refuses such a
+    ## line outright, and a statement that half-reads its line is the
+    ## thing refusals exist to prevent.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    for line in ["go KNOWS from 1 extra", "go back KNOWS from 1 extra"]:
+      var s = newSession()
+      var msg = ""
+      try:
+        discard s.runStatement(t, line)
+      except CatchableError as e:
+        msg = e.msg
+      if msg.len == 0:
+        echo "  no refusal for: ", line
+      check "extra words" in msg
     close(db)
 
 suite "GLYPH BASIC — the values":
@@ -477,6 +512,64 @@ suite "GLYPH BASIC — the program":
     check "PROGRAM-ID" in msg
     close(db)
 
+  test "a refused program leaves the session at its prompt":
+    ## `inProgram` was set before the run and cleared only by the last
+    ## line — a refusal in the middle raised out of the `while` and
+    ## skipped the clearing, so the *next* line after a refused program
+    ## still believed it was inside one: a prompt `gosub` went looking
+    ## for a subroutine, and `end` stopped the whole prompt instead of
+    ## being itself. The session is a prompt's session between
+    ## programs, whatever happened inside one.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runProgram(t, [
+        "PROGRAM-ID. bad.",
+        "gosub S",
+        "SUBROUTINE. S.",
+        "print 1",
+        "END PROGRAM."
+      ])
+    except CatchableError as e:
+      msg = e.msg
+    check "RETURN" in msg
+    check not s.inProgram
+    msg = ""
+    try:
+      discard s.runStatement(t, "gosub X")
+    except CatchableError as e:
+      msg = e.msg
+    check "no program" in msg
+    ## `end` in immediate mode is the prompt's own stop again — it
+    ## answers false, and the prompt leaves (the guest's `end` outside
+    ## a program halts the machine; same sentence).
+    check not s.runStatement(t, "end")
+    close(db)
+
+  test "a program that runs off its end mid-call is refused":
+    ## No `END PROGRAM.`: the lines simply stop while a `gosub` is
+    ## open. Falling off the end is the same trap as a subroutine
+    ## without a `return` — the call can never come back — and the host
+    ## used to return as if the program had finished normally.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runProgram(t, [
+        "PROGRAM-ID. short.",
+        "gosub S",
+        "SUBROUTINE. S.",
+        "print 1"
+      ])
+    except CatchableError as e:
+      msg = e.msg
+    check "RETURN" in msg
+    check not s.inProgram
+    close(db)
+
 
 suite "GLYPH BASIC — the values":
 
@@ -512,6 +605,94 @@ suite "GLYPH BASIC — the values":
                         "print t = f",
                         "print t <> f"])
     check text == "true\nfalse\ntrue\n"
+    close(db)
+
+  test "a yes/no or a null added to a number is refused, not guessed":
+    ## `+` handed anything that was not a string to the number arm, and
+    ## the number arm read `l.number` — on a yes/no that field does not
+    ## exist, and the client *crashed* with a FieldDefect. Pin GB6:
+    ## a bad line names itself and never crashes. The guest already
+    ## refused these pairs; now the host refuses them too, by name.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    discard s.runStatement(t, "let b = 1 = 1")
+    for line in ["print b + 1", "print 1 + b", "print b + b"]:
+      var msg = ""
+      try:
+        discard s.runStatement(t, line)
+      except CatchableError as e:
+        msg = e.msg
+      if msg.len == 0:
+        echo "  no refusal for: ", line
+      check "two strings or two numbers" in msg
+    s.names["n"] = GbValue(kind: gbvNull)
+    var msg = ""
+    try:
+      discard s.runStatement(t, "print n + 1")
+    except CatchableError as e:
+      msg = e.msg
+    check "two strings or two numbers" in msg
+    close(db)
+
+  test "a number past 64 bits refuses instead of crashing (GB6)":
+    ## Every arithmetic edge the review walked: the literal, the
+    ## operator, the id in a `show`, the loop's own step, the line
+    ## `input` types, and the one division that leaves the range. Each
+    ## used to raise an OverflowDefect — a Defect is a crash, and the
+    ## prompt's rule is that a bad line is a message.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    for line in ["print 99999999999999999999",
+                 "let x = 9223372036854775807 * 2",
+                 "let y = 0 - 9223372036854775807 - 2",
+                 "show 99999999999999999999"]:
+      var s = newSession()
+      var msg = ""
+      try:
+        discard s.runStatement(t, line)
+      except CatchableError as e:
+        msg = e.msg
+      if msg.len == 0:
+        echo "  no refusal for: ", line
+      check "too big" in msg
+    ## A loop whose *step* would leave int64 ends instead: there is no
+    ## number past every number, and the round after the last one is
+    ## simply not taken.
+    var s = newSession()
+    discard s.runStatement(t,
+      "for i = 9223372036854775807 to 9223372036854775807 : print i : next")
+    check s.transcript == "9223372036854775807\n"
+    ## The typed line of an `input`.
+    var s2 = newSession()
+    s2.inputFn = proc(): string = "99999999999999999999"
+    var msg = ""
+    try:
+      discard s2.runStatement(t, "input n")
+    except CatchableError as e:
+      msg = e.msg
+    check "too big" in msg
+    ## And `low div -1`, the one division that overflows.
+    var s3 = newSession()
+    s3.names["z"] = GbValue(kind: gbvNumber, number: low(int64))
+    msg = ""
+    try:
+      discard s3.runStatement(t, "print z / -1")
+    except CatchableError as e:
+      msg = e.msg
+    check "too big" in msg
+    close(db)
+
+  test "division by zero names itself":
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runStatement(t, "print 1 / 0")
+    except CatchableError as e:
+      msg = e.msg
+    check "division by zero" in msg
     close(db)
 
 
@@ -634,3 +815,54 @@ suite "GLYPH BASIC — the cursor loop":
         echo "  no refusal for: ", line
       check msg.len > 0
       check want in msg
+
+  test "count with no label counts the cursor (PRD §3.1)":
+    ## `count` on its own line is the prompt sketch's own line — the
+    ## client counts the ids it is holding, without asking the engine.
+    ## Both clients refused it for want of a label while their own
+    ## help text advertised it.
+    let db = freshDb()
+    let text = run(db, ["find Person", "count", "count Person"])
+    check text == "2 nodes\n2\n2\n"
+    let empty = run(db, ["count"])
+    check empty == "0\n"
+    close(db)
+
+  test "first and last pick the cursor's ends (pin GB2)":
+    ## The prompt sketch's own lines: `p = first`, then `show p`. They
+    ## are names of the expression grammar, so every position a name
+    ## takes — assignment, `print`, `show`, `if` — takes them too.
+    let db = freshDb()
+    let text = run(db, ["find Person",
+                        "p = first", "print p",
+                        "q = last", "print q",
+                        "show first"])
+    check text == "2 nodes\n1\n2\n" &
+                  "1 :Person\n  name Ana\n  age 34\n  KNOWS -> 2\n"
+    close(db)
+
+  test "first on an empty cursor is refused by name":
+    ## There is no first of nothing, and the refusal says which thing
+    ## is missing rather than answering a number.
+    let db = freshDb()
+    let t = newStoreTransport(db)
+    var s = newSession()
+    for line in ["print first", "show last", "let x = first"]:
+      var msg = ""
+      try:
+        discard s.runStatement(t, line)
+      except CatchableError as e:
+        msg = e.msg
+      if msg.len == 0:
+        echo "  no refusal for: ", line
+      check "cursor is empty" in msg
+    close(db)
+
+  test "a session name called first still wins":
+    ## Both clients look the session's names up before the two cursor
+    ## words, so `let first = 5` reads back as 5 on the host *and* on
+    ## the guest — a name a child binds is their name to read.
+    let db = freshDb()
+    let text = run(db, ["find Person", "let first = 5", "print first"])
+    check text == "2 nodes\n5\n"
+    close(db)

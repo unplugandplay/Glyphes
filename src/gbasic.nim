@@ -8,15 +8,16 @@
 ##
 ## ```
 ## ready> find Person
-##   2 people
+##   2 nodes
 ## ready> p = first
 ## ready> show p
-##   1 :Ana
-##   age 34
-##   knows -> 2 :Bo
+##   1 :Person
+##     name Ana
+##     age 34
+##     KNOWS -> 2
 ## ready> go knows
-##   1 :Bo
-## ready> if p is 1 then print "found"
+##   1 nodes
+## ready> if p = 1 then print "found"
 ## ```
 ##
 ## The client reaches the engine through one door — a `GbTransport` — and
@@ -87,15 +88,6 @@ type
     inProgram*: bool            ## is a program running? (an immediate
                                 ## `gosub` has nothing to call)
 
-  GbLoop* = object
-    ## One `for` loop's state: the variable, the limit, the step and the
-    ## line the loop came back to.
-    varName*: string
-    limit*: int64
-    step*: int64
-    current*: int64
-    line*: int
-
 proc gbFail(msg: string) {.noreturn.} =
   raise newException(GbError, "glyph basic: " & msg)
 
@@ -151,37 +143,52 @@ proc say*(s: var GbSession, text: string) =
 
 # ------------------------------------------------------------- the values
 
-proc parseValue(s: GbSession, text: string): GbValue =
-  ## A literal or a name.
-  if text.len >= 2 and text[0] == '"' and text[^1] == '"':
-    return GbValue(kind: gbvString, text: text[1 .. ^2])
-  var n: int64 = 0
-  var allDigits = text.len > 0
-  for ch in text:
-    if ch in {'0'..'9'}: n = n * 10 + (ord(ch) - ord('0'))
-    else: allDigits = false
-  if allDigits:
-    return GbValue(kind: gbvNumber, number: n)
-  if s.names.hasKey(text):
-    return s.names[text]
-  gbFail("no such name '" & text & "'")
+proc first*(s: GbSession): int64 =
+  ## The cursor's first node (pin GB2): `p = first` in the prompt
+  ## sketch. An empty cursor is refused by name — there is no first.
+  if s.cursor.len == 0: gbFail("the cursor is empty")
+  s.cursor[0]
+
+proc last*(s: GbSession): int64 =
+  ## The cursor's last node — the other end of the same pick.
+  if s.cursor.len == 0: gbFail("the cursor is empty")
+  s.cursor[^1]
+
+proc findBlank(text: string): int =
+  ## Where the first space or tab is. A statement's words are split on
+  ## either, so a label must not swallow a tab: `find Person\twhere …`
+  ## has the label and the clause, and taking the first *space* alone
+  ## would make the label `Person\twhere`.
+  for i, ch in text:
+    if ch in {' ', '\t'}:
+      return i
+  -1
 
 proc nodeOf(s: GbSession, name: string): int64 =
   ## The node a name holds. A name that holds a number is a node id too:
   ## the client is the one that knows ids are numbers, and a child
   ## should not have to. A literal id — `show 1` — is the same thing
   ## written the other way, so it is accepted for the same reason.
+  ## `first` and `last` pick the cursor's ends (pin GB2), after the
+  ## session's own names and after a literal.
   if not s.names.hasKey(name):
     if name.len > 0:
-      var literal = 0'i64
       var allDigits = true
       for ch in name:
         if ch notin {'0'..'9'}:
           allDigits = false
-          break
-        literal = literal * 10 + (ord(ch) - ord('0'))
       if allDigits:
+        var literal = 0'i64
+        for ch in name:
+          let d = ord(ch) - ord('0')
+          if literal > (high(int64) - d) div 10:
+            gbFail("the number '" & name & "' is too big to hold")
+          literal = literal * 10 + d
         return literal
+    if name == "first":
+      return s.first()
+    if name == "last":
+      return s.last()
     gbFail("no such name '" & name & "'")
   let v = s.names[name]
   case v.kind
@@ -193,14 +200,6 @@ proc nodeOf(s: GbSession, name: string): int64 =
 
 proc setCursor*(s: var GbSession, ids: seq[int64]) =
   s.cursor = ids
-
-proc first*(s: GbSession): int64 =
-  if s.cursor.len == 0: gbFail("the cursor is empty")
-  s.cursor[0]
-
-proc last*(s: GbSession): int64 =
-  if s.cursor.len == 0: gbFail("the cursor is empty")
-  s.cursor[^1]
 
 # --------------------------------------------------------- the statements
 
@@ -228,36 +227,6 @@ proc cleanName(name: string): string =
   result = name
   if result.len > 0 and result[^1] == '.':
     result.setLen(result.len - 1)
-
-proc clientParams(s: GbSession, text: string, params: var Table[string, Value]) =
-  ## The client's variables inside a `where` clause.
-  ##
-  ## A `$NAME` in the clause is the client's variable, and it becomes a
-  ## *parameter*: the client's values never reach the query text (pin
-  ## GB1, pin GQ4).
-  var i = 0
-  while i < text.len:
-    if text[i] == '$':
-      var j = i + 1
-      while j < text.len and (text[j] in {'a'..'z'} or text[j] in {'A'..'Z'} or
-                               text[j] in {'0'..'9'} or text[j] == '_'):
-        inc j
-      let name = text[i + 1 ..< j]
-      if name.len == 0:
-        gbFail("a '$' with no name after it")
-      if not s.names.hasKey(name):
-        gbFail("no such name '" & name & "'")
-      let v = s.names[name]
-      let pname = "c" & $params.len
-      case v.kind
-      of gbvNode: params[pname] = Value(kind: vkInt, i: v.nodeId)
-      of gbvNumber: params[pname] = Value(kind: vkInt, i: v.number)
-      of gbvString: params[pname] = Value(kind: vkString, s: v.text)
-      of gbvBool: params[pname] = Value(kind: vkBool, b: v.flag)
-      of gbvNull: params[pname] = Value(kind: vkNull)
-      i = j
-    else:
-      inc i
 
 proc substituteVars(s: GbSession, text: string, params: var Table[string, Value]): string =
   ## A clause with the client's variables replaced by parameter
@@ -293,11 +262,12 @@ proc substituteVars(s: GbSession, text: string, params: var Table[string, Value]
 proc showNode(s: var GbSession, t: GbTransport, id: int64) =
   ## A node, printed as a node: its id, its label, its properties and
   ## its edges. This is the "chase" — the thing a graph prompt is for.
+  ##
+  ## The label comes from the properties the transport knows how to
+  ## name; a node's own label is one of them. (The labels of the whole
+  ## graph were once looped over here without using them — a loop that
+  ## asked every label of the engine and answered nothing.)
   var label = ""
-  for l in t.labelsFn():
-    if l.len == 0: continue
-  ## The label comes from the properties the transport knows how to name;
-  ## a node's own label is one of them.
   let props = t.propsFn(id)
   for (k, v) in props:
     if k == "label": label = v
@@ -351,9 +321,16 @@ proc loopBlocks(parts: seq[string]): tuple[blocks, after: seq[string]] =
     result.blocks.add stmt
     inc i
 
-proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
+proc runStatement*(s: var GbSession, t: GbTransport, raw: string): bool =
   ## Run one client statement. Returns false when the statement asked
   ## the client to stop (`end`).
+  ##
+  ## The line is **stripped first**: `  print 1` and `print 1` are the
+  ## same statement, and so are `  find Person` and `find Person` — the
+  ## guest's tokenizer skips blanks while it splits, so the host must
+  ## too, or a line pasted with its indent would read a *different
+  ## label* on the two clients.
+  let line = raw.strip()
   let words = splitWords(line)
   if words.len == 0:
     return true
@@ -370,7 +347,7 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     let eq = line.find('=')
     if eq < 0:
       gbFail("'" & words[0] & " = ' needs a value")
-    let v = evalExpr(s.names, line[eq + 1 .. ^1].strip())
+    let v = evalExpr(s.names, line[eq + 1 .. ^1].strip(), s.cursor)
     s.names[words[0]] = v
     return true
   case cmd
@@ -390,7 +367,7 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     let eq = line.find('=')
     if eq < 0:
       gbFail("let needs a name, '=' and a value")
-    let v = evalExpr(s.names, line[eq + 1 .. ^1].strip())
+    let v = evalExpr(s.names, line[eq + 1 .. ^1].strip(), s.cursor)
     s.names[words[1]] = v
   of "print":
     if words.len == 1:
@@ -403,7 +380,7 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
       ## Each item is an expression, so `print i + 1` is a thing.
       for item in splitStatements(line[5 .. ^1]):
         if item.len == 0: continue
-        let v = evalExpr(s.names, item)
+        let v = evalExpr(s.names, item, s.cursor)
         s.say(v.valueText())
   of "if":
     ## if <expr> then <statement>[: <statement>...]
@@ -421,7 +398,7 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
       gbFail("if needs a condition")
     if bodyText.len == 0:
       gbFail("if needs a statement after 'then'")
-    if condition(s.names, condText):
+    if condition(s.names, condText, s.cursor):
       for piece in loopBlocks(splitStatements(bodyText)).blocks:
         if not s.runStatement(t, piece):
           return false
@@ -452,7 +429,7 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
       if head[0 .. 3].toLowerAscii != "each":
         gbFail("expected 'each' after 'for'")
       head = head[4 .. ^1].strip()
-      let sp = head.find(' ')
+      let sp = findBlank(head)
       let varName = (if sp < 0: head else: head[0 ..< sp]).strip()
       let tail = (if sp < 0: "" else: head[sp .. ^1].strip())
       if varName.len == 0:
@@ -523,9 +500,9 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     let (blocks, after) = loopBlocks(parts[1 .. ^1])
     if blocks.len == 0:
       gbFail("for needs a body")
-    let first = evalExpr(s.names, firstText)
-    let last = evalExpr(s.names, lastText)
-    let step = evalExpr(s.names, stepText)
+    let first = evalExpr(s.names, firstText, s.cursor)
+    let last = evalExpr(s.names, lastText, s.cursor)
+    let step = evalExpr(s.names, stepText, s.cursor)
     if first.kind != gbvNumber or last.kind != gbvNumber or
        step.kind != gbvNumber:
       gbFail("for needs numbers")
@@ -533,18 +510,28 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
       gbFail("for needs a step that is not zero")
     ## A cap, so a loop that cannot finish says so instead of hanging:
     ## the client is a prompt, and a prompt that hangs is a prompt that
-    ## is broken.
+    ## is broken. The cap is checked *before* the body runs: a million
+    ## rounds run, and the million-and-first is refused rather than
+    ## executed — the guest checks its 16-bit guard the same way.
     var v = first.number
     var rounds = 0
     while (if step.number > 0: v <= last.number else: v >= last.number):
+      inc rounds
+      if rounds > 1_000_000:
+        gbFail("the loop did not finish after a million rounds")
       s.names[varName] = GbValue(kind: gbvNumber, number: v)
       for piece in blocks:
         if not s.runStatement(t, piece):
           return false
-      v += step.number
-      inc rounds
-      if rounds > 1_000_000:
-        gbFail("the loop did not finish after a million rounds")
+      ## The next value. A step that would leave int64 *ends* the loop:
+      ## there is no number past every number, so no further round can
+      ## meet the condition — and computing it anyway would crash (GB6).
+      if step.number > 0:
+        if overAdd(v, step.number): break
+        v += step.number
+      else:
+        if overSub(v, step.number): break
+        v += step.number
     ## Whatever followed the `next` runs once, after the loop.
     for piece in after:
       if not s.runStatement(t, piece):
@@ -594,13 +581,13 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     if blocks.len == 0:
       gbFail("while needs a statement")
     var rounds = 0
-    while condition(s.names, parts[0]):
-      for piece in blocks:
-        if not s.runStatement(t, piece):
-          return false
+    while condition(s.names, parts[0], s.cursor):
       inc rounds
       if rounds > 1_000_000:
         gbFail("the loop did not finish after a million rounds")
+      for piece in blocks:
+        if not s.runStatement(t, piece):
+          return false
     for piece in after:
       if not s.runStatement(t, piece):
         return false
@@ -617,26 +604,37 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     if s.inputFn == nil:
       gbFail("there is nothing to read from")
     let typed = s.inputFn().strip()
-    var n: int64 = 0
+    ## The rule is the host's: strip both ends, all digits is a number,
+    ## anything else text. The digit line is checked against int64 the
+    ## way every literal is — a typed number too big to hold is refused
+    ## by name, never an overflow crash (GB6).
     var isNumber = typed.len > 0
     for ch in typed:
-      if ch in {'0'..'9'}:
-        n = n * 10 + (ord(ch) - ord('0'))
-      else:
+      if ch notin {'0'..'9'}:
         isNumber = false
     if isNumber:
+      var n: int64 = 0
+      for ch in typed:
+        let d = ord(ch) - ord('0')
+        if n > (high(int64) - d) div 10:
+          gbFail("the number typed is too big to hold")
+        n = n * 10 + d
       s.names[words[1]] = GbValue(kind: gbvNumber, number: n)
     else:
       s.names[words[1]] = GbValue(kind: gbvString, text: typed)
   of "find", "count":
-    ## find [<label>] [where <expr>]
+    ## find <label> [where <expr>]
+    ## count [<label> [where <expr>]]
+    ##
+    ## `count` with no label is the *client's* count — the size of the
+    ## cursor it is holding (PRD §3.1, and the prompt sketch's own
+    ## `count` on its own line). With a label it asks the engine, the
+    ## way `find` does.
     var label = ""
-    var rest = line
-    var at = 0
     let after = cmd.len
     var tail = line[after .. ^1].strip()
     if tail.len > 0:
-      let sp = tail.find(' ')
+      let sp = findBlank(tail)
       if sp < 0:
         label = tail
         tail = ""
@@ -644,6 +642,9 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
         label = tail[0 ..< sp]
         tail = tail[sp .. ^1].strip()
     if label.len == 0 and tail.len == 0:
+      if cmd == "count":
+        s.say($s.cursor.len)
+        return true
       gbFail(cmd & " needs a label")
     var gq = cmd
     if label.len > 0: gq.add " " & label
@@ -688,6 +689,12 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
         gbFail("expected 'from' after the relationship type")
       if rest.len < 3:
         gbFail("go from needs a name")
+      if rest.len > 3:
+        ## The guest refuses a statement with words it does not
+        ## understand, and so does the host now: `go KNOWS from p
+        ## extra` used to *drop* the extra word and answer as if it
+        ## had not been there.
+        gbFail("go has extra words after '" & rest[2] & "'")
       ## The name is the client's, so it is resolved here and travels as
       ## a parameter (pin GB1): the engine never sees the client's
       ## names.
@@ -749,7 +756,7 @@ proc runStatement*(s: var GbSession, t: GbTransport, line: string): bool =
     var valueWords = (if words[3] == "=": words[4 .. ^1] else: words[3 .. ^1])
     if valueWords.len == 0:
       gbFail("set needs a value")
-    let value = evalExpr(s.names, valueWords.join(" "))
+    let value = evalExpr(s.names, valueWords.join(" "), s.cursor)
     var params = initTable[string, Value]()
     params["n"] = Value(kind: vkInt, i: s.nodeOf(words[1]))
     case value.kind
@@ -819,16 +826,31 @@ proc runProgram*(s: var GbSession, t: GbTransport; lines: openArray[string]): bo
     if w.len >= 2 and w[0].toLowerAscii == "subroutine.":
       s.progSubs[cleanName(w[1])] = i + 1
   ## The body, statement by statement.
-  while s.progPc < s.progLines.len:
-    let line = s.progLines[s.progPc]
-    s.progPc = s.progPc + 1
-    if isDeclaration(line):
-      ## The main body ended, or a subroutine's body did.
-      if s.progStack.len > 0:
-        gbFail("a subroutine ended without a RETURN")
-      break
-    if not s.runStatement(t, line):
-      break
-  s.inProgram = false
+  try:
+    while s.progPc < s.progLines.len:
+      let line = s.progLines[s.progPc]
+      s.progPc = s.progPc + 1
+      if isDeclaration(line):
+        ## The main body ended, or a subroutine's body did.
+        if s.progStack.len > 0:
+          gbFail("a subroutine ended without a RETURN")
+        break
+      if not s.runStatement(t, line):
+        break
+    ## Falling off the *end of the lines* with a call open is the same
+    ## trap the declaration catches: a program with no `END PROGRAM.`
+    ## used to return as if nothing were still waiting for its
+    ## `return`.
+    if s.progStack.len > 0:
+      gbFail("a subroutine ended without a RETURN")
+  finally:
+    ## Whatever happened — the last line, `end`, or a refusal in the
+    ## middle — the session is back at its prompt: an immediate `gosub`
+    ## has nothing to call, and `end` is the prompt's own stop again.
+    ## An exception used to skip the clearing line and leave
+    ## `inProgram` set, so the *next* line after a refused program
+    ## still believed it was inside one.
+    s.inProgram = false
+    s.progStack = @[]
   true
 

@@ -407,6 +407,12 @@ const
     "print q",
     "find Person",
     "print",
+    "count",
+    "print first",
+    "print last",
+    "p = first",
+    "  print 77",
+    "print\t78",
     "for each p : show p : next",
     "let s = 1",
     "go KNOWS from s",
@@ -817,7 +823,9 @@ suite "GLYPH BASIC — the guest and the host client":
     ## `step` it has no arithmetic for, an `if` with no body, a `while`
     ## with no condition, a `while` with an empty body, a `while` inside
     ## a body (line-level only), an unterminated string, a text added to
-    ## a number, a text where a node id belongs, a write with no
+    ## a number, a division by zero (one refusal, not a `?` and then an
+    ## answer), a `-5` that is one word and no minus it knows, a text
+    ## where a node id belongs, a write with no
     ## argument, and a write the *host* refuses all print `?` and
     ## abandon the line — nothing before the refusal is printed, and the
     ## body of the refused `for` never runs.
@@ -829,6 +837,8 @@ suite "GLYPH BASIC — the guest and the host client":
       "if 1 then",
       "print \"Cid",
       "print \"a\" + 1",
+      "print 1 / 0",
+      "print -5",
       "show \"x\"",
       "input",
       "input n extra",
@@ -841,6 +851,6 @@ suite "GLYPH BASIC — the guest and the host client":
       "for i = 1 to 2 : while 1 : print 1 : next",
       "end"
     ])
-    check guest == "?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n"
+    check guest == ("?\n").repeat(18)
     close(db)
 

@@ -236,13 +236,17 @@ channel in `channel.z80`, the host compiles it and runs it against a real
 graph, and the answer comes back through the same channel — so the guest
 needs no compiler and no graph, and 7 KB is enough.
 
-What it has: `find`, `count`, `labels`, `end`, `rem`, `let` and the bare
+What it has: `find`, `count` (of a label, or of the cursor it holds),
+`labels`, `end`, `rem`, `let` and the bare
 assignment, `input`, `print`, `show`, `go`, `if … then`,
 `while … : … [next]`, `for`, `for each`, `gosub`, `return` and the
 program model (`PROGRAM-ID.`, `SUBROUTINE.`, `END PROGRAM.`), and the
 writes `add`, `link`, `set`, `drop`; names (eight of seven characters,
-16-bit values), the arithmetic `+ - * /`, the boolean operators
-`and`/`or`/`not`, and the comparisons `= < > <= >= <>` over numbers,
+16-bit unsigned values), the two words that pick from the cursor
+(`first` and `last` — a name the session holds wins over them), the
+arithmetic `+ - * /`, the boolean
+operators `and`/`or`/`not`, and the comparisons `= < > <= >= <>` over
+numbers,
 quoted text and yes/no values. The writes
 ride the channel the reads already use — `add` forwards its property
 list as the host forwards it, `set` and `drop` send parameterised `exec`
@@ -290,7 +294,10 @@ with trailing words the guest does not understand, prints `?` and
 abandons the line — it does not half-run — and an answer the host
 refuses (`!`) is printed as the same one-word `?`. So are an
 unterminated text, a text where a node id belongs, a text added to a
-number, `gosub` outside a program, `return` outside a subroutine, an
+number, a division by zero (the line is abandoned whole — it once put
+a `?` on the console and an answer beside it), a `-5` written as one
+word (the guest has no unary minus), `gosub` outside a program,
+`return` outside a subroutine, an
 unknown subroutine name, a subroutine without a `return`, a program
 that does not start with `PROGRAM-ID. <name>`, and a program, arena or
 call stack that reaches its bound. The refusal vocabulary is the
@@ -299,13 +306,18 @@ divergence.
 
 The other divergence is the shape of an expression: the guest works on
 words, so `1 + 2` is three words and the operators have to stand alone —
-`1+2` is one word and is not arithmetic. The arithmetic is 16-bit, and
-so is `while`'s round guard: it stops at 65,535 rounds where the host
-stops at a million, refusing a runaway loop either way. The budget buys
+`1+2` is one word and is not arithmetic, and neither is `-5`: the guest
+has no unary minus, so a negative is written `0 - 5` there while the
+host's character-level lexer splits and accepts `-5`. The arithmetic is
+**16-bit and unsigned**, so `print 0 - 7` answers `65529` where the host
+answers `-7` and `print 65535 + 1` answers `0`; `while`'s round guard is
+the same register: it stops at 65,535 rounds where the host stops at a
+million, refusing a runaway loop either way. The budget buys
 that, and `ez80/tests/test_ez80.nim` measures both the transcript and
-the size (6,313 bytes, under the plan's 7 KB mark; the first half fitted
+the size (6,522 bytes, under the plan's 7 KB mark; the first half fitted
 in 3 KB, the writes moved the mark to 4 KB, the value model moved it to
-6 KB, `input` landed inside it, the program model moved it to 7 KB, and
+6 KB, `input` landed inside it, the program model moved it to 7 KB,
+the final review's cut stayed inside, and
 each move is recorded in the plan).
 
 ## Known gaps

@@ -17,7 +17,7 @@
 |---|---|---|---|
 | **B1** | the grammar, on paper | the statements, the values, the refusals — the *client's* language, in full | a review |
 | **B2** | the interpreter core | the session, the cursor, the statements, the transport | GB-A, GB-C |
-| **B3** | the prompt | the `READY>` loop, the transcript, the errors | GB-A |
+| **B3** | the prompt | the `ready>` loop, the transcript, the errors | GB-A |
 | **B4** | the in-process door | the client talking to the engine | GB-B, GB-D, GB-E |
 | **B5** | the eZ80 guest | the same language on the eZ80, over a port channel | GB-B, GB-F |
 
@@ -33,9 +33,10 @@ A page, in `docs/`, that fixes:
 - the **statement table**: every client statement, its operands, and the
   GLYPH QUERY it issues (the PRD §3.1 table is the draft);
 - the **value rules**: what a literal may be, and what a *name* may
-  hold (a node id, a number, a string);
-- the **control flow**: `if`, `for`, `goto`, `gosub`, `print`, `input` —
-  the BASIC's, spelled out;
+  hold (a node id, a number, a string, a yes/no);
+- the **control flow**: `if`, `for`, `while`, `gosub`, `print`, `input`
+  — the BASIC's, spelled out, with `goto` left out on purpose: a client
+  line has no number to jump to;
 - the **refusal table**: every malformed client line and the message it
   produces.
 
@@ -52,12 +53,15 @@ A page, in `docs/`, that fixes:
 
 ## 3. B2 — the interpreter core
 
-New module `src/gbasic/`:
+The code, in `src/`:
 
 | File | What it holds |
 |---|---|
 | `src/gbasic.nim` | the client: the session (the names, the cursor), the values, the statement loop, the printing |
+| `src/gbasic_types.nim` | the value kinds — its own module, because the client and the evaluator both need them and neither may import the other |
+| `src/gbasic_expr.nim` | the evaluator: the lexer, the parser and the checked 64-bit arithmetic |
 | `src/gbasic_store.nim` | the in-process **door** — the one implementation of the transport |
+| `src/gbasic_channel.nim` | the host's end of the *port* door (E1/E2) — what answers the guest |
 | `tools/glyphbasic.nim` | the prompt: `glyphbasic <database>` |
 
 The door is a set of **callbacks** rather than a class with methods:
@@ -93,9 +97,17 @@ The grammar, as shipped:
 
     if <expr> then <statement>[: <statement>...]
     for <var> = <a> to <b> [step <s>] : <statement>... : next
+    for each <name> : <statement>... : next
+    while <expr> : <statement>... : [next]
     input <name>
     print <expression>
+    count [<label>]
     <name> = <expression>
+
+Two names belong to the grammar itself: `first` and `last` are the
+cursor's two ends (`p = first`, the prompt sketch's own line, pin GB2),
+and a name the session already holds wins over them — so `let first =
+5` reads back as 5 on both clients.
 
 Bodies are **one line**, separated by `:`. The reason is the program
 model, not the effort: `goto` names a line, and a client line has no
@@ -111,8 +123,8 @@ million rounds rather than hanging.
 
 ## 4. B3 — the prompt
 
-- The `READY>` loop: read a line, run it, print the result, print
-  `READY>` again ✓ — the BASIC's own prompt word ✓.
+- The `ready>` loop: read a line, run it, print the result, print
+  `ready>` again ✓ — the BASIC's own prompt word ✓.
 - The **transcript** is the artefact (GB-A): a golden file, byte for
   byte ✓ — the same discipline the eZ80's BASIC transcript uses ✓✓.
 - The errors: a refusal prints the message and the prompt returns ✓;
@@ -178,14 +190,16 @@ message. The guest does not parse that message: it prints its own `?`
 and abandons the line. A refusal the guest can see is the point; the
 host's words stay the host's, and the one-word vocabulary is one of the
 guest's documented divergences (the others are the word-shaped
-expression and the 16-bit `while` guard).
+expression — a negative is written `0 - 5` there, because `-5` is one
+word — and the 16-bit, unsigned arithmetic behind its values and its
+`while` guard).
 
 **The guest sends GLYPH QUERY, not Cypher** ✓ — so the guest needs no
 Cypher compiler, and the host compiles ✓ (which is the point ✓: the
 language is small enough to *send*, and the engine's is not).
 
 **What E3–E11 are, as shipped.** The guest is `ez80/gbasic.z80` —
-GLYPH BASIC in Z80 assembly, 6,313 bytes for the grammar it covers. It
+GLYPH BASIC in Z80 assembly, 6,522 bytes for the grammar it covers. It
 reads a line, splits it into words and statements, runs them, and sends
 a GLYPH QUERY line over the channel for the graph work; the answer comes
 back and it prints what the host client prints.
@@ -339,8 +353,12 @@ The conditional then landed at 3,956 bytes, and `while` at 4,087. The
 value model (text, yes/no, `and`/`or`/`not`) took the guest past 4 KB, so
 the mark moved to 6 KB and the cut landed at 5,230; `input` landed at
 5,413, still inside it. The program model took the guest past 6 KB, so
-the mark moved again to 7 KB, and the cut landed at 6,313 bytes. Each
-move is a measurement, not a silent drift: a mark that never moves is a
+the mark moved again to 7 KB, and the cut landed at 6,313 bytes. The
+final review's cut — `count` on the cursor, `first` and `last`, a tab
+counted as a blank by the guest's tokenizer, and a division by zero
+that abandons its line instead of half-printing it — added 209
+bytes: the guest measures **6,522**, still inside 7 KB, and the mark
+did not move. Each move is a measurement, not a silent drift: a mark that never moves is a
 mark nobody measured. The point of the instrument stands — if the
 grammar cannot be written twice, it is too big, and the host client has
 taught us that by being too big. That is the honest use of the guest:
@@ -353,13 +371,15 @@ New file `tests/unit/test_gbasic.nim`:
 | test | what it holds |
 |---|---|
 | the transcript | a scripted session produces the golden transcript, byte for byte (GB-A) ✓ |
+| the blanks | a line with spaces or a tab in front of it is the same line — the host used to slice `  find Person` into a *different label* ✓ |
 | the helpfulness | a label that matches nothing says which labels there are (the case is exact, and silence would read as "there is nobody here") ✓ |
-| the refusals | every bad client line produces the message the table names (GB-C) ✓ |
+| the refusals | every bad client line produces the message the table names (GB-C) ✓ — including words a statement does not take, which used to be dropped |
 | the parameters | a client value never reaches the query text — checked at the transport boundary (GB-D) ✓ |
-| the arithmetic | a node id above 2³¹ round-trips (GB-E) ✓ |
-| the cursor | `find`/`go` replace the cursor; `for each` walks it; `count` prints its size ✓ |
+| the arithmetic | a node id above 2³¹ round-trips (GB-E) ✓; a literal, product, difference or division past 64 bits refuses instead of crashing, and the loop's cap counts the rounds that *ran* ✓ |
+| the cursor | `find`/`go` replace the cursor; `for each` walks it; `count` prints its size; `first` and `last` pick its ends — and a name a session holds wins over them ✓ |
 | the control flow | the conditional runs the statement that follows it; the loop counts up and down; the cursor loop walks the set; a loop that cannot finish says so ✓ |
 | the null | a null condition is false ✓ |
+| the program | a refused program leaves the session at its prompt, and a program that runs off its end mid-call is refused by the same name as a subroutine without a `return` ✓ |
 | the durability | a link survives a reopen, because it went through the log ✓ |
 
 The durability test is the one that earned its keep: the door's link
@@ -415,3 +435,93 @@ engine later), and the tests pin what crosses it.
 - [ ] the eZ80 guest produces the same transcript as the host client
       (B5, GB-F) ✓
 - [ ] `docs/ABI.md` records the doors the client uses ✓
+
+## 10. The final review — the whole plan read against the whole code
+
+The last pass read this plan and the PRD (and, for the design
+history, `DEVLOG.md`) against both implementations with a scratch
+differential harness: the same edge script run on the host client and
+on the guest, side by side. Nothing below went into this section
+un-run — every defect was reproduced first, most as a host *crash*,
+which is the class pin GB6 forbids, and each carries a regression test.
+
+**On the host, all fixed and pinned:**
+
+- `+` on a yes/no or a null read the *number* field of a variant that
+  has none: `let b = 1 = 1` then `print b + 1` raised a FieldDefect
+  and killed the prompt. `+` now requires two numbers (or two
+  strings), the same pair rule the guest has always had.
+- Every literal edge was an OverflowDefect: a 20-digit number, `*`
+  past int64, `show` with a huge id, an `input` of a typed digit line,
+  and the `for` loop's own `v + step`. Each now refuses by name — and
+  a step that would leave int64 *ends* the loop, because there is no
+  number past every number.
+- Blanks were not the line's own: `  print 1`, `  if 1 then …` and
+  `  while …` were refused outright — the statement's text was sliced
+  at a fixed keyword length — and `  find Person` was read as label
+  `nd` with clause `Person`. The guest had always skipped the blanks;
+  the host strips the line before reading it now.
+- `count` with no label — the sketch's own line, the PRD's own row,
+  the tool's own help — was refused for want of a label on *both*
+  clients. It prints the cursor's size on both now.
+- `first` and `last` (pin GB2, `p = first` in the sketch, the module's
+  own header) did not exist anywhere: both clients refused them. They
+  are expression names now — after the session's own names, so `let
+  first = 5` still reads as 5 — and they reach `show`, `go … from`
+  and `set` through `nodeOf`.
+- `go KNOWS from p extra` dropped its extra word and answered; it
+  refuses now, as the guest did.
+- The loop cap counted the round it was about to refuse: a million and
+  one bodies ran. The check moved before the body — a million run, the
+  next is refused — where the guest's 16-bit guard has always sat.
+- A refused program left `inProgram` set (the exception skipped the
+  clearing line), so the *next* prompt line still believed it was
+  inside one: a prompt `gosub` hunted for a subroutine, and `end`
+  stopped the prompt. `runProgram` clears in a `finally` now.
+- A program with no `END PROGRAM.` that ran off its lines with a
+  `gosub` open returned as if the call had come back; it refuses by
+  the same name as a subroutine without a `return` now.
+
+**On the guest, all fixed and pinned:**
+
+- Division by zero printed a `?` *on the console* and returned a
+  quotient anyway: `print 1 / 0` answered `?1` — a refusal that
+  half-ran, the one thing the guest's `?` exists to prevent. `DVERR`
+  goes through `STERR` like every other refusal now.
+- A tab was not a blank: `find\tPerson` was one word the guest did
+  not know while the host had always split it. The tokenizer counts a
+  tab as a space now (quoted words still keep everything).
+
+**In the paperwork, all corrected:** the PRD advertised `print <items>`
+with `,`/`;` separators and a `help` statement neither client ever had
+(the prompt's banner is the help), and its null paragraph implied a
+`null` literal the grammar does not have; `count`'s row now says what
+`count` does; §3.4's name list gained the yes/no; GB2's `nth` — never
+in the grammar, never cut — is gone; GB7 and the GB-E row called the
+guest's limit 24-bit, where its *arithmetic* is 16-bit unsigned and
+only its addresses are 24-bit (and §6 now says how a negative is
+written there: `0 - 5`); §8 still claimed the first version had "no
+strings-as-values"; the plan's B1 list still scheduled `goto` (removed
+for good) and its module table named a directory that was never
+created; the eZ80 README's divergences now state the unsigned
+arithmetic, the missing unary minus, and the tab.
+
+**One defect outside GLYPH BASIC, found by running the umbrella
+gate:** `tests/fuzz/bitflip_harness.nim` had never been taught the
+DATE and POINT value kinds the X5 cuts added. Its `case` is built to
+fail to compile when a `ValueKind` appears — that is the point of its
+own comment — and it did, so `nimble bitflip`, and with it the whole
+`nimble gate`, had been failing to build since X5b. Two arms, the W1
+harness's own rendering.
+
+**The measurements, after the fixes, run serially:**
+
+| gate | measured |
+|---|---|
+| `nimble testGate` | **591 / 0** |
+| `nimble ez80Test` | **34 / 0** — the guest is **6,522 bytes**, mark 7 KB |
+| `nimble tck` | 161/161 in contract, 31 refused by name, 0 wrong — **C1 GREEN** |
+| `nimble gemtest` | 241 runs, 807 assertions, **0 failures, 0 errors** |
+| `nimble crash` | 25/25 kills recovered — **W1 GREEN** |
+| `nimble crashFollower` | **PASS** |
+| `nimble gate` | green end to end: run_all 591/0, the Ruby e2e 0 failures, W1, F2, **W3 5,000 flips GREEN**, T1 soak GREEN, SS2 clean, the benches, **C1 GREEN** |
