@@ -16,23 +16,22 @@
 ; printing.
 ;
 ; This cut covers: find, count, labels, end, rem, let and bare
-; assignment, print, show, go, if ... then, while, for, for each, and
-; the writes add, link, set and drop. The names are the client's, the
-; expressions (arithmetic, text and comparisons) are the client's, the
-; cursor loop is the client's, and the graph — including every write —
-; still happens on the other side of the channel. A value is a number,
-; a quoted text (copied into a 1 KB arena) or a yes/no, with the host's
-; kind rules; `and`, `or` and `not` are in the condition grammar.
+; assignment, input, print, show, go, if ... then, while, for, for each,
+; and the writes add, link, set and drop. The names are the client's,
+; the expressions (arithmetic, text and comparisons) are the client's,
+; the cursor loop is the client's, and the graph — including every
+; write — still happens on the other side of the channel. A value is a
+; number, a quoted text (copied into a 1 KB arena) or a yes/no, with the
+; host's kind rules; `and`, `or` and `not` are in the condition grammar.
 ;
-; What it does not cover, and refuses rather than pretending: input,
-; gosub/return, and the program model. An unknown name is refused
-; rather than created, and an answer the host refuses (it begins with
-; `!`) is printed as the guest's one-word `?` — a refusal the child can
-; see. An expression here is *word-shaped*: `1 + 2` is three words and
-; the operators have to stand alone, because the guest tokenizes the
-; line into words and has no character-by-character parser. That is the
-; price of the budget, and the transcript test only exercises what is
-; here.
+; What it does not cover, and refuses rather than pretending:
+; gosub/return and the program model. An unknown name is refused rather
+; than created, and an answer the host refuses (it begins with `!`) is
+; printed as the guest's one-word `?` — a refusal the child can see. An
+; expression here is *word-shaped*: `1 + 2` is three words and the
+; operators have to stand alone, because the guest tokenizes the line
+; into words and has no character-by-character parser. That is the price
+; of the budget, and the transcript test only exercises what is here.
 ;
 ; Assemble:  nim c -r ez80/ez80asm.nim -- ez80/gbasic.z80 ez80/gbasic.bin
 ; ------------------------------------------------------------------------
@@ -42,6 +41,7 @@ TAB     EQU 9
 
 ; ---- memory map ----------------------------------------------------
 LINEBUF  EQU 0xD400     ; the line as read (100 bytes)
+INBUF    EQU 0xD300     ; the line `input` reads (128 bytes)
 WORDS    EQU 0xD470     ; the word offsets (64 bytes)
 STARTS   EQU 0xD4B0     ; the word index each statement starts at (64)
 
@@ -263,6 +263,12 @@ MU2:    ADD HL,HL
 ; Read a line from the console into LINEBUF.
 READLINE:
         LD HL,LINEBUF
+        JP READINTO
+
+; Read a console line into HL (NUL-terminated), and answer its length in
+; A. The buffer is separate so `input` can read while a statement or a
+; loop body is still using the line it came from.
+READINTO:
         LD B,0
 RL1:    IN A,(2)
         OR A
@@ -1622,6 +1628,12 @@ RS_KW:
         JP Z,STLET
         LD A,(STMT)
         CALL WORDAI
+        LD DE,MSGINPUT
+        CALL ISWORD
+        OR A
+        JP Z,STINPUT
+        LD A,(STMT)
+        CALL WORDAI
         LD DE,MSGPRINT
         CALL ISWORD
         OR A
@@ -1797,6 +1809,108 @@ STLET:
         LD A,(SEND)
         CP B
         JP NZ,STERR
+        LD A,(NAMEI)
+        CALL STOREVAL
+        RET
+
+; ---- input <name> ------------------------------------------------------
+; Read the next console line into a name. The line is stripped at both
+; ends; a line that is all digits is a number, anything else is text —
+; the host's rule, inherited, because `input n` then `n > 5` must not
+; compare text. The buffer is separate from LINEBUF so a loop body or
+; the statement itself stays intact while the line is read.
+STINPUT:
+        LD A,(STMT)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        JP C,STERR
+        LD A,(STMT)
+        INC A
+        LD (NAMEI),A
+        LD HL,INBUF
+        CALL READINTO
+        ; trim leading spaces and tabs
+        LD HL,INBUF
+IN_LEAD:
+        LD A,(HL)
+        CP ' '
+        JR Z,IN_L1
+        CP TAB
+        JR NZ,IN_START
+IN_L1:  INC HL
+        JR IN_LEAD
+IN_START:
+        LD (VAL2),HL
+        ; find the end, then back over trailing spaces and tabs
+IN_SCAN:
+        LD A,(HL)
+        OR A
+        JR Z,IN_TRIM
+        INC HL
+        JR IN_SCAN
+IN_TRIM:
+        LD DE,(VAL2)
+IN_BACK:
+        LD A,L
+        CP E
+        JR NZ,IN_B1
+        LD A,H
+        CP D
+        JR Z,IN_DONE
+IN_B1:  DEC HL
+        LD A,(HL)
+        CP ' '
+        JR Z,IN_BACK
+        CP TAB
+        JR Z,IN_BACK
+        INC HL
+IN_DONE:
+        LD (HL),0
+        LD DE,(VAL2)
+        LD A,L
+        SUB E
+        LD C,A
+        ; all digits (and not empty) is a number
+        LD A,C
+        OR A
+        JR Z,IN_TEXT
+        LD HL,(VAL2)
+        LD B,C
+IN_DIG: LD A,(HL)
+        CP '0'
+        JR C,IN_TEXT
+        CP 58
+        JR NC,IN_TEXT
+        INC HL
+        DJNZ IN_DIG
+        LD HL,(VAL2)
+        CALL PARSENUM
+        XOR A
+        LD (RK),A
+        JR IN_STORE
+IN_TEXT:
+        CALL STRALLOC
+        LD (VAL3),HL
+        INC HL
+        LD DE,(VAL2)
+        LD A,C
+        OR A
+        JR Z,IN_TEXT_END
+        LD B,C
+IN_TC:  LD A,(DE)
+        LD (HL),A
+        INC DE
+        INC HL
+        DJNZ IN_TC
+IN_TEXT_END:
+        LD HL,(VAL3)
+        LD A,1
+        LD (RK),A
+IN_STORE:
+        LD (VAL),HL
         LD A,(NAMEI)
         CALL STOREVAL
         RET
@@ -2901,6 +3015,7 @@ MSGCOUNT:  DB "count", 0
 MSGLABELS: DB "labels", 0
 MSGEND:    DB "end", 0
 MSGLET:    DB "let", 0
+MSGINPUT:  DB "input", 0
 MSGPRINT:  DB "print", 0
 MSGSHOW:   DB "show", 0
 MSGGO:     DB "go", 0

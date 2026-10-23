@@ -272,11 +272,11 @@ client is what a real user types.
   `END-IF` convention that the one-line bodies avoid.
 - **The eZ80 guest's remaining half.** The guest now has the names,
   the expressions (arithmetic, text and the comparison operators),
-  `and`/`or`/`not`, `show`, `go`, the three loops (`for`, `for each`,
-  `while`), `if … then` with the host's line/piece body rule, and the
-  writes `add`, `link`, `set` and `drop`; its transcript matches the
-  host client's byte for byte on the script that covers them (GB-F).
-  Still missing, and refused by name rather than ignored: `input`,
+  `and`/`or`/`not`, `show`, `go`, `input`, the three loops (`for`,
+  `for each`, `while`), `if … then` with the host's line/piece body
+  rule, and the writes `add`, `link`, `set` and `drop`; its transcript
+  matches the host client's byte for byte on the script that covers
+  them (GB-F). Still missing, and refused by name rather than ignored:
   `gosub`/`return` and the program model. A write the *host* refuses
   (`!`) prints the guest's one-word `?`, because that is its whole
   refusal vocabulary. Its expressions are word-shaped (`1 + 2`, not

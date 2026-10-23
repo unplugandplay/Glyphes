@@ -237,9 +237,10 @@ graph, and the answer comes back through the same channel — so the guest
 needs no compiler and no graph, and 6 KB is enough.
 
 What it has: `find`, `count`, `labels`, `end`, `rem`, `let` and the bare
-assignment, `print`, `show`, `go`, `if … then`, `while … : … [next]`,
-`for`, `for each`, and the writes `add`, `link`, `set`, `drop`; names
-(eight of seven characters, 16-bit values), the arithmetic `+ - * /`,
+assignment, `input`, `print`, `show`, `go`, `if … then`,
+`while … : … [next]`, `for`, `for each`, and the writes `add`, `link`,
+`set`, `drop`; names (eight of seven characters, 16-bit values), the
+arithmetic `+ - * /`,
 the boolean operators `and`/`or`/`not`, and the comparisons
 `= < > <= >= <>` over numbers, quoted text and yes/no values. The writes
 ride the channel the reads already use — `add` forwards its property
@@ -258,6 +259,9 @@ outlive the line it was read on, `+` concatenates two texts and refuses
 a mixed pair, text ordering ignores case while equality does not, an
 empty text is false, and `and`/`or` are eager with `not` binding looser
 than a comparison. A full arena is a refusal (`?`), not an overwrite.
+`input` reads the next console line into a name — stripped at both ends,
+all digits a number, anything else text — using a buffer of its own so
+the line or loop body being run is not overwritten.
 
 Three things make it a client rather than a remote control, and they are
 also why it fits:
@@ -271,8 +275,8 @@ also why it fits:
   the cursor and the walking offset — so a nested loop keeps its own
   `next` and its own walk, exactly as the host's does.
 
-What it refuses, rather than pretending: `input`, `gosub`/`return`, and
-the program model. An unknown statement, or one with trailing words the
+What it refuses, rather than pretending: `gosub`/`return` and the
+program model. An unknown statement, or one with trailing words the
 guest does not understand, prints `?` and abandons the line — it does
 not half-run — and an answer the host refuses (`!`) is printed as the
 same one-word `?`. So are an unterminated text, a text where a node id
@@ -286,9 +290,9 @@ words, so `1 + 2` is three words and the operators have to stand alone —
 so is `while`'s round guard: it stops at 65,535 rounds where the host
 stops at a million, refusing a runaway loop either way. The budget buys
 that, and `ez80/tests/test_ez80.nim` measures both the transcript and
-the size (5,230 bytes, under the plan's 6 KB mark; the first half fitted
+the size (5,413 bytes, under the plan's 6 KB mark; the first half fitted
 in 3 KB, the writes moved the mark to 4 KB, the value model moved it to
-6 KB, and each move is recorded in the plan).
+6 KB, `input` landed inside it, and each move is recorded in the plan).
 
 ## Known gaps
 

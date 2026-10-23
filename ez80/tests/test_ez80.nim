@@ -563,6 +563,48 @@ suite "GLYPH BASIC — the guest and the host client":
     check "flag true" in guest
     close(guestDb)
 
+  test "input reads a line as a number or text":
+    ## The guest's `input` reads the console while the statement and any
+    ## loop body still need LINEBUF, so it has a buffer of its own. The
+    ## rule is the host's: strip both ends, all digits is a number,
+    ## anything else (including empty and a sign) is text.
+    let hostDb = guestFixture()
+    let t = newStoreTransport(hostDb)
+    var s = newSession()
+    var inputs = @["  42  ", "Ada Lovelace", "", "-5"]
+    var next = 0
+    s.inputFn = proc(): string =
+      result = inputs[next]
+      inc next
+    for line in ["input n",
+                 "print n",
+                 "if n > 5 then print 2",
+                 "input who",
+                 "print who",
+                 "if who = \"Ada Lovelace\" then print 3",
+                 "input e",
+                 "print e",
+                 "if e = \"\" then print 4",
+                 "input neg",
+                 "print neg",
+                 "if neg = \"-5\" then print 5"]:
+      discard s.runStatement(t, line)
+    let host = s.transcript
+    close(hostDb)
+
+    let guestDb = guestFixture()
+    let guest = guestTranscript(guestDb, [
+      "input n", "  42  ", "print n", "if n > 5 then print 2",
+      "input who", "Ada Lovelace", "print who",
+      "if who = \"Ada Lovelace\" then print 3",
+      "input e", "", "print e", "if e = \"\" then print 4",
+      "input neg", "-5", "print neg", "if neg = \"-5\" then print 5",
+      "end"
+    ])
+    check guest == host
+    check guest == "42\n2\nAda Lovelace\n3\n\n4\n-5\n5\n"
+    close(guestDb)
+
   test "the guest is small":
     ## The measuring instrument: the language, in Z80 assembly, in
     ## bytes. The mark was 3 KB for the first half (E3–E5); the writes
@@ -593,6 +635,8 @@ suite "GLYPH BASIC — the guest and the host client":
       "print \"Cid",
       "print \"a\" + 1",
       "show \"x\"",
+      "input",
+      "input n extra",
       "add",
       "add 123",
       "while : print 1",
@@ -600,6 +644,6 @@ suite "GLYPH BASIC — the guest and the host client":
       "for i = 1 to 2 : while 1 : print 1 : next",
       "end"
     ])
-    check guest == "?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n"
+    check guest == "?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n"
     close(db)
 
