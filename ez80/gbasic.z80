@@ -17,21 +17,30 @@
 ;
 ; This cut covers: find, count, labels, end, rem, let and bare
 ; assignment, input, print, show, go, if ... then, while, for, for each,
-; and the writes add, link, set and drop. The names are the client's,
-; the expressions (arithmetic, text and comparisons) are the client's,
-; the cursor loop is the client's, and the graph — including every
-; write — still happens on the other side of the channel. A value is a
-; number, a quoted text (copied into a 1 KB arena) or a yes/no, with the
-; host's kind rules; `and`, `or` and `not` are in the condition grammar.
+; gosub, return and the program model (PROGRAM-ID., SUBROUTINE.,
+; END PROGRAM.), and the writes add, link, set and drop. The names are
+; the client's, the expressions (arithmetic, text and comparisons) are
+; the client's, the cursor loop is the client's, and the graph —
+; including every write — still happens on the other side of the
+; channel. A value is a number, a quoted text (copied into a 1 KB
+; arena) or a yes/no, with the host's kind rules; `and`, `or` and `not`
+; are in the condition grammar.
 ;
-; What it does not cover, and refuses rather than pretending:
-; gosub/return and the program model. An unknown name is refused rather
-; than created, and an answer the host refuses (it begins with `!`) is
-; printed as the guest's one-word `?` — a refusal the child can see. An
-; expression here is *word-shaped*: `1 + 2` is three words and the
-; operators have to stand alone, because the guest tokenizes the line
-; into words and has no character-by-character parser. That is the price
-; of the budget, and the transcript test only exercises what is here.
+; The program is collected into a 2 KB buffer (at most 64 lines), its
+; subroutine table is built during collection (eight names of fifteen
+; characters), and its call stack holds sixteen lines. `gosub` pushes
+; the line after the call; `return` pops it; a subroutine that reaches a
+; declaration without a `return` is refused. `end` inside a program
+; returns to the prompt; outside one it halts the machine. A bound
+; reached is the guest's one-word `?`, never a truncation.
+;
+; An unknown name is refused rather than created, and an answer the host
+; refuses (it begins with `!`) is printed as the same `?` — a refusal
+; the child can see. An expression here is *word-shaped*: `1 + 2` is
+; three words and the operators have to stand alone, because the guest
+; tokenizes the line into words and has no character-by-character
+; parser. That is the price of the budget, and the transcript tests only
+; exercise what is here.
 ;
 ; Assemble:  nim c -r ez80/ez80asm.nim -- ez80/gbasic.z80 ez80/gbasic.bin
 ; ------------------------------------------------------------------------
@@ -107,8 +116,30 @@ TMP5     EQU 0xD8BD     ; text comparison lengths
 TMP6     EQU 0xD8BE
 TKQ      EQU 0xD8BF     ; the tokenizer is inside a quoted word
 
+PGTMP    EQU 0xD8C0     ; the program model's scratch pointer (2)
+PGIDX    EQU 0xD8C2     ; a subroutine table index (1)
+PGLEN    EQU 0xD8C3     ; a collected line's length (1)
+
 STRAREA  EQU 0xD900     ; the text arena: a length byte, then its bytes
 STREND   EQU 0xDD00     ; one past the arena
+
+; The program model. A collected program is a list of NUL-terminated
+; lines in PROGBUF, with PROGTAB holding each line's offset. The call
+; stack stores a line index per call (one byte; a program is at most 64
+; lines), and the subroutine table is built once, at collection time,
+; so `gosub` does not have to re-scan the program.
+PROGBUF     EQU 0xDD00  ; 2 KB of program text
+PROGBUF_END EQU 0xE500
+PROGTAB     EQU 0xE500  ; 64 line offsets (2 bytes each)
+PROGTOP     EQU 0xE580  ; the next free byte in PROGBUF (2)
+PROGCNT     EQU 0xE582  ; how many lines were collected (1)
+PROGPC      EQU 0xE583  ; the line being run (1)
+PROGSP      EQU 0xE584  ; how many calls are open (1)
+INPROG      EQU 0xE585  ; 1 while a collected program is running (1)
+PROGSTK     EQU 0xE586  ; 16 return line indices
+SUBNAMES    EQU 0xE600  ; 8 subroutine names, 16 bytes each
+SUBLINES    EQU 0xE680  ; each one's body line (8)
+SUBCNT      EQU 0xE690  ; how many subroutines (1)
 
 STKTOP   EQU 0xBFF0
 
@@ -123,13 +154,426 @@ MAIN:
         LD SP,STKTOP        ; a refusal abandons the line, not the stack
         XOR A
         LD (LEVEL),A
+        LD (LDIDX),A        ; no loop survives a refusal or an `end`
         CALL READLINE
+        LD HL,LINEBUF
+        LD DE,MSGPROGID
+        CALL STARTSWITH
+        OR A
+        JR NZ,MAIN_LINE
+        ; A program: collect it, run it, and come back to the prompt.
+        CALL COLLECT
+        CALL RUNPROG
+        JR MAIN
+MAIN_LINE:
         CALL TOKENIZE
         LD B,0
         LD A,(SCOUNT)
         LD C,A
         CALL RUNFROM
         JR MAIN
+
+; ---- the program model -------------------------------------------------
+; The host collects `PROGRAM-ID.` through `END PROGRAM.` and runs the
+; lines as one program (PRD-GLYPH-BASIC.md §3.3). The guest does the
+; same: the lines are copied into PROGBUF as NUL-terminated text, their
+; offsets into PROGTAB, and the subroutine declarations into a table at
+; collection time. Running a line copies it back into LINEBUF, so the
+; tokenizer and every statement keep working on one line at a time.
+
+; Is the line at LINEBUF exactly `END PROGRAM.` (case-insensitive)? The
+; collection ends on that whole line, as the host prompt does.
+ISENDLINE:
+        LD HL,LINEBUF
+        CALL STRIPAT
+        LD DE,MSGENDLINE
+        CALL STREQI
+        RET
+
+; Read the rest of a program and store it. LINEBUF already holds the
+; PROGRAM-ID line. A blank line is skipped, as the host prompt skips it.
+COLLECT:
+        XOR A
+        LD (PROGCNT),A
+        LD (SUBCNT),A
+        LD (PROGSP),A
+        LD (INPROG),A
+        LD HL,PROGBUF
+        LD (PROGTOP),HL
+        CALL STORELINE
+CO_READ:
+        CALL READLINE
+        CALL ISENDLINE
+        PUSH AF
+        CALL STORELINE
+        POP AF
+        JR NZ,CO_READ
+        RET
+
+; Store the trimmed line in LINEBUF. It becomes PROGBUF's next
+; NUL-terminated line, and a `SUBROUTINE.` declaration is entered into
+; the table with its body line (the line after it).
+STORELINE:
+        LD HL,LINEBUF
+        CALL STRIPAT          ; HL = start, C = length
+        LD A,C
+        OR A
+        JR NZ,SLN_HAVE
+        XOR A
+        LD (WCOUNT),A         ; a blank line is not a statement
+        RET
+SLN_HAVE:
+        LD (PGTMP),HL          ; source
+        LD A,C
+        LD (PGLEN),A           ; length
+        LD A,(PROGCNT)
+        CP 64
+        JP NC,STERR
+        ; end = PROGTOP + length + 1 (the NUL); it must fit PROGBUF.
+        LD HL,(PROGTOP)
+        LD E,C
+        LD D,0
+        ADD HL,DE
+        INC HL
+        LD DE,PROGBUF_END
+        CALL CMPHLDE
+        JR Z,SLN_ROOM
+        JP C,SLN_ROOM
+        JP STERR
+SLN_ROOM:
+        ; PROGTAB[PROGCNT] = the old PROGTOP
+        LD A,(PROGCNT)
+        LD L,A
+        LD H,0
+        ADD HL,HL
+        LD DE,PROGTAB
+        ADD HL,DE
+        LD DE,(PROGTOP)
+        LD (HL),E
+        INC HL
+        LD (HL),D
+        ; copy the line and its NUL
+        LD HL,(PGTMP)
+        LD A,(PGLEN)
+        LD C,A
+        INC C
+SLN_COPY:
+        LD A,(HL)
+        LD (DE),A
+        INC HL
+        INC DE
+        DEC C
+        JR NZ,SLN_COPY
+        LD (PROGTOP),DE
+        LD A,(PROGCNT)
+        INC A
+        LD (PROGCNT),A
+        ; Tokenize the line to see whether it declares a subroutine.
+        CALL TOKENIZE
+        LD A,(WCOUNT)
+        CP 2
+        RET C
+        XOR A
+        CALL WORDAI
+        LD DE,MSGSUBROUTINE
+        CALL ISWORD
+        OR A
+        RET NZ
+        LD A,1
+        CALL WORDAI
+        CALL CLEANDOT
+        LD (PGTMP),HL
+        CALL ADDSUB
+        RET
+
+; Remove one trailing dot from the NUL-terminated name at HL, in place.
+CLEANDOT:
+        LD D,H
+        LD E,L
+CLD_1:  LD A,(DE)
+        OR A
+        JR Z,CLD_2
+        INC DE
+        JR CLD_1
+CLD_2:  DEC DE
+        LD A,(DE)
+        CP '.'
+        RET NZ
+        XOR A
+        LD (DE),A
+        RET
+
+; HL = a subroutine name, PROGCNT = its body line. Replace a duplicate
+; declaration (the host's table keeps the last one) or append it.
+ADDSUB:
+        LD (PGTMP),HL
+        XOR A
+        LD (PGIDX),A
+AS_LOOP:
+        LD A,(PGIDX)
+        LD B,A
+        LD A,(SUBCNT)
+        CP B
+        JR Z,AS_ADD
+        JR C,AS_ADD
+        LD A,(PGIDX)
+        LD L,A
+        LD H,0
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        LD DE,SUBNAMES
+        ADD HL,DE
+        LD D,H
+        LD E,L
+        LD HL,(PGTMP)
+        CALL NAMEEQ
+        OR A
+        JR Z,AS_FOUND
+        LD A,(PGIDX)
+        INC A
+        LD (PGIDX),A
+        JR AS_LOOP
+AS_FOUND:
+        LD A,(PGIDX)
+        LD L,A
+        LD H,0
+        LD DE,SUBLINES
+        ADD HL,DE
+        LD A,(PROGCNT)
+        LD (HL),A
+        RET
+AS_ADD:
+        LD A,(SUBCNT)
+        CP 8
+        JP NC,STERR
+        LD L,A
+        LD H,0
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        LD DE,SUBNAMES
+        ADD HL,DE
+        LD DE,(PGTMP)
+        LD B,15
+AS_CP1: LD A,(DE)
+        OR A
+        JR Z,AS_CP2
+        LD (HL),A
+        INC HL
+        INC DE
+        DJNZ AS_CP1
+AS_CP2: LD (HL),0
+        LD A,(SUBCNT)
+        LD L,A
+        LD H,0
+        LD DE,SUBLINES
+        ADD HL,DE
+        LD A,(PROGCNT)
+        LD (HL),A
+        LD A,(SUBCNT)
+        INC A
+        LD (SUBCNT),A
+        RET
+
+; Copy program line A into LINEBUF.
+PROGLINE:
+        LD L,A
+        LD H,0
+        ADD HL,HL
+        LD DE,PROGTAB
+        ADD HL,DE
+        LD E,(HL)
+        INC HL
+        LD D,(HL)
+        EX DE,HL              ; the table holds the line's address
+        LD DE,LINEBUF
+PGL_1:  LD A,(HL)
+        LD (DE),A
+        OR A
+        RET Z
+        INC HL
+        INC DE
+        JR PGL_1
+
+; Is the tokenized line at LINEBUF structure rather than a statement?
+; Z if it is (blank, `SUBROUTINE.`, or `END PROGRAM.`).
+ISDECL:
+        LD A,(WCOUNT)
+        OR A
+        JR Z,ID_YES
+        XOR A
+        CALL WORDAI
+        LD DE,MSGSUBROUTINE
+        CALL ISWORD
+        OR A
+        JR Z,ID_YES
+        XOR A
+        CALL WORDAI
+        LD DE,MSGEND
+        CALL ISWORD
+        OR A
+        JR NZ,ID_NO
+        LD A,(WCOUNT)
+        CP 2
+        JR C,ID_NO
+        LD A,1
+        CALL WORDAI
+        LD DE,MSGPROGRAM
+        CALL ISWORD
+        OR A
+        JR Z,ID_YES
+ID_NO:  LD A,1
+        OR A
+        RET
+ID_YES: XOR A
+        RET
+
+; Run the collected program. The first line must be `PROGRAM-ID. <name>`;
+; the body starts at line 1, and the first declaration ends the main
+; body. A call pushes the line after the `gosub`; `return` pops it.
+RUNPROG:
+        XOR A
+        LD (PROGSP),A
+        CALL PROGLINE
+        CALL TOKENIZE
+        LD A,(WCOUNT)
+        CP 2
+        JP C,STERR
+        XOR A
+        CALL WORDAI
+        LD DE,MSGPROGID
+        CALL ISWORD
+        OR A
+        JP NZ,STERR
+        LD A,1
+        LD (PROGPC),A
+        LD (INPROG),A
+RP_LOOP:
+        LD A,(PROGPC)
+        LD B,A
+        LD A,(PROGCNT)
+        CP B
+        JR Z,RP_DONE
+        JR C,RP_DONE
+        LD A,(PROGPC)
+        CALL PROGLINE
+        LD A,(PROGPC)
+        INC A
+        LD (PROGPC),A
+        CALL TOKENIZE
+        CALL ISDECL
+        JR Z,RP_DECL
+        LD B,0
+        LD A,(SCOUNT)
+        LD C,A
+        CALL RUNFROM
+        JR RP_LOOP
+RP_DECL:
+        LD A,(PROGSP)
+        OR A
+        JR NZ,RP_BADRET
+RP_DONE:
+        XOR A
+        LD (INPROG),A
+        LD (PROGSP),A
+        JP MAIN
+RP_BADRET:
+        JP STERR
+
+; ---- gosub <name> ------------------------------------------------------
+STGOSUB:
+        LD A,(STMT)
+        ADD A,2
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        JP C,STERR
+        LD A,(INPROG)
+        OR A
+        JP Z,STERR
+        LD A,(STMT)
+        INC A
+        CALL WORDAI
+        CALL CLEANDOT
+        LD (PGTMP),HL
+        XOR A
+        LD (PGIDX),A
+GS_LOOP:
+        LD A,(PGIDX)
+        LD B,A
+        LD A,(SUBCNT)
+        CP B
+        JR Z,GS_NO
+        JR C,GS_NO
+        LD A,(PGIDX)
+        LD L,A
+        LD H,0
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        ADD HL,HL
+        LD DE,SUBNAMES
+        ADD HL,DE
+        LD D,H
+        LD E,L
+        LD HL,(PGTMP)
+        CALL NAMEEQ
+        OR A
+        JR Z,GS_FOUND
+        LD A,(PGIDX)
+        INC A
+        LD (PGIDX),A
+        JR GS_LOOP
+GS_FOUND:
+        LD A,(PROGSP)
+        CP 16
+        JP NC,STERR
+        LD L,A
+        LD H,0
+        LD DE,PROGSTK
+        ADD HL,DE
+        LD A,(PROGPC)
+        LD (HL),A
+        LD A,(PROGSP)
+        INC A
+        LD (PROGSP),A
+        LD A,(PGIDX)
+        LD L,A
+        LD H,0
+        LD DE,SUBLINES
+        ADD HL,DE
+        LD A,(HL)
+        LD (PROGPC),A
+        RET
+GS_NO:  JP STERR
+
+; ---- return ------------------------------------------------------------
+STRETURN:
+        LD A,(STMT)
+        INC A
+        LD B,A
+        LD A,(SEND)
+        CP B
+        JP NZ,STERR
+        LD A,(INPROG)
+        OR A
+        JP Z,STERR
+        LD A,(PROGSP)
+        OR A
+        JP Z,STERR
+        DEC A
+        LD (PROGSP),A
+        LD L,A
+        LD H,0
+        LD DE,PROGSTK
+        ADD HL,DE
+        LD A,(HL)
+        LD (PROGPC),A
+        RET
 
 ; ---- the console -----------------------------------------------------
 
@@ -284,6 +728,53 @@ RL2:    LD (HL),0
         LD A,B
         RET
 
+; Strip spaces and tabs from both ends of the NUL-terminated line at HL.
+; The line is shortened in place; HL comes back at its first character,
+; and C is its length. `input` and a program line both want this rule.
+STRIPAT:
+        LD (TMP2),HL
+ST_LEAD:
+        LD A,(HL)
+        CP ' '
+        JR Z,ST_L1
+        CP TAB
+        JR NZ,ST_START
+ST_L1:  INC HL
+        JR ST_LEAD
+ST_START:
+        LD (TMP2),HL
+ST_SCAN:
+        LD A,(HL)
+        OR A
+        JR Z,ST_TRIM
+        INC HL
+        JR ST_SCAN
+ST_TRIM:
+        LD DE,(TMP2)
+ST_BACK:
+        LD A,L
+        CP E
+        JR NZ,ST_B1
+        LD A,H
+        CP D
+        JR Z,ST_DONE
+ST_B1:  DEC HL
+        LD A,(HL)
+        CP ' '
+        JR Z,ST_BACK
+        CP TAB
+        JR Z,ST_BACK
+        INC HL
+ST_DONE:
+        LD (HL),0
+        LD DE,(TMP2)
+        LD A,L
+        SUB E
+        LD C,A
+        LD H,D
+        LD L,E
+        RET
+
 ; Split the line into words and statements.
 ;
 ; A word is a run of characters. The space after it becomes its NUL.
@@ -292,7 +783,8 @@ RL2:    LD (HL),0
 ; statement j begins at; STARTS[SCOUNT] is WCOUNT (the sentinel), so a
 ; statement is the words [STARTS[j], STARTS[j+1]).
 TOKENIZE:
-        LD A,0
+        XOR A
+        LD (TKQ),A             ; a refusal must not leave the next line quoted
         LD (WCOUNT),A
         LD A,1
         LD (SCOUNT),A          ; the line is at least one statement
@@ -433,6 +925,63 @@ ISW2:   LD A,(HL)
 ISWNO:  LD A,1
         RET
 ISWYES: LD A,0
+        RET
+
+; A = A uppercased, if it is an ASCII letter.
+UPPER:
+        CP 'a'
+        RET C
+        CP 123
+        RET NC
+        SUB 32
+        RET
+
+; Z if the NUL-terminated strings at HL and DE are equal, ignoring case.
+STREQI:
+        LD A,(DE)
+        CALL UPPER
+        LD B,A
+        LD A,(HL)
+        CALL UPPER
+        CP B
+        JR NZ,SQ_NO
+        OR A
+        RET Z
+        INC HL
+        INC DE
+        JR STREQI
+SQ_NO:  LD A,1
+        OR A
+        RET
+
+; Z if the text at HL starts with the prefix at DE, ignoring case. The
+; line's leading spaces and tabs are skipped; the host trims its lines
+; before it looks for `PROGRAM-ID.`, so the guest does too.
+STARTSWITH:
+SW_SKIP:
+        LD A,(HL)
+        CP ' '
+        JR Z,SW_SK1
+        CP TAB
+        JR NZ,SW1
+SW_SK1: INC HL
+        JR SW_SKIP
+SW1:    LD A,(DE)
+        CALL UPPER
+        LD B,A
+        OR A
+        JR Z,SW_YES
+        LD A,(HL)
+        CALL UPPER
+        CP B
+        JR NZ,SW_NO
+        INC HL
+        INC DE
+        JR SW1
+SW_YES: XOR A
+        RET
+SW_NO:  LD A,1
+        OR A
         RET
 
 ; ---- the channel ------------------------------------------------------
@@ -1634,6 +2183,18 @@ RS_KW:
         JP Z,STINPUT
         LD A,(STMT)
         CALL WORDAI
+        LD DE,MSGGOSUB
+        CALL ISWORD
+        OR A
+        JP Z,STGOSUB
+        LD A,(STMT)
+        CALL WORDAI
+        LD DE,MSGRETURN
+        CALL ISWORD
+        OR A
+        JP Z,STRETURN
+        LD A,(STMT)
+        CALL WORDAI
         LD DE,MSGPRINT
         CALL ISWORD
         OR A
@@ -1773,7 +2334,15 @@ STLABELS:
 
 ; ---- end ---------------------------------------------------------------
 STEND:
+        LD A,(INPROG)
+        OR A
+        JR NZ,STEND_PROG
         HALT
+STEND_PROG:
+        XOR A
+        LD (INPROG),A
+        LD (PROGSP),A
+        JP MAIN
 
 ; ---- let <name> = <expr> -----------------------------------------------
 STLET:
@@ -1832,47 +2401,9 @@ STINPUT:
         LD (NAMEI),A
         LD HL,INBUF
         CALL READINTO
-        ; trim leading spaces and tabs
         LD HL,INBUF
-IN_LEAD:
-        LD A,(HL)
-        CP ' '
-        JR Z,IN_L1
-        CP TAB
-        JR NZ,IN_START
-IN_L1:  INC HL
-        JR IN_LEAD
-IN_START:
+        CALL STRIPAT
         LD (VAL2),HL
-        ; find the end, then back over trailing spaces and tabs
-IN_SCAN:
-        LD A,(HL)
-        OR A
-        JR Z,IN_TRIM
-        INC HL
-        JR IN_SCAN
-IN_TRIM:
-        LD DE,(VAL2)
-IN_BACK:
-        LD A,L
-        CP E
-        JR NZ,IN_B1
-        LD A,H
-        CP D
-        JR Z,IN_DONE
-IN_B1:  DEC HL
-        LD A,(HL)
-        CP ' '
-        JR Z,IN_BACK
-        CP TAB
-        JR Z,IN_BACK
-        INC HL
-IN_DONE:
-        LD (HL),0
-        LD DE,(VAL2)
-        LD A,L
-        SUB E
-        LD C,A
         ; all digits (and not empty) is a number
         LD A,C
         OR A
@@ -2994,6 +3525,9 @@ CMPHLDE:
 ; ---- the refusal -------------------------------------------------------
 
 STERR:
+        XOR A
+        LD (INPROG),A          ; a refusal ends a program, not the prompt
+        LD (PROGSP),A
         LD HL,MSGERR
         CALL PRSTR
         LD A,CR
@@ -3016,6 +3550,12 @@ MSGLABELS: DB "labels", 0
 MSGEND:    DB "end", 0
 MSGLET:    DB "let", 0
 MSGINPUT:  DB "input", 0
+MSGGOSUB:  DB "gosub", 0
+MSGRETURN: DB "return", 0
+MSGPROGID: DB "program-id.", 0
+MSGPROGRAM: DB "program.", 0
+MSGSUBROUTINE: DB "subroutine.", 0
+MSGENDLINE: DB "END PROGRAM.", 0
 MSGPRINT:  DB "print", 0
 MSGSHOW:   DB "show", 0
 MSGGO:     DB "go", 0

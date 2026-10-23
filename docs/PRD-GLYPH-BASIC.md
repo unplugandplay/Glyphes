@@ -264,25 +264,28 @@ client is what a real user types.
   is the machine's, not the language's, and it is stated where the
   guest is.
 - **Functions and procedures.** `gosub` is enough for a first language,
-  and a call stack in the guest is a lot of memory. The host version may
-  add `def`.
+  on both sides now; procedures with parameters and local names are not,
+  and the host version may add `def`.
 - **Multi-line bodies.** The program model (§3.3) is in, with named
   subroutines and `goto` gone for good — but a loop whose body is the
   *lines that follow* is not, and needs the indentation or the
   `END-IF` convention that the one-line bodies avoid.
-- **The eZ80 guest's remaining half.** The guest now has the names,
-  the expressions (arithmetic, text and the comparison operators),
-  `and`/`or`/`not`, `show`, `go`, `input`, the three loops (`for`,
-  `for each`, `while`), `if … then` with the host's line/piece body
-  rule, and the writes `add`, `link`, `set` and `drop`; its transcript
-  matches the host client's byte for byte on the script that covers
-  them (GB-F). Still missing, and refused by name rather than ignored:
-  `gosub`/`return` and the program model. A write the *host* refuses
-  (`!`) prints the guest's one-word `?`, because that is its whole
-  refusal vocabulary. Its expressions are word-shaped (`1 + 2`, not
-  `1+2`) and its numbers are 16-bit, so its `while` guard stops at 65,535
-  rounds rather than the host's million — the divergences the guest's
-  size buys, documented where the guest is.
+- **The eZ80 guest's own bounds.** The guest is the same client now: the
+  names, the expressions (arithmetic, text and the comparison
+  operators), `and`/`or`/`not`, `show`, `go`, `input`, the three loops
+  (`for`, `for each`, `while`), `if … then` with the host's line/piece
+  body rule, the writes `add`, `link`, `set` and `drop`, and the
+  program model (`PROGRAM-ID.`, `SUBROUTINE.`, `END PROGRAM.`,
+  `gosub`/`return`); its transcript matches the host client's byte for
+  byte on the scripts that cover them (GB-F). Its limits are the
+  machine's, not smaller promises: 16-bit numbers and a word-shaped
+  expression grammar, a 1 KB text arena, a 2 KB/64-line program buffer,
+  eight subroutines of fifteen characters, and sixteen open calls. A
+  bound reached is a refusal (`?`), never a truncation. A write the
+  *host* refuses (`!`) prints the guest's one-word `?`, because that is
+  its whole refusal vocabulary. Its `while` guard stops at 65,535
+  rounds rather than the host's million; the promise — a runaway loop
+  is refused, not hung — is the same.
 - **Replacing the Ruby model layer.** GLYPH BASIC is a *client*; the
   model layer is a *client*. They are peers, and the model layer stays.
 

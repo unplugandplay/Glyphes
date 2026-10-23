@@ -234,15 +234,16 @@ bytes (PLAN-GLYPH-BASIC.md §6, E4).
 The graph is not here. The guest sends a GLYPH QUERY line over the port
 channel in `channel.z80`, the host compiles it and runs it against a real
 graph, and the answer comes back through the same channel — so the guest
-needs no compiler and no graph, and 6 KB is enough.
+needs no compiler and no graph, and 7 KB is enough.
 
 What it has: `find`, `count`, `labels`, `end`, `rem`, `let` and the bare
 assignment, `input`, `print`, `show`, `go`, `if … then`,
-`while … : … [next]`, `for`, `for each`, and the writes `add`, `link`,
-`set`, `drop`; names (eight of seven characters, 16-bit values), the
-arithmetic `+ - * /`,
-the boolean operators `and`/`or`/`not`, and the comparisons
-`= < > <= >= <>` over numbers, quoted text and yes/no values. The writes
+`while … : … [next]`, `for`, `for each`, `gosub`, `return` and the
+program model (`PROGRAM-ID.`, `SUBROUTINE.`, `END PROGRAM.`), and the
+writes `add`, `link`, `set`, `drop`; names (eight of seven characters,
+16-bit values), the arithmetic `+ - * /`, the boolean operators
+`and`/`or`/`not`, and the comparisons `= < > <= >= <>` over numbers,
+quoted text and yes/no values. The writes
 ride the channel the reads already use — `add` forwards its property
 list as the host forwards it, `set` and `drop` send parameterised `exec`
 lines, and `link` is the verb the engine's no-joins rule needs. The
@@ -263,6 +264,15 @@ than a comparison. A full arena is a refusal (`?`), not an overwrite.
 all digits a number, anything else text — using a buffer of its own so
 the line or loop body being run is not overwritten.
 
+The program model is the host's: `PROGRAM-ID.` collects, `END PROGRAM.`
+ends collection, `SUBROUTINE.` names a body, the main body ends at the
+first declaration, `gosub` pushes the next line and `return` pops it,
+and a subroutine that reaches a declaration without a `return` is
+refused. The lines live in a 2 KB buffer (at most 64), the subroutine
+table is built once during collection (eight names of fifteen
+characters), and the call stack holds sixteen lines. `end` inside a
+program returns to the prompt; outside one it halts the machine.
+
 Three things make it a client rather than a remote control, and they are
 also why it fits:
 
@@ -275,12 +285,15 @@ also why it fits:
   the cursor and the walking offset — so a nested loop keeps its own
   `next` and its own walk, exactly as the host's does.
 
-What it refuses, rather than pretending: `gosub`/`return` and the
-program model. An unknown statement, or one with trailing words the
-guest does not understand, prints `?` and abandons the line — it does
-not half-run — and an answer the host refuses (`!`) is printed as the
-same one-word `?`. So are an unterminated text, a text where a node id
-belongs, and a text added to a number. The refusal vocabulary is the
+What it refuses, rather than pretending: an unknown statement, or one
+with trailing words the guest does not understand, prints `?` and
+abandons the line — it does not half-run — and an answer the host
+refuses (`!`) is printed as the same one-word `?`. So are an
+unterminated text, a text where a node id belongs, a text added to a
+number, `gosub` outside a program, `return` outside a subroutine, an
+unknown subroutine name, a subroutine without a `return`, a program
+that does not start with `PROGRAM-ID. <name>`, and a program, arena or
+call stack that reaches its bound. The refusal vocabulary is the
 one-word `?`; the host's messages are longer, and that is a documented
 divergence.
 
@@ -290,9 +303,10 @@ words, so `1 + 2` is three words and the operators have to stand alone —
 so is `while`'s round guard: it stops at 65,535 rounds where the host
 stops at a million, refusing a runaway loop either way. The budget buys
 that, and `ez80/tests/test_ez80.nim` measures both the transcript and
-the size (5,413 bytes, under the plan's 6 KB mark; the first half fitted
+the size (6,313 bytes, under the plan's 7 KB mark; the first half fitted
 in 3 KB, the writes moved the mark to 4 KB, the value model moved it to
-6 KB, `input` landed inside it, and each move is recorded in the plan).
+6 KB, `input` landed inside it, the program model moved it to 7 KB, and
+each move is recorded in the plan).
 
 ## Known gaps
 

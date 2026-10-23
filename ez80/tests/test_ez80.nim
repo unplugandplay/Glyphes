@@ -605,16 +605,211 @@ suite "GLYPH BASIC — the guest and the host client":
     check guest == "42\n2\nAda Lovelace\n3\n\n4\n-5\n5\n"
     close(guestDb)
 
+  test "a program runs its body and calls its subroutines":
+    ## The host collects `PROGRAM-ID.` through `END PROGRAM.` and runs
+    ## the lines; the guest does the same, with the subroutine table
+    ## built at collection time. The main body ends at the first
+    ## declaration — no falling into a subroutine.
+    let program = [
+      "PROGRAM-ID. HELLO.",
+      "let a = 2",
+      "print a",
+      "gosub AFFICHER_TOTAL",
+      "print 99",
+      "end",
+      "SUBROUTINE. AFFICHER_TOTAL.",
+      "print 7",
+      "return",
+      "END PROGRAM."
+    ]
+    let hostDb = guestFixture()
+    let t = newStoreTransport(hostDb)
+    var s = newSession()
+    discard s.runProgram(t, program)
+    let host = s.transcript
+    close(hostDb)
+
+    let guestDb = guestFixture()
+    var script: seq[string] = @[]
+    for line in program:
+      script.add line
+    script.add "end"
+    let guest = guestTranscript(guestDb, script)
+    check guest == host
+    check guest == "2\n7\n99\n"
+    close(guestDb)
+
+  test "the main body ends at the first declaration":
+    let program = [
+      "PROGRAM-ID. FALL.",
+      "print 1",
+      "SUBROUTINE. NEVER.",
+      "print 2",
+      "return",
+      "END PROGRAM."
+    ]
+    let hostDb = guestFixture()
+    let t = newStoreTransport(hostDb)
+    var s = newSession()
+    discard s.runProgram(t, program)
+    let host = s.transcript
+    close(hostDb)
+
+    let guestDb = guestFixture()
+    var script: seq[string] = @[]
+    for line in program:
+      script.add line
+    script.add "end"
+    let guest = guestTranscript(guestDb, script)
+    check guest == host
+    check guest == "1\n"
+    close(guestDb)
+
+  test "a subroutine without a return is refused":
+    ## The host raises; the guest prints its one-word refusal. The
+    ## transcript before the refusal is still the host's.
+    let program = [
+      "PROGRAM-ID. BAD.",
+      "gosub SUB.",
+      "print 9",
+      "SUBROUTINE. SUB.",
+      "print 3",
+      "END PROGRAM."
+    ]
+    let hostDb = guestFixture()
+    let t = newStoreTransport(hostDb)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runProgram(t, program)
+    except CatchableError as e:
+      msg = e.msg
+    check "RETURN" in msg
+    check s.transcript == "3\n"
+    close(hostDb)
+
+    let guestDb = guestFixture()
+    var script: seq[string] = @[]
+    for line in program:
+      script.add line
+    script.add "end"
+    let guest = guestTranscript(guestDb, script)
+    check guest == "3\n?\n"
+    close(guestDb)
+
+  test "a program without a name is refused before it runs":
+    let hostDb = guestFixture()
+    let t = newStoreTransport(hostDb)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runProgram(t, ["PROGRAM-ID.", "print 1", "END PROGRAM."])
+    except CatchableError as e:
+      msg = e.msg
+    check "PROGRAM-ID" in msg
+    check s.transcript == ""
+    close(hostDb)
+
+    let guestDb = guestFixture()
+    let guest = guestTranscript(guestDb, [
+      "PROGRAM-ID.",
+      "print 1",
+      "END PROGRAM.",
+      "end"
+    ])
+    check guest == "?\n"
+    close(guestDb)
+
+  test "a subroutine is called by its name, dot or no dot":
+    let program = [
+      "PROGRAM-ID. DOT.",
+      "gosub SHOW.",
+      "print 2",
+      "SUBROUTINE. SHOW.",
+      "print 1",
+      "return",
+      "END PROGRAM."
+    ]
+    let hostDb = guestFixture()
+    let t = newStoreTransport(hostDb)
+    var s = newSession()
+    discard s.runProgram(t, program)
+    let host = s.transcript
+    close(hostDb)
+
+    let guestDb = guestFixture()
+    var script: seq[string] = @[]
+    for line in program:
+      script.add line
+    script.add "end"
+    let guest = guestTranscript(guestDb, script)
+    check guest == host
+    check guest == "1\n2\n"
+    close(guestDb)
+
+  test "input works inside a program":
+    let hostDb = guestFixture()
+    let t = newStoreTransport(hostDb)
+    var s = newSession()
+    s.inputFn = proc(): string = "5"
+    discard s.runProgram(t, [
+      "PROGRAM-ID. IN.",
+      "input n",
+      "print n",
+      "END PROGRAM."
+    ])
+    let host = s.transcript
+    close(hostDb)
+
+    let guestDb = guestFixture()
+    let guest = guestTranscript(guestDb, [
+      "PROGRAM-ID. IN.",
+      "input n",
+      "print n",
+      "END PROGRAM.",
+      "5",
+      "end"
+    ])
+    check guest == host
+    check guest == "5\n"
+    close(guestDb)
+
+  test "a name that is not a subroutine is refused":
+    let program = [
+      "PROGRAM-ID. MISS.",
+      "gosub NOWHERE",
+      "END PROGRAM."
+    ]
+    let hostDb = guestFixture()
+    let t = newStoreTransport(hostDb)
+    var s = newSession()
+    var msg = ""
+    try:
+      discard s.runProgram(t, program)
+    except CatchableError as e:
+      msg = e.msg
+    check "NOWHERE" in msg
+    close(hostDb)
+
+    let guestDb = guestFixture()
+    var script: seq[string] = @[]
+    for line in program:
+      script.add line
+    script.add "end"
+    let guest = guestTranscript(guestDb, script)
+    check guest == "?\n"
+    close(guestDb)
+
   test "the guest is small":
     ## The measuring instrument: the language, in Z80 assembly, in
     ## bytes. The mark was 3 KB for the first half (E3–E5); the writes
     ## took the guest past it, so the published mark moved to 4 KB, then
     ## the value model (text, yes/no, `and`/`or`/`not`) took it past
-    ## that. The published mark is 6 KB now — deliberately, and the
-    ## plan records it.
+    ## that, and the program model took it past 6 KB. The published mark
+    ## is 7 KB now — deliberately, and the plan records it.
     let here = currentSourcePath().parentDir.parentDir
     let bin = readFile(here / "gbasic.bin")
-    check bin.len < 6144
+    check bin.len < 7168
 
   test "what the guest does not have, it refuses":
     ## The other half of the gate: the guest must not half-run. An
@@ -637,6 +832,8 @@ suite "GLYPH BASIC — the guest and the host client":
       "show \"x\"",
       "input",
       "input n extra",
+      "gosub X",
+      "return",
       "add",
       "add 123",
       "while : print 1",
@@ -644,6 +841,6 @@ suite "GLYPH BASIC — the guest and the host client":
       "for i = 1 to 2 : while 1 : print 1 : next",
       "end"
     ])
-    check guest == "?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n"
+    check guest == "?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n"
     close(db)
 
