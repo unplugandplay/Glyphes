@@ -15,7 +15,7 @@
 ##     name Ana
 ##     age 34
 ##     KNOWS -> 2
-## ready> go knows
+## ready> go KNOWS
 ##   1 nodes
 ## ready> if p = 1 then print "found"
 ## ```

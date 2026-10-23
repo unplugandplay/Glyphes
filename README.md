@@ -87,6 +87,13 @@ the same statement as the traversal's filter, exposes a Rails-shaped model
 layer, imports and exports CSV/JSONL/Parquet, and refuses a damaged file by
 name instead of serving it.
 
+Two languages sit on top of the engine: **GLYPH QUERY**, the client's data
+language — it compiles to Cypher text plus parameters, and a value never
+reaches the text — and **GLYPH BASIC**, a `ready>` prompt with a session, a
+cursor and control flow, which issues it. Both are landed and gated below,
+and GLYPH BASIC is deliberately written twice: in Nim, and again in eZ80
+assembly.
+
 On top of that, every commit is recorded: a durable `.vhist` sidecar gives
 each transaction a revision (node liveness and properties), and a second
 process — a **follower** — can observe that history live, reading the log up
@@ -102,7 +109,7 @@ nothing the database did not acknowledge.
 | M1 store | **landed** | `nimble bench`: 10⁶ nodes + 4·10⁶ edges ≈ 1.6 s, traversal ≈ 0.2 s, heap 619 MB |
 | M2 durability | **landed** | W1 — `kill -9` over an import, recovery byte-identical to a same-seed oracle |
 | M3 transactions | **landed** | single writer, serializable readers, `BUSY` on contention; T1 soak green |
-| M4 Cypher read | **landed** | C1 TCK subset 132/132 in-contract, 17 refusals by name; C9 query-rate gate |
+| M4 Cypher read | **landed** | C1 TCK subset 161/161 in-contract, 31 refusals by name; C9 query-rate gate |
 | M5 write Cypher | **landed** | `CREATE`/`SET`/`REMOVE`/`DELETE`/`MERGE`, aggregates, `WITH`, `OPTIONAL MATCH`, variable length, spill-sorted `ORDER BY` |
 | M6 indexes | **landed** | I5 range seek; I6/I7 text BM25 + phrase; I-vec HNSW recall 0.960@ef128; I9 constraints |
 | M7 Ruby surface | **landed** | R1 (12 statuses → classes), R2 GC-stress with live cells; cells, node/edge views, checkpoint/backup/vacuum |
@@ -114,6 +121,8 @@ nothing the database did not acknowledge.
 | F0 cross-process lock | **landed** | two writers over one file refused; `soakShared` two-process soak green |
 | F1–F3 the follower | **landed** | SG5 the barrier never lies; SG6 the rebuilt timeline == the writer's; SG7 a crashed writer leaves the follower off by exactly one |
 | S1–S4 the surface | **landed** | C ABI, Ruby `Glyphes::Follower`, `glyphes follow` CLI; the crash guarantee holds across the ABI; no write symbol exists anywhere in the surface |
+| GLYPH QUERY (Q1–Q5) | **landed** | GQ-A…GQ-E: the compiler's golden Cypher, the differential, the parameter discipline, the refusal table — every GLYPH BASIC statement rides it |
+| GLYPH BASIC (B1–B5, E1–E11) | **landed** | GB-A…GB-F: the host's transcript, and the eZ80 guest's transcript byte for byte (6,522 bytes, mark 7 KB) |
 | Review (whole product) | **landed** | ~30 findings, 11 confirmed by execution, all fixed with the test whose absence let them land; `-d:glyphesCheck`, `ss2`, `benchVersion`, `crashFollower` wired into the gate |
 
 The follower is reachable from **C, Ruby, and the CLI**. Its surface —
@@ -125,18 +134,21 @@ the planned next increment, not yet built.
 
 ### Verification state
 
-Verified **after the whole-product adversarial review**, on the full gate
-(`nimble gate`):
+Verified **on the full gate (`nimble gate`)** — the counts below
+re-measured after the GLYPH BASIC final review, which added that
+language's tests to every suite it quotes:
 
-- **480 Nim tests, 0 failures** — store, WAL, recovery, transactions,
+- **591 Nim tests, 0 failures** — store, WAL, recovery, transactions,
   Cypher, all three index families, the model layer's statement compiler,
-  version history, and the follower's watermark/timeline gates. The same
-  480 also pass under `-d:glyphesCheck`, which walks the S1/S2/S3/S4/S8
+  version history, the follower's watermark/timeline gates, and GLYPH
+  BASIC's client (the golden transcript, the refusals, the values, the
+  program model). The same 591 also pass under `-d:glyphesCheck`, which
+  walks the S1/S2/S3/S4/S8
   invariants over every record each transaction touched.
-- **228 Ruby tests / 769 assertions, 0 failures** — the seam, the model
+- **241 Ruby tests / 807 assertions, 0 failures** — the seam, the model
   layer, import/export, status mapping.
-- `nimble tck` — the committed TCK subset: **132/132 in-contract rows
-  pass, all 17 out-of-contract rows refuse by name.**
+- `nimble tck` — the committed TCK subset: **161/161 in-contract rows
+  pass, all 31 out-of-contract rows refuse by name.**
 - `nimble crash` — W1: SIGKILL over a 100-transaction import; every
   recovery matches a same-seed clean run, property values included.
 - `nimble bitflip` — W3 (10⁶ bit-flips) and W2 (truncate at every 4 KB
@@ -145,8 +157,10 @@ Verified **after the whole-product adversarial review**, on the full gate
   corruption.
 - `nimble crashFollower` — SG7: a writer SIGKILLed mid-commit leaves the
   follower off by exactly the in-flight commit.
-- `nimble ss2` — SS2: no exported follower symbol can write (63 symbols
+- `nimble ss2` — SS2: no exported follower symbol can write (68 symbols
   checked clean).
+- `nimble ez80Test` — the eZ80 suite: **34/0**, including GLYPH BASIC's
+  guest: the same script on both clients, byte for byte.
 - `nimble soak` — T1: 6 readers + 2 writers, no torn read.
 - `nimble benchSort` / `benchIndex` / `benchVector` / `benchImport` /
   `benchVersion` — E2/E3, I5, I-vec (recall + determinism), R8, G2
@@ -266,10 +280,10 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 
 ```
 nimble build        the shared library (release, ORC, threaded)
-nimble test         480 Nim tests (fast)
-nimble testGate     480 Nim tests at full churn
+nimble test         591 Nim tests (fast)
+nimble testGate     591 Nim tests at full churn
 nimble fixture      rebuild tests/fixtures/social.glyph
-nimble gemtest      228 Ruby runs / 769 assertions
+nimble gemtest      241 Ruby runs / 807 assertions
 nimble crash        W1 crash gate
 nimble crashFollower  SG7: a writer SIGKILLed mid-commit leaves the follower off by exactly one
 nimble bitflip      W3 bit-flip sweep + W2 truncate sweep (GLYPHES_BITFLIPS=N)
@@ -286,6 +300,7 @@ nimble ss2          SS2: no exported follower symbol can write
 nimble tck          C1: the TCK subset
 nimble gate         everything short, in order, stops at the first red
 nimble asan         both suites under AddressSanitizer
+nimble ez80Test     the eZ80 suite, incl. GLYPH BASIC's guest (34 tests)
 ```
 
 Sample gate output (quiet machine):
@@ -329,20 +344,77 @@ Design documents: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) is the map,
 [`docs/ROADMAP.md`](docs/ROADMAP.md) has the gates, and
 [`ENHANCEMENTS.md`](ENHANCEMENTS.md) is what is deliberately not next.
 
+## GLYPH BASIC — a prompt over the graph
+
+[`docs/PRD-GLYPH-BASIC.md`](docs/PRD-GLYPH-BASIC.md) specifies a small,
+forgiving, line-oriented **client language**: a `ready>` prompt, a session
+that remembers where you are (one cursor, a handful of names), and the
+control flow Cypher deliberately does not have — `if … then`, `while`,
+`for`, `for each` over the cursor, named subroutines (`gosub`/`return`),
+`input`, `print`, and the writes `add`/`link`/`set`/`drop`.
+
+It is a *client*, not a query language: every statement it runs becomes a
+**GLYPH QUERY** statement ([`docs/PRD-GLYPH-QUERY.md`](docs/PRD-GLYPH-QUERY.md)),
+which compiles to Cypher text plus parameters — a client value never
+reaches the query text (pins GB1, GB-D).
+
+```
+$ nim c -o:glyphbasic tools/glyphbasic.nim && ./glyphbasic mydb.glyph
+GLYPH BASIC 1.0 -- a prompt over mydb.glyph
+  find <label> [where <expr>]   go [back] <type> [from <name>]
+  …
+ready> find Person
+2 nodes
+ready> count
+2
+ready> p = first
+ready> show p
+1 :Person
+  name Ana
+  age 34
+  KNOWS -> 2
+ready> for each p : print p : next
+1
+2
+ready> end
+```
+
+`count`, `p = first` and `last` pick from the cursor the session is
+holding; every line is its own transaction, and a line that cannot be
+understood is refused by name rather than half-run.
+
+The language is written **twice** on purpose (pin GB9 — a grammar that
+can be implemented twice is small enough to hold in a child's head): the
+host client in Nim (`src/gbasic*.nim`, the prompt in
+`tools/glyphbasic.nim`), and a guest on the eZ80
+([`ez80/gbasic.z80`](ez80/gbasic.z80), 6,522 bytes of assembly) that talks
+to the host over a port channel. The gate is the transcript (GB-F): the
+same script on both clients must produce the same bytes, and a construct
+the guest does not have is its one-word `?` refusal, never a half-run.
+Measured: `nimble testGate` **591 / 0** (58 of them the client's own),
+`nimble ez80Test` **34 / 0**, guest 6,522 bytes under the plan's 7 KB mark.
+
+The plan, cut by cut — and §10, the final review that walked both
+implementations against it, defect by defect:
+[`docs/PLAN-GLYPH-BASIC.md`](docs/PLAN-GLYPH-BASIC.md).
+
 ## Also in this repository: an eZ80
 
 [`ez80/`](ez80/README.md) holds a separate project that lives here for
 historical reasons: a **Zilog eZ80** emulator and assembler in Nim, with
-the BASIC that was written for it. The eZ80 is a Z80 superset — two memory
+two BASICs written for it — the original line-numbered `basic.z80`, and
+**GLYPH BASIC's guest**, `gbasic.z80`, which is the prompt above written
+again in assembly. The eZ80 is a Z80 superset — two memory
 modes (16-bit Z80 and 24-bit ADL), 24-bit registers, a second register
 bank, and the eZ80's own instruction set — and the suite proves the
 compatibility the only way that counts: the BASIC interpreter, 3000 bytes
 of hand-written assembly, produces the same transcript byte for byte as it
-did on the Z80 emulator it grew out of.
+did on the Z80 emulator it grew out of — and GLYPH BASIC's guest proves
+the same thing against the *host client*, byte for byte.
 
 ```
-nimble ez80Test        the eZ80's test suite
-nimble ez80Asm         assemble basic.z80
+nimble ez80Test        the eZ80's test suite (incl. GLYPH BASIC's guest)
+nimble ez80Asm         assemble basic.z80, channel.z80 and gbasic.z80
 ```
 
 ## Why
@@ -416,6 +488,10 @@ never a wrong answer.
 | Document | Contents |
 |---|---|
 | [`discovery.md`](discovery.md) | discovery: what a graph query language for children inherits from a BASIC on an eZ80 — the argument, the constraints, the open questions |
+| [`docs/PRD-GLYPH-BASIC.md`](docs/PRD-GLYPH-BASIC.md) | GLYPH BASIC: the prompt, the session, the statements, the program model, the pins GB1–GB9 |
+| [`docs/PLAN-GLYPH-BASIC.md`](docs/PLAN-GLYPH-BASIC.md) | the coding plan cut by cut (B1–B5, E1–E11), and §10 the final review's findings and measurements |
+| [`docs/PRD-GLYPH-QUERY.md`](docs/PRD-GLYPH-QUERY.md) | GLYPH QUERY: the data language the client issues, compiled to Cypher + parameters |
+| [`docs/PLAN-GLYPH-QUERY.md`](docs/PLAN-GLYPH-QUERY.md) | its coding plan: Q1 grammar, Q2 compiler, Q3–Q5 doors and surface |
 | [`docs/PRD-GLYPHES.md`](docs/PRD-GLYPHES.md) | what this is, phases, gates, risks, pins |
 | [`docs/STORAGE.md`](docs/STORAGE.md) | record layouts, property arena, dictionaries, adjacency, invariants |
 | [`docs/WAL.md`](docs/WAL.md) | WAL framing, snapshot format, recovery, durability gates W1–W7 |
