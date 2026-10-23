@@ -254,6 +254,8 @@ proc eval(e: Expr; names: Table[string, GbValue]): GbValue =
         same = l.number == r.nodeId
       elif l.kind == gbvNode and r.kind == gbvNumber:
         same = l.nodeId == r.number
+      elif l.kind == gbvBool and r.kind == gbvBool:
+        same = l.flag == r.flag
       else:
         ## Two different kinds are not equal, and never an error: the
         ## engine's rule (C8), inherited.

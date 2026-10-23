@@ -18,21 +18,21 @@
 ; This cut covers: find, count, labels, end, rem, let and bare
 ; assignment, print, show, go, if ... then, while, for, for each, and
 ; the writes add, link, set and drop. The names are the client's, the
-; expressions (arithmetic and comparisons) are the client's, the cursor
-; loop is the client's, and the graph — including every write — still
-; happens on the other side of the channel.
+; expressions (arithmetic, text and comparisons) are the client's, the
+; cursor loop is the client's, and the graph — including every write —
+; still happens on the other side of the channel. A value is a number,
+; a quoted text (copied into a 1 KB arena) or a yes/no, with the host's
+; kind rules; `and`, `or` and `not` are in the condition grammar.
 ;
-; What it does not cover, and refuses rather than pretending: quoted
-; text, input, gosub/return, the program model, and the boolean
-; operators and/or/not in a condition. A quoted string in a value
-; position prints `?` rather than being read as a name with a zero in
-; it, an unknown name is refused rather than created, and an answer the
-; host refuses (it begins with `!`) is printed as the guest's one-word
-; `?` — a refusal the child can see. An expression here is *word-shaped*:
-; `1 + 2` is three words and the operators have to stand alone, because
-; the guest tokenizes the line into words and has no character-by-
-; character parser. That is the price of the budget, and the transcript
-; test only exercises what is here.
+; What it does not cover, and refuses rather than pretending: input,
+; gosub/return, and the program model. An unknown name is refused
+; rather than created, and an answer the host refuses (it begins with
+; `!`) is printed as the guest's one-word `?` — a refusal the child can
+; see. An expression here is *word-shaped*: `1 + 2` is three words and
+; the operators have to stand alone, because the guest tokenizes the
+; line into words and has no character-by-character parser. That is the
+; price of the budget, and the transcript test only exercises what is
+; here.
 ;
 ; Assemble:  nim c -r ez80/ez80asm.nim -- ez80/gbasic.z80 ez80/gbasic.bin
 ; ------------------------------------------------------------------------
@@ -91,6 +91,25 @@ FVAL     EQU 0xD890     ; a numeric loop's first value (4 x 2)
 FLIM     EQU 0xD898     ; its last value (4 x 2)
 FCUR     EQU 0xD8A0     ; where it is (4 x 2)
 
+KINDS    EQU 0xD8A8     ; each name slot's kind (8): 0 number, 1 text, 2 yes/no
+STRPTR   EQU 0xD8B0     ; the text arena's next free byte (2)
+SLOTK    EQU 0xD8B2     ; the slot's kind byte (2)
+RK       EQU 0xD8B4     ; an expression value's kind
+ACK      EQU 0xD8B5     ; the add accumulator's kind
+TACK     EQU 0xD8B6     ; the term accumulator's kind
+TACK2    EQU 0xD8B7     ; the term's right-hand kind
+VALK     EQU 0xD8B8     ; a comparison's left kind
+VAL2K    EQU 0xD8B9     ; its right kind
+TRES     EQU 0xD8BA     ; a saved truth value
+TMP3     EQU 0xD8BB     ; text comparison scratch
+TMP4     EQU 0xD8BC
+TMP5     EQU 0xD8BD     ; text comparison lengths
+TMP6     EQU 0xD8BE
+TKQ      EQU 0xD8BF     ; the tokenizer is inside a quoted word
+
+STRAREA  EQU 0xD900     ; the text arena: a length byte, then its bytes
+STREND   EQU 0xDD00     ; one past the arena
+
 STKTOP   EQU 0xBFF0
 
         ORG 0
@@ -98,6 +117,8 @@ STKTOP   EQU 0xBFF0
 ; ---- startup --------------------------------------------------------
 START:
         LD SP,STKTOP
+        LD HL,STRAREA
+        LD (STRPTR),HL
 MAIN:
         LD SP,STKTOP        ; a refusal abandons the line, not the stack
         XOR A
@@ -120,6 +141,19 @@ PRSTR:
         OUT (1),A
         INC HL
         JR PRSTR
+
+; Print the length-prefixed text at HL.
+PRSLEN:
+        LD A,(HL)
+        OR A
+        RET Z
+        LD B,A
+        INC HL
+PSL1:   LD A,(HL)
+        OUT (1),A
+        INC HL
+        DJNZ PSL1
+        RET
 
 ; Print a space, then the string at HL.
 PRSP:
@@ -279,13 +313,38 @@ TK1:    LD A,(HL)
         LD A,(WCOUNT)
         INC A
         LD (WCOUNT),A
-TK2:    LD A,(HL)
+TK2:    LD A,(TKQ)
+        OR A
+        JR NZ,TK2Q
+        LD A,(HL)
         OR A
         JP Z,TKEND
         CP ' '
         JR Z,TKSPACE
         CP ':'
         JR Z,TK1              ; the boundary handler takes it
+        CP 34
+        JR Z,TK2OPEN
+        INC HL
+        INC C
+        JR TK2
+TK2Q:   LD A,(HL)
+        OR A
+        JP Z,TKEND
+        CP 34
+        JR Z,TK2CLOSE
+        INC HL
+        INC C
+        JR TK2Q
+TK2OPEN:
+        LD A,1
+        LD (TKQ),A
+        INC HL
+        INC C
+        JR TK2
+TK2CLOSE:
+        XOR A
+        LD (TKQ),A
         INC HL
         INC C
         JR TK2
@@ -391,6 +450,34 @@ SENDSTR:
 ; Send the number in HL to the host as decimal.
 SENDNUM:
         CALL NUMTXT
+        JP SENDPART
+
+; Send the length-prefixed text at HL as a quoted channel parameter:
+; "..." — the channel's text form, spaces and all.
+SENDQT:
+        LD A,'"'
+        OUT (3),A
+        LD A,(HL)
+        OR A
+        JR Z,SQ_E
+        LD B,A
+        INC HL
+SQ1:    LD A,(HL)
+        OUT (3),A
+        INC HL
+        DJNZ SQ1
+SQ_E:   LD A,'"'
+        OUT (3),A
+        RET
+
+; Send the yes/no in HL.
+SENDBOOL:
+        LD A,H
+        OR L
+        JR Z,SB_F
+        LD HL,MSGTRUE
+        JP SENDPART
+SB_F:   LD HL,MSGFALSE
         JP SENDPART
 
 ; The number in HL as decimal text at NUMBUF.
@@ -613,13 +700,33 @@ SL3:    LD A,(DE)
         INC D
 SL4:    DJNZ SL3
         JP STERR
-SLHIT:  LD H,D
+SLHIT:
+        PUSH DE
+        LD A,8
+        SUB B
+        LD E,A
+        LD D,0
+        LD HL,KINDS
+        ADD HL,DE
+        LD (SLOTK),HL
+        POP DE
+        LD H,D
         LD L,E
         RET
 SLNEW:
         LD A,(MAKE)
         OR A
         JP Z,STERR
+        PUSH DE
+        LD A,8
+        SUB B
+        LD L,A
+        LD H,0
+        LD DE,KINDS
+        ADD HL,DE
+        LD (SLOTK),HL
+        LD (HL),0
+        POP DE
         PUSH DE
         LD HL,(TXTPTR)
         LD B,7
@@ -643,9 +750,14 @@ SLC2:   LD A,0
         POP HL
         RET
 
-; The value of the word at HL: a number, or a name's value.
+; The value of the word at HL: a number, a name's value, or a quoted
+; text. A value's kind is left in RK (0 number, 1 text, 2 yes/no); a
+; text value is a pointer to a length byte in the arena.
 GETVAL:
         LD (TXTPTR),HL
+        LD A,(HL)
+        CP 34
+        JP Z,GVSTR
 GV1:    LD A,(HL)
         OR A
         JR Z,GVNUM
@@ -656,12 +768,17 @@ GV1:    LD A,(HL)
         INC HL
         JR GV1
 GVNUM:  LD HL,(TXTPTR)
-        JP PARSENUM
+        CALL PARSENUM
+        XOR A
+        LD (RK),A
+        RET
 GVNAME: LD HL,(TXTPTR)
-        LD A,(HL)
-        CP 34                 ; a quoted string is not in the guest's
-        JP Z,STERR            ; value model: refused, not read as a name
         CALL FINDNAME
+        PUSH HL
+        LD HL,(SLOTK)
+        LD A,(HL)
+        LD (RK),A
+        POP HL
         LD DE,8
         ADD HL,DE
         LD E,(HL)
@@ -669,6 +786,237 @@ GVNAME: LD HL,(TXTPTR)
         LD D,(HL)
         LD H,D
         LD L,E
+        RET
+GVSTR:
+        ; the word is "..." — the tokenizer kept its spaces and colons;
+        ; both quotes must be there, and the inside is copied into the
+        ; arena so a name can outlive the line it was read on
+        LD HL,(TXTPTR)
+        LD B,0
+        LD D,H
+        LD E,L
+GVSL:   LD A,(DE)
+        OR A
+        JR Z,GVSLE
+        INC DE
+        INC B
+        JR GVSL
+GVSLE:  LD A,B
+        CP 2
+        JP C,STERR
+        DEC DE
+        LD A,(DE)
+        CP 34
+        JP NZ,STERR
+        LD A,B
+        SUB 2
+        LD C,A
+        CALL STRALLOC
+        LD (VAL3),HL
+        INC HL
+        LD DE,(TXTPTR)
+        INC DE
+        LD A,C
+        OR A
+        JR Z,GVSEND
+        LD B,C
+GVSC:   LD A,(DE)
+        LD (HL),A
+        INC DE
+        INC HL
+        DJNZ GVSC
+GVSEND: LD HL,(VAL3)
+        LD A,1
+        LD (RK),A
+        RET
+
+; The node id in the word at HL. A text or yes/no is refused, as the
+; host's nodeOf refuses it; a number (and so a node id) is taken.
+NODEID:
+        CALL GETVAL
+        LD A,(RK)
+        OR A
+        JP NZ,STERR
+        RET
+
+; C = a text's length -> HL = its new home in the arena. The byte before
+; the text holds its length, and the arena's free pointer moves past it.
+; A full arena is a refusal, not an overwrite.
+STRALLOC:
+        LD HL,(STRPTR)
+        PUSH HL
+        LD E,C
+        LD D,0
+        ADD HL,DE
+        INC HL
+        LD DE,STREND
+        LD A,H
+        CP D
+        JR C,SA_OK
+        JR NZ,SA_FULL
+        LD A,L
+        CP E
+        JR C,SA_OK
+        JR Z,SA_OK
+SA_FULL:
+        POP HL
+        JP STERR
+SA_OK:  POP HL
+        PUSH HL
+        LD A,C
+        LD (HL),A
+        INC HL
+        LD E,C
+        LD D,0
+        ADD HL,DE
+        LD (STRPTR),HL
+        POP HL
+        RET
+
+; HL and DE are two text values -> HL is their concatenation.
+CONCAT:
+        LD (VAL),HL
+        LD (VAL2),DE
+        LD A,(HL)
+        LD C,A
+        LD A,(DE)
+        ADD A,C
+        JP C,STERR
+        LD C,A
+        CALL STRALLOC
+        LD (VAL3),HL
+        INC HL
+        LD DE,(VAL)
+        LD A,(DE)
+        LD B,A
+        OR A
+        JR Z,CC_RIGHT
+        INC DE
+CC_L:   LD A,(DE)
+        LD (HL),A
+        INC DE
+        INC HL
+        DJNZ CC_L
+CC_RIGHT:
+        LD DE,(VAL2)
+        LD A,(DE)
+        LD B,A
+        OR A
+        JR Z,CC_DONE
+        INC DE
+CC_R:   LD A,(DE)
+        LD (HL),A
+        INC DE
+        INC HL
+        DJNZ CC_R
+CC_DONE:
+        LD HL,(VAL3)
+        LD A,1
+        LD (RK),A
+        RET
+
+; HL and DE are two text values -> Z if exactly equal (`=` and `<>`).
+STREQ:
+        LD A,(DE)
+        LD B,A
+        CP (HL)
+        JR NZ,SEQ_N
+        INC HL
+        INC DE
+SEQ1:   LD A,B
+        OR A
+        JR Z,SEQ_Y
+        LD A,(DE)
+        CP (HL)
+        JR NZ,SEQ_N
+        INC HL
+        INC DE
+        DEC B
+        JR SEQ1
+SEQ_Y:  XOR A
+        RET
+SEQ_N:  LD A,1
+        OR A
+        RET
+
+; HL and DE are two text values -> Z equal, C HL < DE, case ignored
+; (`<`, `>`, `<=`, `>=` — the host's ordering).
+CMPSTRI:
+        LD A,(HL)
+        LD (TMP5),A
+        LD A,(DE)
+        LD (TMP6),A
+        INC HL
+        INC DE
+CS1:    LD A,(TMP5)
+        OR A
+        JR Z,CS_LEFTEND
+        LD A,(TMP6)
+        OR A
+        JR Z,CS_GREATER
+        LD A,(HL)
+        CALL TOLOWER
+        LD (TMP3),A
+        LD A,(DE)
+        CALL TOLOWER
+        LD (TMP4),A
+        LD A,(TMP4)
+        LD B,A
+        LD A,(TMP3)
+        CP B
+        JR C,CS_LESS
+        JR NZ,CS_GREATER
+        INC HL
+        INC DE
+        LD A,(TMP5)
+        DEC A
+        LD (TMP5),A
+        LD A,(TMP6)
+        DEC A
+        LD (TMP6),A
+        JR CS1
+CS_LEFTEND:
+        LD A,(TMP6)
+        OR A
+        JR Z,CS_EQUAL
+CS_LESS:
+        SCF
+        RET
+CS_GREATER:
+        LD A,1
+        OR A
+        RET
+CS_EQUAL:
+        XOR A
+        RET
+
+TOLOWER:
+        CP 'A'
+        RET C
+        CP 91
+        RET NC
+        ADD A,32
+        RET
+
+; A = kind, HL = value -> A = 1 if true, 0 if false. HL is left alone.
+; A text is true when it is not empty; a number or yes/no when it is
+; not zero — the host's `truthy`.
+TRUTHY:
+        CP 1
+        JR Z,TR_TEXT
+        LD A,H
+        OR L
+        JR Z,TR_FALSE
+        LD A,1
+        RET
+TR_TEXT:
+        LD A,(HL)
+        OR A
+        JR Z,TR_FALSE
+        LD A,1
+        RET
+TR_FALSE:
+        XOR A
         RET
 
 ; The decimal number at HL, in HL.
@@ -713,94 +1061,130 @@ PEEKW:
 PKE:    LD HL,MSGEMPTY
         RET
 
-; expr := term (('+'|'-') term)*
-EXPR:
-        CALL TERM
-        LD (ACC),HL
-EXL:    CALL PEEKW
-        LD A,(HL)
-        CP '+'
-        JR Z,EXOP
-        CP '-'
-        JR Z,EXOP
-        LD HL,(ACC)
-        RET
-EXOP:   LD (OP),A
-        LD A,(EXW)
-        INC A
-        LD (EXW),A
-        CALL TERM
-        LD (ACC2),HL
-        LD HL,(ACC)
-        LD DE,(ACC2)
-        LD A,(OP)
-        CP '+'
-        JR Z,EXADD
-        JR EXSUB
-EXADD:  ADD HL,DE
-        JR EXST
-EXSUB:  CALL SUB16
-EXST:   LD (ACC),HL
-        JR EXL
-
+; eval := or
+; or   := and ('or' and)*
+; and  := not ('and' not)*
+; not  := 'not' not | cmp
+; cmp  := add (('='|'<'|'>'|'<='|'>='|'<>') add)?
+; add  := term (('+'|'-') term)*
 ; term := primary (('*'|'/') primary)*
-TERM:
-        CALL PRIMARY
-        LD (TACC),HL
-TML:    CALL PEEKW
-        LD A,(HL)
-        CP '*'
-        JR Z,TMOP
-        CP '/'
-        JR Z,TMOP
-        LD HL,(TACC)
+; primary := a number | a "text" | a name
+;
+; A value is HL and a kind in RK: 0 number (a node id is one), 1 text
+; (HL points at a length byte), 2 yes/no (HL is 0 or 1). `and` and `or`
+; are eager, like the host's evaluator; `not` binds looser than a
+; comparison, so `not 1 = 1` is `not (1 = 1)`. Text ordering ignores
+; case, text equality does not, and two different kinds are unequal
+; rather than an error — the host's rules, inherited.
+EVAL:
+        CALL EOR
         RET
-TMOP:   LD (OP),A
-        LD A,(EXW)
-        INC A
-        LD (EXW),A
-        CALL PRIMARY
-        LD (TACC2),HL
-        LD HL,(TACC)
-        LD DE,(TACC2)
-        LD A,(OP)
-        CP '*'
-        JR NZ,TMDIV
-        CALL MUL16
-        JR TMST
-TMDIV:  CALL UDIV
-TMST:   LD (TACC),HL
-        JR TML
 
-; primary := a number | a name
-PRIMARY:
+EOR:
+        CALL EAND
+EO1:    PUSH HL
+        LD A,(RK)
+        PUSH AF
         CALL PEEKW
-        LD A,(HL)
+        LD DE,MSGOR
+        CALL ISWORD
         OR A
-        JP Z,STERR
-        CALL GETVAL
+        JR NZ,EO_NOMORE
         LD A,(EXW)
         INC A
         LD (EXW),A
+        POP AF
+        POP HL
+        CALL TRUTHY
+        PUSH AF
+        CALL EAND
+        LD A,(RK)
+        CALL TRUTHY
+        LD B,A
+        POP AF
+        OR B
+        LD HL,0
+        JR Z,EO_ST
+        LD HL,1
+EO_ST:  LD A,2
+        LD (RK),A
+        JR EO1
+EO_NOMORE:
+        POP AF
+        POP HL
+        LD (RK),A
         RET
 
-; ---- the conditions ----------------------------------------------------
-;
-; cond := add (('='|'<'|'>'|'<='|'>='|'<>') add)?
-;
-; A comparison is *one* comparison, and the operator is a word of its
-; own — the guest's word-shaped rule. `and` and `or` are not here: a
-; condition that used one leaves a word unconsumed, and the caller
-; refuses rather than guessing. A bare value is true when it is not
-; zero, which is the host's `truthy`.
-COND:
-        ; a condition starts at the word after its statement; both
-        ; callers (`if` and `while`) want exactly that, so it is set here
-        LD A,(STMT)
+EAND:
+        CALL CNOT
+EA1:    PUSH HL
+        LD A,(RK)
+        PUSH AF
+        CALL PEEKW
+        LD DE,MSGAND
+        CALL ISWORD
+        OR A
+        JR NZ,EA_NOMORE
+        LD A,(EXW)
         INC A
         LD (EXW),A
+        POP AF
+        POP HL
+        CALL TRUTHY
+        PUSH AF
+        CALL CNOT
+        LD A,(RK)
+        CALL TRUTHY
+        LD B,A
+        POP AF
+        AND B
+        LD HL,0
+        JR Z,EA_ST
+        LD HL,1
+EA_ST:  LD A,2
+        LD (RK),A
+        JR EA1
+EA_NOMORE:
+        POP AF
+        POP HL
+        LD (RK),A
+        RET
+
+CNOT:
+        PUSH HL
+        LD A,(RK)
+        PUSH AF
+        CALL PEEKW
+        LD DE,MSGNOT
+        CALL ISWORD
+        OR A
+        JR NZ,CN_NOMORE
+        LD A,(EXW)
+        INC A
+        LD (EXW),A
+        POP AF
+        POP HL
+        CALL CNOT
+        LD A,(RK)
+        CALL TRUTHY
+        XOR 1
+        LD L,A
+        LD H,0
+        LD A,2
+        LD (RK),A
+        RET
+CN_NOMORE:
+        POP AF
+        POP HL
+        LD (RK),A
+        CALL CCMP
+        RET
+
+CCMP:
         CALL EXPR
-        LD (VAL),HL
+        PUSH HL
+        LD A,(RK)
+        PUSH AF
         CALL PEEKW
         LD A,(HL)
         CP '='
@@ -809,12 +1193,11 @@ COND:
         JR Z,CD_LT
         CP '>'
         JR Z,CD_GT
-        ; no operator: the value itself is the condition
-        LD HL,(VAL)
-        LD A,H
-        OR L
-        JP Z,CD_FALSE
-        JP CD_TRUE
+        ; no operator: the value itself is the comparison's answer
+        POP AF
+        POP HL
+        LD (RK),A
+        RET
 CD_EQ:  LD A,'='
         JR CD_OP
 CD_LT:  INC HL
@@ -842,43 +1225,288 @@ CD_OP:  LD (COPE),A
         LD (EXW),A
         CALL EXPR
         LD (VAL2),HL
+        LD A,(RK)
+        LD (VAL2K),A
+        POP AF
+        POP HL
+        LD (VAL),HL
+        LD (VALK),A
+        LD A,(VALK)
+        OR A
+        JR Z,CC_NUM
+        CP 1
+        JR Z,CC_TEXT
+        ; a yes/no: only = and <> order nothing
+        JR CC_BOOL
+CC_NUM:
+        LD A,(VAL2K)
+        OR A
+        JR Z,CC_NN
+        JP CC_DIFF
+CC_TEXT:
+        LD A,(VAL2K)
+        CP 1
+        JP Z,CC_TT
+        JP CC_DIFF
+CC_BOOL:
+        LD A,(VAL2K)
+        CP 2
+        JP Z,CC_BB
+        JP CC_DIFF
+CC_DIFF:
+        LD A,(COPE)
+        CP '='
+        JP Z,CC_FALSE
+        CP 'n'
+        JP Z,CC_TRUE
+        JP STERR
+CC_NN:
         LD HL,(VAL)
         LD DE,(VAL2)
         LD A,(COPE)
         CP '='
-        JR Z,CD_C_EQ
+        JR Z,CCN_EQ
         CP 'n'
-        JR Z,CD_C_NE
+        JR Z,CCN_NE
         CP '<'
-        JR Z,CD_C_LT
+        JR Z,CCN_LT
         CP 'l'
-        JR Z,CD_C_LE
+        JR Z,CCN_LE
         CP '>'
-        JR Z,CD_C_GT
-        ; 'g'
+        JR Z,CCN_GT
         CALL CMPHLDE
-        JR C,CD_FALSE
-        JR CD_TRUE
-CD_C_LT: CALL CMPHLDE
-        JR C,CD_TRUE
-        JR CD_FALSE
-CD_C_GT: CALL CMPHLDE
-        JR Z,CD_FALSE
-        JR C,CD_FALSE
-        JR CD_TRUE
-CD_C_EQ: CALL CMPHLDE
-        JR Z,CD_TRUE
-        JR CD_FALSE
-CD_C_NE: CALL CMPHLDE
-        JR NZ,CD_TRUE
-        JR CD_FALSE
-CD_C_LE: CALL CMPHLDE
-        JR Z,CD_TRUE
-        JR C,CD_TRUE
-        JR CD_FALSE
-CD_TRUE: LD HL,1
+        JP C,CC_FALSE
+        JP CC_TRUE
+CCN_LT: CALL CMPHLDE
+        JP C,CC_TRUE
+        JP CC_FALSE
+CCN_GT: CALL CMPHLDE
+        JP Z,CC_FALSE
+        JP C,CC_FALSE
+        JP CC_TRUE
+CCN_EQ: CALL CMPHLDE
+        JP Z,CC_TRUE
+        JP CC_FALSE
+CCN_NE: CALL CMPHLDE
+        JP NZ,CC_TRUE
+        JP CC_FALSE
+CCN_LE: CALL CMPHLDE
+        JP Z,CC_TRUE
+        JP C,CC_TRUE
+        JP CC_FALSE
+CC_TT:
+        LD HL,(VAL)
+        LD DE,(VAL2)
+        LD A,(COPE)
+        CP '='
+        JR Z,CCT_EQ
+        CP 'n'
+        JR Z,CCT_NE
+        CALL CMPSTRI
+        PUSH AF
+        LD A,(COPE)
+        CP '<'
+        JR Z,CCT_LT
+        CP 'l'
+        JR Z,CCT_LE
+        CP '>'
+        JR Z,CCT_GT
+        ; 'g'
+        POP AF
+        JP C,CC_FALSE
+        JP CC_TRUE
+CCT_LT: POP AF
+        JP C,CC_TRUE
+        JP CC_FALSE
+CCT_GT: POP AF
+        JP C,CC_FALSE
+        JP Z,CC_FALSE
+        JP CC_TRUE
+CCT_LE: POP AF
+        JP C,CC_TRUE
+        JP Z,CC_TRUE
+        JP CC_FALSE
+CCT_EQ: CALL STREQ
+        JP Z,CC_TRUE
+        JP CC_FALSE
+CCT_NE: CALL STREQ
+        JP NZ,CC_TRUE
+        JP CC_FALSE
+CC_BB:
+        LD A,(COPE)
+        CP '='
+        JR Z,CCB_EQ
+        CP 'n'
+        JR Z,CCB_NE
+        JP STERR
+CCB_EQ: LD HL,(VAL)
+        LD DE,(VAL2)
+        CALL CMPHLDE
+        JP Z,CC_TRUE
+        JP CC_FALSE
+CCB_NE: LD HL,(VAL)
+        LD DE,(VAL2)
+        CALL CMPHLDE
+        JP NZ,CC_TRUE
+        JP CC_FALSE
+CC_TRUE: LD HL,1
+        LD A,2
+        LD (RK),A
         RET
-CD_FALSE: LD HL,0
+CC_FALSE: LD HL,0
+        LD A,2
+        LD (RK),A
+        RET
+
+; A condition is a value, true by the host's `truthy`; answers 0 or 1
+; in HL, so the existing `LD A,H : OR L` callers keep their test.
+COND:
+        LD A,(STMT)
+        INC A
+        LD (EXW),A
+        CALL EVAL
+        LD A,(RK)
+        CALL TRUTHY
+        LD L,A
+        LD H,0
+        RET
+
+; Store the value in HL and its kind in RK into the slot for the name
+; word at A. The slot's value field is eight bytes in; its kind is at
+; SLOTK, the parallel byte SLOT/FINDNAME found.
+STOREVAL:
+        CALL WORDAI
+        CALL SLOT
+        PUSH HL
+        LD DE,8
+        ADD HL,DE
+        LD DE,(VAL)
+        LD (HL),E
+        INC HL
+        LD (HL),D
+        POP HL
+        LD HL,(SLOTK)
+        LD A,(RK)
+        LD (HL),A
+        RET
+
+EXPR:
+        CALL TERM
+        LD (ACC),HL
+        LD A,(RK)
+        LD (ACK),A
+EXL:    CALL PEEKW
+        LD A,(HL)
+        CP '+'
+        JR Z,EXOP
+        CP '-'
+        JR Z,EXOP
+        LD HL,(ACC)
+        LD A,(ACK)
+        LD (RK),A
+        RET
+EXOP:   LD (OP),A
+        LD A,(EXW)
+        INC A
+        LD (EXW),A
+        CALL TERM
+        LD (ACC2),HL
+        LD A,(RK)
+        LD (TACK2),A
+        LD A,(OP)
+        CP '+'
+        JR Z,EXADD
+        LD A,(ACK)
+        OR A
+        JP NZ,STERR
+        LD A,(TACK2)
+        OR A
+        JP NZ,STERR
+        LD HL,(ACC)
+        LD DE,(ACC2)
+        CALL SUB16
+        XOR A
+        LD (RK),A
+        JR EXST
+EXADD:  LD A,(ACK)
+        CP 1
+        JR Z,EX_LEFTSTR
+        LD A,(TACK2)
+        CP 1
+        JP Z,STERR
+        LD A,(ACK)
+        OR A
+        JP NZ,STERR
+        LD A,(TACK2)
+        OR A
+        JP NZ,STERR
+        LD HL,(ACC)
+        LD DE,(ACC2)
+        ADD HL,DE
+        XOR A
+        LD (RK),A
+        JR EXST
+EX_LEFTSTR:
+        LD A,(TACK2)
+        CP 1
+        JP NZ,STERR
+        LD HL,(ACC)
+        LD DE,(ACC2)
+        CALL CONCAT
+EXST:   LD (ACC),HL
+        LD A,(RK)
+        LD (ACK),A
+        JP EXL
+
+TERM:
+        CALL PRIMARY
+        LD (TACC),HL
+        LD A,(RK)
+        LD (TACK),A
+TML:    CALL PEEKW
+        LD A,(HL)
+        CP '*'
+        JR Z,TMOP
+        CP '/'
+        JR Z,TMOP
+        LD HL,(TACC)
+        LD A,(TACK)
+        LD (RK),A
+        RET
+TMOP:   LD (OP),A
+        LD A,(EXW)
+        INC A
+        LD (EXW),A
+        CALL PRIMARY
+        LD (TACC2),HL
+        LD A,(RK)
+        OR A
+        JP NZ,STERR
+        LD A,(TACK)
+        OR A
+        JP NZ,STERR
+        LD HL,(TACC)
+        LD DE,(TACC2)
+        LD A,(OP)
+        CP '*'
+        JR NZ,TMDIV
+        CALL MUL16
+        JR TMST
+TMDIV:  CALL UDIV
+TMST:   XOR A
+        LD (RK),A
+        LD (TACC),HL
+        JR TML
+
+PRIMARY:
+        CALL PEEKW
+        LD A,(HL)
+        OR A
+        JP Z,STERR
+        CALL GETVAL
+        LD A,(EXW)
+        INC A
+        LD (EXW),A
         RET
 
 ; ---- the statements ----------------------------------------------------
@@ -1162,7 +1790,7 @@ STLET:
         LD (NAMEI),A
         ADD A,2
         LD (EXW),A
-        CALL EXPR
+        CALL EVAL
         LD (VAL),HL
         LD A,(EXW)
         LD B,A
@@ -1170,14 +1798,7 @@ STLET:
         CP B
         JP NZ,STERR
         LD A,(NAMEI)
-        CALL WORDAI
-        CALL SLOT
-        LD DE,8
-        ADD HL,DE
-        LD DE,(VAL)
-        LD (HL),E
-        INC HL
-        LD (HL),D
+        CALL STOREVAL
         RET
 
 ; ---- <name> = <expr> ---------------------------------------------------
@@ -1194,7 +1815,7 @@ STASSIGN:
         LD A,(STMT)
         ADD A,2
         LD (EXW),A
-        CALL EXPR
+        CALL EVAL
         LD (VAL),HL
         LD A,(EXW)
         LD B,A
@@ -1202,14 +1823,7 @@ STASSIGN:
         CP B
         JP NZ,STERR
         LD A,(NAMEI)
-        CALL WORDAI
-        CALL SLOT
-        LD DE,8
-        ADD HL,DE
-        LD DE,(VAL)
-        LD (HL),E
-        INC HL
-        LD (HL),D
+        CALL STOREVAL
         RET
 
 ; ---- print [<expr>] ----------------------------------------------------
@@ -1222,16 +1836,39 @@ STPRINT:
         JR Z,PRCUR
         LD A,B
         LD (EXW),A
-        CALL EXPR
+        CALL EVAL
         LD (VAL),HL
+        LD A,(RK)
+        LD (VALK),A
         LD A,(EXW)
         LD B,A
         LD A,(SEND)
         CP B
         JP NZ,STERR
+        LD A,(VALK)
+        CP 1
+        JR Z,PR_TEXT
+        CP 2
+        JR Z,PR_BOOL
         LD HL,(VAL)
         CALL PNUMU
-        LD A,CR
+        JR PR_NL
+PR_TEXT:
+        LD HL,(VAL)
+        CALL PRSLEN
+        JR PR_NL
+PR_BOOL:
+        LD HL,(VAL)
+        LD A,H
+        OR L
+        JR Z,PR_FALSE
+        LD HL,MSGTRUE
+        JR PR_WORD
+PR_FALSE:
+        LD HL,MSGFALSE
+PR_WORD:
+        CALL PRSTR
+PR_NL:  LD A,CR
         OUT (1),A
         RET
 PRCUR:
@@ -1271,7 +1908,7 @@ STSHOW:
         LD A,(STMT)
         INC A
         CALL WORDAI
-        CALL GETVAL
+        CALL NODEID
         LD (VAL),HL
         CALL PNUMU
         ; the label and the properties
@@ -1388,7 +2025,7 @@ GO_NB:
         JP Z,STERR
         LD A,B
         CALL WORDAI
-        CALL GETVAL
+        CALL NODEID
         LD (VAL),HL
         LD A,(GW)
         ADD A,2
@@ -1485,12 +2122,12 @@ STLINK:
         LD A,(STMT)
         INC A
         CALL WORDAI
-        CALL GETVAL
+        CALL NODEID
         LD (VAL),HL
         LD A,(STMT)
         ADD A,3
         CALL WORDAI
-        CALL GETVAL
+        CALL NODEID
         LD (VAL2),HL
         LD HL,MSGLINKQ
         CALL SENDPART
@@ -1551,8 +2188,10 @@ SE_PLAIN:
         LD (GW),A
 SE_GO:  LD A,(GW)
         LD (EXW),A
-        CALL EXPR
+        CALL EVAL
         LD (VAL),HL
+        LD A,(RK)
+        LD (VALK),A
         LD A,(EXW)
         LD B,A
         LD A,(SEND)
@@ -1561,7 +2200,7 @@ SE_GO:  LD A,(GW)
         LD A,(STMT)
         INC A
         CALL WORDAI
-        CALL GETVAL
+        CALL NODEID
         LD (VAL2),HL
         LD HL,MSGSETQ
         CALL SENDPART
@@ -1581,8 +2220,22 @@ SE_GO:  LD A,(GW)
         OUT (3),A
         LD HL,MSGV0
         CALL SENDPART
+        LD A,(VALK)
+        CP 1
+        JR Z,SE_TEXT
+        CP 2
+        JR Z,SE_BOOL
         LD HL,(VAL)
         CALL SENDNUM
+        JR SE_SENT
+SE_TEXT:
+        LD HL,(VAL)
+        CALL SENDQT
+        JR SE_SENT
+SE_BOOL:
+        LD HL,(VAL)
+        CALL SENDBOOL
+SE_SENT:
         LD A,CR
         OUT (3),A
         CALL READANS
@@ -1605,7 +2258,7 @@ STDROP:
         LD A,(STMT)
         INC A
         CALL WORDAI
-        CALL GETVAL
+        CALL NODEID
         LD (VAL),HL
         LD HL,MSGDROPQ
         CALL SENDPART
@@ -1824,7 +2477,10 @@ STFOR:
         LD A,(STMT)
         ADD A,3
         LD (EXW),A
-        CALL EXPR
+        CALL EVAL
+        LD A,(RK)
+        OR A
+        JP NZ,STERR
         LD (VAL),HL
         LD A,(EXW)
         LD B,A
@@ -1840,7 +2496,10 @@ STFOR:
         LD A,(EXW)
         INC A
         LD (EXW),A
-        CALL EXPR
+        CALL EVAL
+        LD A,(RK)
+        OR A
+        JP NZ,STERR
         LD (VAL2),HL
         LD A,(EXW)
         LD B,A
@@ -1908,6 +2567,9 @@ FL_CHECK:
         LD (HL),E
         INC HL
         LD (HL),D
+        LD HL,(SLOTK)
+        XOR A
+        LD (HL),A
         CALL RUNBODY
         ; v = v + 1
         LD HL,FCUR
@@ -1991,6 +2653,9 @@ FE_TOP:
         LD (HL),E
         INC HL
         LD (HL),D
+        LD HL,(SLOTK)
+        XOR A
+        LD (HL),A
         CALL RUNBODY
         JR FE_TOP
 FE_DONE:
@@ -2271,5 +2936,10 @@ MSGCOLON:  DB " :", 0
 MSGINDENT: DB "  ", 0
 MSGNODES:  DB "nodes", 0
 MSGCURSOREMPTY: DB "the cursor is empty", 0
+MSGOR:     DB "or", 0
+MSGAND:    DB "and", 0
+MSGNOT:    DB "not", 0
+MSGTRUE:   DB "true", 0
+MSGFALSE:  DB "false", 0
 MSGERR:    DB "?", 0
 MSGEMPTY:  DB 0

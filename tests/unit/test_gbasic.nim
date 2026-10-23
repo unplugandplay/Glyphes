@@ -358,6 +358,15 @@ suite "GLYPH BASIC — the guest channel":
     check answer == "1"
     close(db)
 
+  test "a yes/no travels as a parameter too":
+    ## The guest's `set` has three value kinds to carry; the channel's
+    ## parser knows numbers, quoted text and `true`/`false`.
+    let db = freshDb()
+    check channelAnswer(db, "exec set $n name = $v0\tn=1\tv0=true") == "1"
+    let props = channelAnswer(db, "props 1")
+    check "name true" in props
+    close(db)
+
 
 suite "GLYPH BASIC — the program":
 
@@ -491,6 +500,18 @@ suite "GLYPH BASIC — the values":
     ## Two strings do concatenate.
     discard s.runStatement(t, "let d = a + b")
     check s.names["d"].text == "Ada Lovelace"
+    close(db)
+
+  test "two yes/no values compare by their flags":
+    ## `=` had no bool/bool arm, so `true = true` was false. Same kinds
+    ## compare by their own field, as every other pair does.
+    let db = freshDb()
+    let text = run(db, ["let t = 1 = 1",
+                        "let f = 1 = 2",
+                        "print t = t",
+                        "print t = f",
+                        "print t <> f"])
+    check text == "true\nfalse\ntrue\n"
     close(db)
 
 

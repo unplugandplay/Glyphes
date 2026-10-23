@@ -444,6 +444,31 @@ const
     "count Person",
     "drop p",
     "count Person",
+    "let t = \"Ada\"",
+    "print t",
+    "let i = t + \" Lovelace\"",
+    "print i",
+    "print \"a:b\"",
+    "if t = \"Ada\" then print 20",
+    "if t <> \"Bob\" then print 21",
+    "if t < \"b\" then print 22",
+    "if \"\" then print 23",
+    "let w = 1 = 1",
+    "print w",
+    "if w then print 24",
+    "let j = 1 = 2",
+    "print w = w",
+    "print w = j",
+    "print w <> j",
+    "print not 0",
+    "print 1 and 0",
+    "print 1 or 0",
+    "print 1 or 0 and 0",
+    "print not 1 = 1",
+    "print 1 = 1",
+    "print 1 = 2",
+    "print \"1\" = 1",
+    "print \"1\" <> 1",
     "end"
   ]
 
@@ -508,24 +533,54 @@ suite "GLYPH BASIC — the guest and the host client":
     check host.len > 0
     close(guestDb)
 
+  test "a text and a yes/no reach the store":
+    ## `set` carries all three kinds across the channel: a number as a
+    ## number, a text as a quoted parameter, a yes/no as `true` or
+    ## `false`. The host client's own `set` takes the same three.
+    let hostDb = guestFixture()
+    let host = hostTranscript(hostDb, [
+      "let b = 1 = 1",
+      "find Person",
+      "for each p : set p name = \"Zoe Smith\" : next",
+      "for each p : show p : next",
+      "for each p : set p flag = b : next",
+      "for each p : show p : next",
+      "end"
+    ])
+    close(hostDb)
+    let guestDb = guestFixture()
+    let guest = guestTranscript(guestDb, [
+      "let b = 1 = 1",
+      "find Person",
+      "for each p : set p name = \"Zoe Smith\" : next",
+      "for each p : show p : next",
+      "for each p : set p flag = b : next",
+      "for each p : show p : next",
+      "end"
+    ])
+    check guest == host
+    check "name Zoe Smith" in guest
+    check "flag true" in guest
+    close(guestDb)
+
   test "the guest is small":
     ## The measuring instrument: the language, in Z80 assembly, in
     ## bytes. The mark was 3 KB for the first half (E3–E5); the writes
-    ## took the guest past it, so the published mark moved to 4 KB —
-    ## deliberately, and the plan records it. The conditional landed at
-    ## 3,956 and `while` at 4,087, both inside the mark. The remaining
-    ## half (text, `input`, the program model) will move it again.
+    ## took the guest past it, so the published mark moved to 4 KB, then
+    ## the value model (text, yes/no, `and`/`or`/`not`) took it past
+    ## that. The published mark is 6 KB now — deliberately, and the
+    ## plan records it.
     let here = currentSourcePath().parentDir.parentDir
     let bin = readFile(here / "gbasic.bin")
-    check bin.len < 4096
+    check bin.len < 6144
 
   test "what the guest does not have, it refuses":
     ## The other half of the gate: the guest must not half-run. An
     ## unknown statement, a known one with words it cannot read, the
-    ## `step` it has no arithmetic for, a condition with `and` (not in
-    ## its grammar), an `if` with no body, a `while` with no condition,
-    ## a `while` with an empty body, a `while` inside a body (line-level
-    ## only), a quoted string it has no value for, a write with no
+    ## `step` it has no arithmetic for, an `if` with no body, a `while`
+    ## with no condition, a `while` with an empty body, a `while` inside
+    ## a body (line-level only), an unterminated string, a text added to
+    ## a number, a text where a node id belongs, a write with no
     ## argument, and a write the *host* refuses all print `?` and
     ## abandon the line — nothing before the refusal is printed, and the
     ## body of the refused `for` never runs.
@@ -534,9 +589,10 @@ suite "GLYPH BASIC — the guest and the host client":
       "if 1",
       "print 1 2",
       "for i = 1 to 3 step 2 : print i : next",
-      "if 1 and 1 then print 1",
       "if 1 then",
-      "print \"Cid\"",
+      "print \"Cid",
+      "print \"a\" + 1",
+      "show \"x\"",
       "add",
       "add 123",
       "while : print 1",
@@ -544,6 +600,6 @@ suite "GLYPH BASIC — the guest and the host client":
       "for i = 1 to 2 : while 1 : print 1 : next",
       "end"
     ])
-    check guest == "?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n"
+    check guest == "?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n?\n"
     close(db)
 

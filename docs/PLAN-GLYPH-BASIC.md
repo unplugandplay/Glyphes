@@ -145,6 +145,7 @@ The second implementation, and the reason pin GB9 exists. Its plan:
 | **E6** | the writes | `add`, `link`, `set`, `drop` and `rem` — the channel's `exec` and `link` verbs, and the mark moves to 4 KB ✓ |
 | **E7** | the conditional | comparisons (`= < > <= >= <>`) and `if … then`, with the host's line-level-versus-piece body rule ✓ |
 | **E8** | the unbounded loop | `while … : … [next]`, line-level like the host's, with the after-`next` statement and the guest's 16-bit round guard ✓ |
+| **E9** | the values | quoted text and yes/no: a kind byte per name, a 1 KB text arena, text `+` and the host's case rules, `and`/`or`/`not`, and the mark moves to 6 KB ✓ |
 
 **What E1 and E2 are, as shipped.** The channel is three ports: the
 guest writes a request to port 3 and ends it with CR; the host answers;
@@ -156,7 +157,7 @@ byte as part of this one.
 
 The host's end is `src/gbasic_channel.nim`, and its vocabulary is
 deliberately small — the guest has to *parse* the answers, and a guest
-that parses JSON is a guest that needs a JSON parser in 4 KB of
+that parses JSON is a guest that needs a JSON parser in 6 KB of
 assembly:
 
 | request | answer |
@@ -181,8 +182,8 @@ expression and the 16-bit `while` guard).
 Cypher compiler, and the host compiles ✓ (which is the point ✓: the
 language is small enough to *send*, and the engine's is not).
 
-**What E3–E8 are, as shipped.** The guest is `ez80/gbasic.z80` —
-GLYPH BASIC in Z80 assembly, 4,087 bytes for the grammar it covers. It
+**What E3–E9 are, as shipped.** The guest is `ez80/gbasic.z80` —
+GLYPH BASIC in Z80 assembly, 5,230 bytes for the grammar it covers. It
 reads a line, splits it into words and statements, runs them, and sends
 a GLYPH QUERY line over the channel for the graph work; the answer comes
 back and it prints what the host client prints.
@@ -190,10 +191,10 @@ back and it prints what the host client prints.
 The statements it covers are `find`, `count`, `labels`, `end`, `rem`,
 `let` and the bare assignment, `print`, `show`, `go`, `if … then`,
 `while … : … [next]`, `for`, `for each`, and the writes `add`, `link`,
-`set` and `drop`; the expressions are `+ - * /` and the comparisons
-`= < > <= >= <>` over numbers and names. That is the grammar the prompt
-sketch writes — the client's *own* half, as opposed to the graph work
-the host does.
+`set` and `drop`; the expressions are `+ - * /`, `and`/`or`/`not` and
+the comparisons `= < > <= >= <>` over numbers, quoted text and yes/no
+values. That is the grammar the prompt sketch writes — the client's
+*own* half, as opposed to the graph work the host does.
 
 The writes needed no new channel vocabulary: `add` forwards its
 property list as the host forwards it (`gq add Company {name "Cid"}`,
@@ -219,17 +220,31 @@ refusal rather than a second grammar. The round guard is 16 bits (the
 guest's register width) rather than the host's million; the transcript
 reaches neither.
 
-What the guest cannot evaluate it does not pretend to: a quoted string
-in a value position is refused by `?`, an `and`/`or`/`not` leaves a
-word unconsumed (so the condition is refused, not half-read), and an
-answer the host refuses (`!`) is a refusal the guest prints in its own
-one word.
+The value model is E9's, and it is the host's rather than a simpler
+one: each name slot has a kind byte beside its 16-bit value (0 number,
+1 text, 2 yes/no), and each expression result carries the same kind in
+`RK`. A quoted word is copied into a 1 KB arena (a length byte, then
+its bytes) so a name can outlive the line it was read on; `+` is text
+concatenation when both sides are text and arithmetic when both are
+numbers, mixed kinds are refused for arithmetic and unequal for
+equality, text ordering ignores case while text equality does not, and
+a text is false only when empty. `and` and `or` are eager, as the
+host's evaluator is; `not` binds looser than a comparison. A full arena
+is a refusal (`?`), never a silent overwrite.
+
+What the guest cannot do it does not pretend to: `input`, `gosub` and
+`return` are not implemented and are refused by `?`, an unknown name is
+refused rather than created, and an answer the host refuses (`!`) is a
+refusal the guest prints in its own one word. A quoted string that is
+unterminated, a text used as a node id, and a text added to a number are
+all refused rather than half-read.
 
 Three things make it the client rather than a remote control, and all
 three are E5's:
 
 - **the name table** — eight names of seven characters, each with a
-  16-bit value; a number in an expression may be a literal or a name;
+  16-bit value and a kind; a number in an expression may be a literal or
+  a name;
 - **the statement table** — the line is tokenized once, and a statement
   is a *range of words* (`STARTS`); the loop body is therefore a range,
   and re-running the body is re-running the range, with no re-scan and
@@ -241,29 +256,30 @@ three are E5's:
 What the guest still does not have is in PRD §6, and it is *refused*
 rather than ignored: an unknown statement prints `?` and abandons the
 line; a statement with trailing words the guest does not understand is
-refused rather than half-run; a quoted string is refused rather than
-read as a name with a zero in it; `and`, `or` and `not` are not in the
-condition grammar and a condition that uses one is refused; an
-expression is word-shaped (`1 + 2`, not `1+2`), because the guest
+refused rather than half-run; `input`, `gosub` and `return` are refused;
+an expression is word-shaped (`1 + 2`, not `1+2`), because the guest
 tokenizes into words and has no character-by-character parser. The
 refusal vocabulary is the guest's one-word `?` — the host's messages are
 longer, and that is a documented divergence, not an accident. The
 `while` guard is the guest's 16-bit register: it stops after 65,535
 rounds where the host stops after a million. The number differs because
 the register does; the promise — a runaway loop is refused, not hung —
-is the same.
+is the same. The text arena is finite in the same honest way: a program
+that makes text faster than it forgets it is refused, not corrupted.
 
 The transcript gate's script covers exactly this cut: `let` and the
-bare assignment, `print` of a name and of an expression, `find` and
-`print` of the cursor, `for each` walking the cursor with `show`, `go
-... from` a name, `count`, `labels`, the counting loop, every comparison
-operator, `if` at the line level and inside a body (including the
-nested-if piece rule), `while` with a body, a `next`, statements after
-the `next`, and a `for` inside its body, and the writes (`add` and its
-cursor, `link`, `set`, `drop`) with a `rem` in front of them. The
-strings, `input`, `gosub`/`return` and the program model are not in it,
-and the guest says so by refusing them — a gate that claims more than it
-checks is a gate that rots.
+bare assignment, `print` of a name, an expression, a text and a yes/no,
+`find` and `print` of the cursor, `for each` walking the cursor with
+`show`, `go ... from` a name, `count`, `labels`, the counting loop,
+every comparison operator, text equality and case-insensitive ordering,
+empty-text truthiness, `and`/`or`/`not` with their precedence, a yes/no
+compared with itself, `if` at the line level and inside a body
+(including the nested-if piece rule), `while` with a body, a `next`,
+statements after the `next`, and a `for` inside its body, and the writes
+(`add` and its cursor, `link`, `set` with a number, a text and a yes/no,
+`drop`) with a `rem` in front of them. `input`, `gosub`/`return` and the
+program model are not in it, and the guest says so by refusing them — a
+gate that claims more than it checks is a gate that rots.
 
 **E4 is the gate, and it is a byte-for-byte comparison**: the same
 script runs on the host client and on the guest, and the two transcripts
@@ -285,15 +301,14 @@ rules rather than the guest's:
 (the names, the expressions, `show`, `go`, both loops) fitted in 3 KB;
 the writes took the guest past it, so the published mark moved to 4 KB —
 deliberately, with the number in the plan and the ceiling in the test.
-The conditional then landed at 3,956 bytes, and `while` at 4,087 — both
-inside the new mark, because the body's `BOUNDS`→`STMT`/`SEND` sequence
-was already written three times and became one helper. The remaining
-half will move the mark again when it lands, and each move is a
-measurement, not a silent drift: a mark that never moves is a mark
-nobody measured. The point of the instrument stands — if the grammar
-cannot be written twice, it is too big, and the host client has taught
-us that by being too big. That is the honest use of the guest: not a
-production path, a *measuring instrument* ✓.
+The conditional then landed at 3,956 bytes, and `while` at 4,087. The
+value model (text, yes/no, `and`/`or`/`not`) took the guest past 4 KB, so
+the mark moved again to 6 KB, and the cut landed at 5,230 bytes. Each
+move is a measurement, not a silent drift: a mark that never moves is a
+mark nobody measured. The point of the instrument stands — if the
+grammar cannot be written twice, it is too big, and the host client has
+taught us that by being too big. That is the honest use of the guest:
+not a production path, a *measuring instrument* ✓.
 
 ## 7. The tests
 

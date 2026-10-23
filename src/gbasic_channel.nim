@@ -63,6 +63,12 @@ proc parseParamField(field: string; params: var Table[string, Value]) =
   if text.len >= 2 and text[0] == '"' and text[^1] == '"':
     params[name] = Value(kind: vkString, s: text[1 .. ^2])
     return
+  if text == "true":
+    params[name] = Value(kind: vkBool, b: true)
+    return
+  if text == "false":
+    params[name] = Value(kind: vkBool, b: false)
+    return
   var n: int64 = 0
   var ok = text.len > 0
   for ch in text:

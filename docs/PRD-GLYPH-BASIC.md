@@ -255,15 +255,14 @@ client is what a real user types.
 
 ## 6. What is out of scope
 
-- **Strings as first-class values — on the guest.** The *host* has
-  them: a name can hold text, the evaluator compares it and `+`
-  concatenates it, and a string and a number are refused by name. The
-  *guest* has no string type at all (its variables are numeric), so
-  the guest's language is a strict subset of the host's. Giving it a
-  string type — a pointer, a length and a copy, on a machine with
-  24-bit registers — is the guest's largest single piece of work. The
-  transcript gate (GB-F) measures the subset the guest has; it cannot
-  measure a string the guest does not have.
+- **Unbounded text on the guest.** Text is a first-class value on both
+  sides now: a name can hold it, `+` concatenates it, the comparisons
+  have the host's case rules, and a text and a number are not equal.
+  The guest copies text into a fixed 1 KB arena (a length byte and the
+  bytes); a program that makes text faster than it forgets it is
+  refused with `?` rather than allowed to overwrite a name. That bound
+  is the machine's, not the language's, and it is stated where the
+  guest is.
 - **Functions and procedures.** `gosub` is enough for a first language,
   and a call stack in the guest is a lot of memory. The host version may
   add `def`.
@@ -272,14 +271,13 @@ client is what a real user types.
   *lines that follow* is not, and needs the indentation or the
   `END-IF` convention that the one-line bodies avoid.
 - **The eZ80 guest's remaining half.** The guest now has the names,
-  the expressions (arithmetic and the comparison operators), `show`,
-  `go`, the three loops (`for`, `for each`, `while`), `if … then` with
-  the host's line/piece body rule, and the writes `add`, `link`, `set`
-  and `drop`; its transcript matches the host client's byte for byte on
-  the script that covers them (GB-F). Still missing, and refused by name
-  rather than ignored: quoted text (a string in a value position),
-  `input`, `gosub`/`return` and the program model, and the boolean
-  operators `and`/`or`/`not` in a condition. A write the *host* refuses
+  the expressions (arithmetic, text and the comparison operators),
+  `and`/`or`/`not`, `show`, `go`, the three loops (`for`, `for each`,
+  `while`), `if … then` with the host's line/piece body rule, and the
+  writes `add`, `link`, `set` and `drop`; its transcript matches the
+  host client's byte for byte on the script that covers them (GB-F).
+  Still missing, and refused by name rather than ignored: `input`,
+  `gosub`/`return` and the program model. A write the *host* refuses
   (`!`) prints the guest's one-word `?`, because that is its whole
   refusal vocabulary. Its expressions are word-shaped (`1 + 2`, not
   `1+2`) and its numbers are 16-bit, so its `while` guard stops at 65,535
