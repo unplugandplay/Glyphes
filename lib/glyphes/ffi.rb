@@ -274,6 +274,8 @@ module Glyphes
     # The one write GLYPH QUERY cannot express: two existing nodes, one
     # relationship.
     attach_function :glyphes_link, %i[uint64 int64 string int64 pointer], :int32
+    attach_function :glyphes_link_props,
+                    %i[uint64 int64 string int64 string pointer], :int32
 
     attach_function :glyphes_cell_text, %i[pointer pointer uint64 pointer], :int32
     attach_function :glyphes_cell_id, %i[pointer pointer], :int32

@@ -333,6 +333,45 @@ suite "snapshot round-trip (WAL.md §4)":
     check w2.f == 0.25
     checkClean(s2)
 
+  test "a snapshot-only reopen publishes what readers scan":
+    ## `recover` loaded the snapshot into the store's own arrays and
+    ## returned without publishing them. Every full scan reads the
+    ## `published` bundle (store.nim), so a graph reopened after a
+    ## checkpoint and a close answered every query with zero rows while
+    ## `nodeCount` — and therefore `integrity_check` — still counted the
+    ## nodes. One post-checkpoint write hid it by publishing at commit,
+    ## which is why the snapshot round-trip above never saw it: it reads
+    ## through `getNodeProp`, not through a reader.
+    let path = freshPath("snap-publish.glyph")
+    let store = newStore()
+    let w = openWal(path & "-wal")
+    block:
+      let tx = begin(store, w, 1'u32, doSync = false)
+      for i in 0 ..< 4:
+        discard tx.createNode("Book")
+      discard tx.createEdge(1, 2, "NEXT")
+      check tx.commit()
+    writeSnapshot(store, path, uint64(w.nextLsn - 1))
+    closeWal(w)
+    let s2 = newStore()
+    check recover(path, s2).snapshotFound
+    ## The owning arrays are there — that is the half a broken fix would
+    ## leave green.
+    check s2.nodeCount() == 4
+    let snap = beginRead(s2)
+    var nodesSeen = 0
+    for i in 1 ..< snap.nodes.len:
+      if snap.nodes[i].live:
+        inc nodesSeen
+    var edgesSeen = 0
+    for i in 1 ..< snap.edges.len:
+      if snap.edges[i].live:
+        inc edgesSeen
+    endRead(snap)
+    check nodesSeen == 4
+    check edgesSeen == 1
+    checkClean(s2)
+
   test "a snapshot records the lsn it was written at":
     ## A snapshot that recorded lsn 0 would make every pre-checkpoint
     ## frame replay again on top of state that already contains it.

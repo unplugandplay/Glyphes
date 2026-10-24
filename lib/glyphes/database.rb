@@ -1,3 +1,4 @@
+require "json"
 require "glyphes/ident"
 require "glyphes/import_export"
 
@@ -251,6 +252,18 @@ module Glyphes
       out = FFI::MemoryPointer.new(:int64)
       Guard.check!(FFI::glyphes_link(@handle, from_id, type.to_s, to_id, out),
                    "link")
+      out.read_int64
+    end
+
+    # Same door, with edge properties in the same transaction. The bulk
+    # loader's path: `link` + per-edge Cypher SET is ~600 edges/s.
+    def link_props(from_id, type, to_id, props = {})
+      out = FFI::MemoryPointer.new(:int64)
+      Guard.check!(
+        FFI::glyphes_link_props(@handle, from_id, type.to_s, to_id,
+                                JSON.generate(props), out),
+        "link_props"
+      )
       out.read_int64
     end
 

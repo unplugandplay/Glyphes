@@ -611,6 +611,13 @@ proc recover*(graphPath: string, into: GraphStore): Recovery =
   if fileExists(graphPath):
     let bytes = readFile(graphPath)
     snapshotLsn = loadSnapshot(bytes, into).lsn
+    ## Publish the loaded arrays. `loadSnapshot` fills the store's own
+    ## fields; readers scan the `published` bundle. Without this line a
+    ## snapshot-only reopen (checkpoint then close, no WAL tail) answers
+    ## every full scan with zero rows while `integrity_check` still counts
+    ## the nodes — and a single post-checkpoint write masked it by
+    ## publishing at commit. Reproduced on the base build.
+    into.publish()
     result.snapshotFound = true
     result.snapshotLsn = snapshotLsn
     result.snapshotGeneration = into.generation

@@ -335,12 +335,32 @@ int32_t glyphes_gq_columns(GlyHandle stmt, char **out,
  * a missing endpoint instead of refusing it - so one write door is
  * smaller and more honest than a second execution path.
  *
- * A missing endpoint is refused by name. The edge is written through
- * the transaction, so it is in the log: an edge that a restart forgets
+ * A missing endpoint is refused by name, read through the caller's
+ * transaction when the door joins one — a node that transaction has
+ * just created is a valid end. The edge is written through the
+ * transaction, so it is in the log: an edge that a restart forgets
  * is not an edge. Joins an open transaction if there is one, and
  * commits its own otherwise (TXN.md). */
 int32_t glyphes_link(GlyHandle db, int64_t from_id, char *type,
                      int64_t to_id, int64_t *out_edge_id);
+
+/* Same door, plus edge properties in the same transaction. The bulk
+ * loader's path: `link` + a per-edge MATCH/SET is one query per edge,
+ * and that query's cost grows with the graph. props_json is an object,
+ * parsed with the same parameter parser as exec; a property that cannot
+ * be written refuses the edge. The endpoints follow `link`'s rule:
+ * committed nodes, or nodes the joined transaction has created. When
+ * this door owns the transaction the edge is rolled back with it; inside
+ * an open transaction the error is returned and the caller's rollback
+ * undoes it.
+ *
+ * Measured with tests/bench/bench_link_props.nim (`nimble benchLink`),
+ * one transaction: ~2·10⁶ edges/s for link, ~3·10⁵ for link_props with
+ * two properties, and ~3·10³ for link + a per-edge MATCH/SET over a
+ * 2·10³-edge batch — a rate that falls as the edge count rises. */
+int32_t glyphes_link_props(GlyHandle db, int64_t from_id, char *type,
+                           int64_t to_id, char *props_json,
+                           int64_t *out_edge_id);
 
 /* -- mutation without a transaction: autocommit -------------------- */
 

@@ -135,17 +135,17 @@ the planned next increment, not yet built.
 ### Verification state
 
 Verified **on the full gate (`nimble gate`)** — the counts below
-re-measured after the GLYPH BASIC final review, which added that
-language's tests to every suite it quotes:
+re-measured on the current tree, after the GLYPH BASIC final review and
+the link door's property form:
 
-- **591 Nim tests, 0 failures** — store, WAL, recovery, transactions,
+- **595 Nim tests, 0 failures** — store, WAL, recovery, transactions,
   Cypher, all three index families, the model layer's statement compiler,
   version history, the follower's watermark/timeline gates, and GLYPH
   BASIC's client (the golden transcript, the refusals, the values, the
-  program model). The same 591 also pass under `-d:glyphesCheck`, which
+  program model). The same 595 also pass under `-d:glyphesCheck`, which
   walks the S1/S2/S3/S4/S8
   invariants over every record each transaction touched.
-- **241 Ruby tests / 807 assertions, 0 failures** — the seam, the model
+- **244 Ruby tests / 816 assertions, 0 failures** — the seam, the model
   layer, import/export, status mapping.
 - `nimble tck` — the committed TCK subset: **161/161 in-contract rows
   pass, all 31 out-of-contract rows refuse by name.**
@@ -157,14 +157,15 @@ language's tests to every suite it quotes:
   corruption.
 - `nimble crashFollower` — SG7: a writer SIGKILLed mid-commit leaves the
   follower off by exactly the in-flight commit.
-- `nimble ss2` — SS2: no exported follower symbol can write (68 symbols
+- `nimble ss2` — SS2: no exported follower symbol can write (69 symbols
   checked clean).
 - `nimble ez80Test` — the eZ80 suite: **34/0**, including GLYPH BASIC's
   guest: the same script on both clients, byte for byte.
 - `nimble soak` — T1: 6 readers + 2 writers, no torn read.
 - `nimble benchSort` / `benchIndex` / `benchVector` / `benchImport` /
-  `benchVersion` — E2/E3, I5, I-vec (recall + determinism), R8, G2
-  (`diff` is O(changed), not O(graph)) gates green.
+  `benchLink` / `benchVersion` — E2/E3, I5, I-vec (recall + determinism),
+  R8, the link door's rates, G2 (`diff` is O(changed), not O(graph))
+  gates green.
 - `nimble asan` — both suites under AddressSanitizer.
 
 Two of the timing gates (M1 traversal, C9 query rate) are absolute
@@ -280,10 +281,10 @@ The full chronology, with the numbers, is [`DEVLOG.md`](DEVLOG.md).
 
 ```
 nimble build        the shared library (release, ORC, threaded)
-nimble test         591 Nim tests (fast)
-nimble testGate     591 Nim tests at full churn
+nimble test         595 Nim tests (fast)
+nimble testGate     595 Nim tests at full churn
 nimble fixture      rebuild tests/fixtures/social.glyph
-nimble gemtest      241 Ruby runs / 807 assertions
+nimble gemtest      244 Ruby runs / 816 assertions
 nimble crash        W1 crash gate
 nimble crashFollower  SG7: a writer SIGKILLed mid-commit leaves the follower off by exactly one
 nimble bitflip      W3 bit-flip sweep + W2 truncate sweep (GLYPHES_BITFLIPS=N)
@@ -296,6 +297,7 @@ nimble benchVersion G2: diff is O(nodes changed), not O(graph)
 nimble benchIndex   I5 range-index gate
 nimble benchVector  I-vec recall + determinism
 nimble benchImport  R8 import/export gate
+nimble benchLink    ABI.md: link / link_props / per-edge SET rates
 nimble ss2          SS2: no exported follower symbol can write
 nimble tck          C1: the TCK subset
 nimble gate         everything short, in order, stops at the first red
@@ -391,7 +393,7 @@ host client in Nim (`src/gbasic*.nim`, the prompt in
 to the host over a port channel. The gate is the transcript (GB-F): the
 same script on both clients must produce the same bytes, and a construct
 the guest does not have is its one-word `?` refusal, never a half-run.
-Measured: `nimble testGate` **591 / 0** (58 of them the client's own),
+Measured: `nimble testGate` **595 / 0** (58 of them the client's own),
 `nimble ez80Test` **34 / 0**, guest 6,522 bytes under the plan's 7 KB mark.
 
 The plan, cut by cut — and §10, the final review that walked both

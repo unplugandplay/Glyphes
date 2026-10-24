@@ -339,6 +339,112 @@ suite "GLYPH QUERY — the doors":
     discard glyphes_stmt_close(stmt)
     discard glyphes_close(dbh2)
 
+  test "link_props writes edge properties in the same crossing":
+    ## The bulk loader path: 10^6 edges cannot afford a MATCH/SET per edge.
+    let path = abiPath("link_props")
+    let dbh = openAbi(path)
+    var n: int64 = 0
+    var ana: int64 = 0
+    var bo: int64 = 0
+    check glyphes_exec_returning(dbh, "CREATE (n:person) RETURN id(n) AS id".cstring,
+                                 nil, addr n, addr ana) == 0
+    check glyphes_exec_returning(dbh, "CREATE (n:person) RETURN id(n) AS id".cstring,
+                                 nil, addr n, addr bo) == 0
+    var edgeId: int64 = 0
+    check glyphes_link_props(
+      dbh, ana, "SIMILAR_TO".cstring, bo,
+      "{\"weight\": 0.867, \"evidence\": \"iptv\"}".cstring, addr edgeId
+    ) == 0
+    check edgeId > 0
+
+    var buf: array[512, char]
+    var need: csize_t = 0
+    check glyphes_edge_props(dbh, edgeId, addr buf[0], csize_t(buf.len), addr need) == 0
+    let json = $cast[cstring](addr buf[0])
+    check "0.867" in json
+    check "iptv" in json
+    discard glyphes_close(dbh)
+
+  test "link_props joins the caller's transaction and refuses a bad map":
+    ## Two things the happy path cannot see. The door joins an open
+    ## transaction, so a rollback undoes the edge — it never commits
+    ## behind the caller's back. And a property map that is not a JSON
+    ## object is refused before a transaction opens, so there is no edge
+    ## to roll back either.
+    let path = abiPath("link_props_tx")
+    let dbh = openAbi(path)
+    var n: int64 = 0
+    var ana: int64 = 0
+    var bo: int64 = 0
+    check glyphes_exec_returning(dbh,
+      "CREATE (n:person) RETURN id(n) AS id".cstring, nil, addr n, addr ana) == 0
+    check glyphes_exec_returning(dbh,
+      "CREATE (n:person) RETURN id(n) AS id".cstring, nil, addr n, addr bo) == 0
+
+    var tx: GlyHandle
+    check glyphes_tx_begin(dbh, addr tx) == 0
+    var edgeId: int64 = 0
+    check glyphes_link_props(dbh, ana, "KNOWS".cstring, bo,
+                             "{\"weight\": 1.5}".cstring, addr edgeId) == 0
+    check edgeId > 0
+    check glyphes_tx_rollback(dbh, tx) == 0
+    var got: int64 = 0
+    check glyphes_exec_returning(dbh,
+      "MATCH ()-[r:KNOWS]->() RETURN count(r) AS n".cstring, nil,
+      addr n, addr got) == 0
+    check got == 0
+
+    var refused: int64 = 0
+    check glyphes_link_props(dbh, ana, "KNOWS".cstring, bo,
+                             "[]".cstring, addr refused) != 0
+    check "JSON object" in globalErrorMsg()
+    check refused == 0
+    check glyphes_exec_returning(dbh,
+      "MATCH ()-[r:KNOWS]->() RETURN count(r) AS n".cstring, nil,
+      addr n, addr got) == 0
+    check got == 0
+    discard glyphes_close(dbh)
+
+  test "the link doors see the transaction's own writes":
+    ## The doors join an open transaction, and a node created in that
+    ## transaction is not in the store's arrays until commit. Checking
+    ## the store refused both ends by name even though `createEdge`
+    ## validates through `nodeExistsTx` and would have written the edge:
+    ## a loader that creates and links in one transaction could not.
+    let path = abiPath("link_same_tx")
+    let dbh = openAbi(path)
+    var tx: GlyHandle
+    check glyphes_tx_begin(dbh, addr tx) == 0
+    var n: int64 = 0
+    var ana: int64 = 0
+    var bo: int64 = 0
+    check glyphes_exec_returning(dbh,
+      "CREATE (n:person) RETURN id(n) AS id".cstring, nil, addr n, addr ana) == 0
+    check glyphes_exec_returning(dbh,
+      "CREATE (n:person) RETURN id(n) AS id".cstring, nil, addr n, addr bo) == 0
+    check ana > 0 and bo > 0
+
+    var plain: int64 = 0
+    check glyphes_link(dbh, ana, "KNOWS".cstring, bo, addr plain) == 0
+    check plain > 0
+    var weighted: int64 = 0
+    check glyphes_link_props(dbh, ana, "SIMILAR_TO".cstring, bo,
+                             "{\"weight\": 0.5}".cstring, addr weighted) == 0
+    check weighted > 0
+    check glyphes_tx_commit(dbh, tx) == 0
+
+    var edges: int64 = 0
+    check glyphes_exec_returning(dbh,
+      "MATCH ()-[r]->() RETURN count(r) AS n".cstring, nil,
+      addr n, addr edges) == 0
+    check edges == 2
+    var buf: array[256, char]
+    var need: csize_t = 0
+    check glyphes_edge_props(dbh, weighted, addr buf[0], csize_t(buf.len),
+                             addr need) == 0
+    check "0.5" in $cast[cstring](addr buf[0])
+    discard glyphes_close(dbh)
+
   test "the link door refuses a missing node by name":
     let path = abiPath("missing")
     let dbh = openAbi(path)

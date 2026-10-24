@@ -73,6 +73,81 @@ class GqTest < Minitest::Test
     end
   end
 
+  def test_link_props_writes_properties_with_the_edge
+    ## The bulk loader path: 10^6 edges cannot afford a MATCH/SET per edge.
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "link_props.glyph")
+      db = Glyphes::Database.open(path, create: true)
+      begin
+        db.exec("CREATE (a:Person) RETURN id(a) AS id")
+        db.exec("CREATE (b:Person) RETURN id(b) AS id")
+        ids = db.query("MATCH (n:Person) RETURN id(n) AS id").to_a.map { |r| r.first.to_i }
+        edge = db.link_props(ids[0], "SIMILAR_TO", ids[1],
+                             "weight" => 0.867, "evidence" => "iptv")
+        assert_operator edge, :>, 0
+        row = db.query(
+          "MATCH (a)-[r:SIMILAR_TO]->(b) " \
+          "RETURN r.weight AS weight, r.evidence AS evidence"
+        ).first
+        assert_in_delta 0.867, row[0], 1e-6
+        assert_equal "iptv", row[1]
+      ensure
+        db.close
+      end
+    end
+  end
+
+  def test_link_props_reads_the_transaction_view
+    ## A node created inside the transaction is not in the store until
+    ## commit. The door joins the transaction, so it must see what the
+    ## transaction sees; checking the store refused a loader's own nodes.
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "link_tx.glyph")
+      db = Glyphes::Database.open(path, create: true)
+      begin
+        edge = nil
+        db.transaction do
+          _, a = db.exec_returning("CREATE (n:Person) RETURN id(n) AS id")
+          _, b = db.exec_returning("CREATE (n:Person) RETURN id(n) AS id")
+          edge = db.link_props(a, "SIMILAR_TO", b, "weight" => 0.25)
+        end
+        assert_operator edge, :>, 0
+        row = db.query("MATCH ()-[r:SIMILAR_TO]->() RETURN r.weight AS w").first
+        assert_in_delta 0.25, row[0], 1e-6
+      ensure
+        db.close
+      end
+    end
+  end
+
+  def test_a_checkpoint_only_reopen_sees_the_snapshot_nodes
+    ## Regression: recover() loaded the snapshot into the store but did
+    ## not publish the arrays, so a checkpoint + close reopened with every
+    ## scan at zero while integrity_check counted the nodes. A post-
+    ## checkpoint write masked it by publishing at commit.
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "checkpoint.glyph")
+      db = Glyphes::Database.open(path, create: true)
+      begin
+        db.transaction do
+          db.exec("UNWIND $rows AS row CREATE (:Book {sid: row.sid})",
+                  { "rows" => [{ "sid" => 1 }, { "sid" => 2 }] })
+        end
+        db.checkpoint(truncate: true, fsync: true)
+      ensure
+        db.close
+      end
+
+      reopened = Glyphes::Database.open(path, readonly: true)
+      begin
+        assert_equal 2, reopened.query("MATCH (n) RETURN count(n) AS n").first.first
+        assert_equal 2, reopened.query("MATCH (n:Book) RETURN count(n) AS n").first.first
+      ensure
+        reopened.close
+      end
+    end
+  end
+
   def test_the_link_door_refuses_a_missing_node_by_name
     Dir.mktmpdir do |dir|
       path = File.join(dir, "missing.glyph")

@@ -1543,15 +1543,25 @@ proc glyphes_link*(hDb: GlyHandle, fromId: int64, rtype: cstring,
     ## one is refused by name: a link to a node that is not there is not
     ## a link, and an edge pointing at nothing is a dangling edge the
     ## commit would have to reject anyway.
-    if not db.store.nodeExists(fromId):
-      fail(glyErr, "glyphes_link: no node " & $fromId)
-    if not db.store.nodeExists(toId):
-      fail(glyErr, "glyphes_link: no node " & $toId)
+    ##
+    ## The lookup uses the view the write will use. A door that joins an
+    ## open transaction must see the nodes that transaction has already
+    ## created — they are not in the store's arrays until commit, and
+    ## `createEdge` itself validates through `nodeExistsTx`. Checking the
+    ## store unconditionally refused a loader's own nodes by name.
     let joined = db.writerTx != 0
     var tx: WriteTransaction
     if joined:
       tx = lookup[WriteTransaction](db.writerTx, hkTransaction)
+      if not tx.nodeExistsTx(fromId):
+        fail(glyErr, "glyphes_link: no node " & $fromId)
+      if not tx.nodeExistsTx(toId):
+        fail(glyErr, "glyphes_link: no node " & $toId)
     else:
+      if not db.store.nodeExists(fromId):
+        fail(glyErr, "glyphes_link: no node " & $fromId)
+      if not db.store.nodeExists(toId):
+        fail(glyErr, "glyphes_link: no node " & $toId)
       tx = db.beginTransaction()
     try:
       ## Through the *transaction*, not the store: the store's
@@ -1560,6 +1570,73 @@ proc glyphes_link*(hDb: GlyHandle, fromId: int64, rtype: cstring,
       let id = tx.createEdge(fromId, toId, typeName)
       if id == 0:
         fail(glyErr, "glyphes_link: cannot link " & $fromId & " to " & $toId)
+      if not joined:
+        discard db.commitTransaction(tx)
+      outEdgeId[] = id
+      int32(glyOk)
+    except CatchableError:
+      if not joined:
+        discard db.rollbackTransaction(tx)
+      raise
+
+proc glyphes_link_props*(hDb: GlyHandle, fromId: int64, rtype: cstring,
+                         toId: int64, propsJson: cstring,
+                         outEdgeId: ptr int64): int32
+    {.cdecl, exportc, dynlib.} =
+  ## `glyphes_link` plus edge properties in the same transaction. A
+  ## per-edge Cypher `MATCH … SET r.weight` is a query per edge (~3·10³
+  ## edges/s over a 2·10³-edge batch here, and slower as the graph
+  ## grows); a 10^6-edge load cannot pay that. Properties are parsed with
+  ## the same parameter parser as `glyphes_exec` (JSON object, data never
+  ## in statement text).
+  ##
+  ## The endpoints follow `glyphes_link`'s rule: the lookup reads the
+  ## transaction's view when the door joins one, so a node created
+  ## earlier in that transaction is a valid end.
+  if outEdgeId == nil:
+    setGlobalError("glyphes_link_props: out_edge_id is null")
+    return int32(glyErr)
+  outEdgeId[] = 0
+  if not isLive(hDb) or not isKind(hDb, hkDatabase):
+    setGlobalError("glyphes_link_props: stale database handle")
+    return int32(glyErrStale)
+  if rtype == nil:
+    setGlobalError("glyphes_link_props: type is null")
+    return int32(glyErr)
+  guarded("glyphes_link_props"):
+    let db = lookup[Database](hDb, hkDatabase)
+    db.assertOpen
+    let typeName = $rtype
+    if typeName.len == 0:
+      fail(glyErr, "glyphes_link_props: the relationship type is empty")
+    var props = initTable[string, Value]()
+    if propsJson != nil:
+      let text = $propsJson
+      if text.strip != "":
+        props = parseParamsJson(text)
+    ## The view the write will use; see `glyphes_link` for why the store
+    ## alone is not it.
+    let joined = db.writerTx != 0
+    var tx: WriteTransaction
+    if joined:
+      tx = lookup[WriteTransaction](db.writerTx, hkTransaction)
+      if not tx.nodeExistsTx(fromId):
+        fail(glyErr, "glyphes_link_props: no node " & $fromId)
+      if not tx.nodeExistsTx(toId):
+        fail(glyErr, "glyphes_link_props: no node " & $toId)
+    else:
+      if not db.store.nodeExists(fromId):
+        fail(glyErr, "glyphes_link_props: no node " & $fromId)
+      if not db.store.nodeExists(toId):
+        fail(glyErr, "glyphes_link_props: no node " & $toId)
+      tx = db.beginTransaction()
+    try:
+      let id = tx.createEdge(fromId, toId, typeName)
+      if id == 0:
+        fail(glyErr, "glyphes_link_props: cannot link " & $fromId & " to " & $toId)
+      for key, value in props:
+        if not tx.setEdgeProp(id, key, value):
+          fail(glyErr, "glyphes_link_props: cannot set property " & key)
       if not joined:
         discard db.commitTransaction(tx)
       outEdgeId[] = id

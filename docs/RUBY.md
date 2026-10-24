@@ -162,6 +162,9 @@ db.stats                                      # → Hash
 db.schema(labels: true, properties: true, indexes: true) → Hash
 db.backup("graph-2026-10-07.glyph")
 
+db.link(from_id, type, to_id) → edge id       # two *existing* nodes
+db.link_props(from_id, type, to_id, props) → edge id  # …and properties
+
 db.index_create(kind: :vector, label: "Doc", property: "embedding",
                 dim: 768, metric: :cosine, m: 16, ef_construction: 200)
 db.index_drop("Doc.embedding")
@@ -176,6 +179,12 @@ fsync:)`, `wal_size`, `backup(path)` (checkpoint-then-copy, so the
 destination is a consistent pair — WAL.md §3), `vacuum` (rebuild every
 index from live records, INDEX.md I14 — explicit because `close` must not
 do it), `schema(labels:, properties:, indexes:)` and `stats`.
+
+**The link doors.** `link` and `link_props` are the one write GLYPH QUERY
+cannot express — two existing nodes, one relationship, no join and no
+cartesian (ABI.md). `link_props` carries the edge's properties in the same
+crossing; without it a bulk loader pays a MATCH/SET per edge, and the
+measured difference is two orders of magnitude (`nimble benchLink`).
 
 `checkpoint(truncate: true)` dropping every frame the new snapshot
 already contains is the one with teeth: a checkpoint snapshots at the

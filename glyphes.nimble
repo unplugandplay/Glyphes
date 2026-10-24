@@ -203,6 +203,14 @@ task benchImport, "M9 import/export benchmark (RUBY.md R8: 10^6-row CSV, Parquet
   ## 10^6).
   exec "ruby tests/bench/bench_import.rb"
 
+task benchLink, "link_props: the bulk loader's door (docs/ABI.md)":
+  ## The rates the ABI's `glyphes_link_props` comment quotes: re-run them
+  ## rather than believe them. 10^5 edges for the two doors; 2*10^3 for
+  ## the per-edge MATCH/SET, because that path's cost grows with the edge
+  ## count and a larger N measures the graph, not the door.
+  exec "nim c -d:release --mm:atomicArc --threads:on --passC:\"-I./src\" -o:tmp/bench_link_props tests/bench/bench_link_props.nim"
+  exec "./tmp/bench_link_props"
+
 task benchVersion, "M11 versioning benchmark: diff is O(changed), not O(graph)":
   ## G2, and the measurement that decides whether versioning is worth
   ## building at all. Two commits touching the same number of nodes, on
@@ -308,6 +316,7 @@ task gate, "Everything CI runs":
   exec "nimble benchIndex"
   exec "nimble benchVector"
   exec "nimble benchImport"
+  exec "nimble benchLink"
   exec "nimble tck"
 
 task ez80Test, "eZ80: the CPU's test suite (Z80 compatibility + the eZ80's own features)":
